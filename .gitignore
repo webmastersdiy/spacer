@@ -30,3 +30,49 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Gas City beads workspace (track only config + metadata)
+.beads/*
+!.beads/config.yaml
+!.beads/metadata.json
+
+# macOS junk
+.DS_Store
+
+# Session / runtime state
+.runtime/
+.gc/tmp/
+
+# Daemon binaries, datadirs, credentials (all of arbiter/ is non-source)
+arbiter/
+
+# Local Go SDK / module cache
+go/
+go-cache/
+
+# Embedded repo (separate project, has its own .git)
+first-game/
+
+# Symlinks to skills installed outside this repo (absolute paths, machine-specific)
+.claude/skills/core.*
+
+# Test-harness ephemera (only scripts/ at top-level is source)
+test-harness/bin/
+test-harness/cache/
+test-harness/downloads/
+test-harness/ldk-data/
+test-harness/python/
+test-harness/state/
+test-harness/venv/
+
+# Credentials (defense-in-depth, in case any escape the directory ignores)
+*.macaroon
+*.tls.cert
+*.key
+*.pem
+.env
+.env.*

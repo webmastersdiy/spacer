@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Throwaway wrapper: lncli pointed at Voltage node A (first-test).
+exec "$HOME/spacer/arbiter/bin/lncli" \
+  --rpcserver=first-test.u.voltageapp.io:10009 \
+  --tlscertpath="$HOME/spacer/arbiter/lnd/first-test.tls.cert" \
+  --macaroonpath="$HOME/spacer/arbiter/lnd/first-test.admin.macaroon" \
+  --network=signet \
+  "$@"

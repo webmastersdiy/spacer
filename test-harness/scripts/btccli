@@ -1,0 +1,4 @@
+#!/bin/sh
+# Convenience wrapper around bitcoin-cli that pre-fills -datadir.
+# Usage: btccli getblockchaininfo, btccli -named sendtoaddress address=... amount=...
+exec ~/spacer/arbiter/bin/bitcoin-cli -datadir="$HOME/spacer/arbiter/bitcoin" "$@"
