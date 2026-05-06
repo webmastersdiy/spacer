@@ -178,8 +178,8 @@ The privacy gateway is the primary AI-facing defense; world-facing mitigations (
 - **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / lost-or-expired / others?) and how each is signaled. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
 - **HITL channel sharing.** Whether [HITL approval](../GLOSSARY.md#human-in-the-loop-approval) requests and assents travel on the same out-of-band plumbing as result delivery, or a dedicated separate one. Both are out-of-band relative to the petitioner's RPC channel, but they may or may not share transport.
 - **Policy table format.** The schema for the [outbound allowlist](../GLOSSARY.md#outbound-allowlist)'s policy tables: how destinations and amounts are expressed, how staleness is handled, how new entries are added without leaking the change to the AI. Source: outbound allowlist status callout.
-- **Channel-open timing threat model.** Whether the action/result delay floors are enough to defeat [JIT liquidity](../GLOSSARY.md#jit-liquidity) fingerprints or whether channel-open needs an additional, longer-window timing rule. Source: JIT liquidity status callout.
 - **Dynamic window calculation.** The algorithm by which the arbiter observes "global activity for similar actions" and converts it into a window. Includes: what counts as "similar," where the observation comes from (gossip, mempool, block stats, esplora?), and how the parameters are bounded so the window itself does not become a fingerprint.
+- **Band-edge randomization for aggregate counts.** How the arbiter randomizes anonymity-set bucket boundaries (per [Aggregate-by-default](../GLOSSARY.md#aggregate-by-default) and [JIT liquidity](../GLOSSARY.md#jit-liquidity)) so that band transitions cannot be triangulated back to specific underlying events: scheme for choosing per-arbiter offsets, how often they rotate, how they avoid becoming a fingerprint themselves.
 
 ---
 

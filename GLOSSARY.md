@@ -589,21 +589,29 @@ because no individual call shows them.
 
 ### Latency fingerprinting
 
-> **TODO (review needed):** reconsider whether this term is still
-> necessary now that **Action delay** and **Result delay** exist
-> with ~12 hour floors. Per-response timing leaks may be dominated
-> by the per-action delay. Decide: keep, drop, or fold into the
-> action/result delay framing.
-
 Response time correlates with hop count (LN), with index
 configuration (bitcoind), with mempool vs. confirmed-block lookup,
 and with IBD state. An AI issuing many calls and observing latency
-distributions can derive properties the gateway intended to hide.
-Mitigation: state-changing calls are decoupled from their effects
-by **Action delay** + **Result delay** (the AI sees only an
-acknowledgment, not a synchronous outcome); pure read paths can
-batch responses into windows or fold into the same result-delivery
-path so per-call latency does not reach the petitioner directly.
+distributions could in principle derive properties the gateway
+intended to hide.
+
+In Spacer this leak is closed by the timing layer rather than by
+per-response normalization. All hop-count, indexing, mempool-lookup,
+and IBD-state variation is internal to the arbiter; **Action delay**
+and **Result delay** absorb that variation by completing the work
+before the delay window expires and surfacing only the result. The
+petitioner sees an acknowledgment immediately, then a single result
+event after the delay, with no per-call latency channel exposed.
+
+If bitcoind / LND are down or a request legitimately cannot
+complete within the delay window, the petitioner receives a
+generic "failed temporary (try again)" after the delay elapses.
+This deliberately exposes that *something* in the arbiter is not
+operational, but does not reveal which component or why. Documented
+tradeoff: the operator should ensure the arbiter is healthy before
+engaging the petitioner; intermittent unavailability is observable
+in aggregate but does not narrow the leak below the
+arbiter-as-a-whole granularity.
 
 ### Polling cadence
 
@@ -628,30 +636,34 @@ multi-peer broadcast) rather than gateway filters.
 
 ### JIT liquidity
 
-> **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (channel-open timing threat model).
-
 Just-in-time liquidity. Opening a channel immediately before a
 payment and observing that the channel did not exist in the
 previous `listchannels` result. Recognizable to the AI through the
 sequence of API states it observes; recognizable to chain observers
 through the funding tx's timing relative to payment activity.
 
-See also: [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions).
+In Spacer the AI-facing side of this leak is closed by the
+combination of **Aggregate-by-default** (channel counts come back
+banded into anonymity-set buckets, not exact integers) and the
+multi-hour **Action delay** / **Result delay** windows. The AI
+never observes a precise channel count, and any change in observed
+state trails the underlying event by hours, so the
+"channel did not exist before, exists now, payment followed"
+sequence is no longer directly recoverable.
 
-### Inter-event timing
+To prevent the petitioner from triangulating band boundaries (e.g.
+inferring that a band crossing must correspond to exactly one new
+channel), the band edges are themselves randomized within the
+arbiter's local state. Adding a channel sometimes pushes the
+reported band up; sometimes the same operation leaves the reported
+band unchanged. Over many observations the petitioner cannot fit a
+deterministic boundary to the underlying count, so band transitions
+do not function as event signals.
 
-> **TODO (review needed):** reconsider whether this term is still
-> necessary now that **Action delay** and **Result delay** exist
-> with ~12 hour floors. The request-to-broadcast gap is now
-> dictated by the per-action delay rather than by the AI's
-> behavior. Decide: keep, drop, or fold into the action/result
-> delay framing.
-
-The gap between a request arriving and the resulting on-chain
-broadcast. Sub-second gap = bot. Multi-second variance = human.
-Visible to the AI through gateway response latency. Conversely, the
-gateway can deliberately spoof human-like timing as a mitigation, at
-the cost of throughput.
+The world-facing side of this leak (chain observers correlating a
+funding tx with downstream payment activity) is a separate threat
+model, addressed in
+`design-docs/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ## Inherent leaks
 
