@@ -523,18 +523,21 @@ similar actions for the anonymity set to actually hold.
 
 ### Result delay
 
-> **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (result delivery mechanism, result-delivery status enum).
+> **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (result-delivery status enum).
 
 Mandatory wait between the arbiter completing an action and the
 petitioner learning the result. After the action goes out, the
 petitioner does NOT get a synchronous "ok, here is the txid / here
 is the payment_hash / success/failure" - it gets nothing for at
 least the secondary wait window. Result delivery is therefore
-asynchronous: the petitioner polls or receives a callback after the
-window elapses, not in response to the original action. Sibling to
-**Action delay**: same window construction, same ~12 hour hard
-floor; randomized within bounds driven by observed network activity
-for similar result-shapes.
+asynchronous via a pull-only result mailbox: the petitioner polls
+the mailbox (not the original action) and gets either "result" or
+"not yet," nothing in between. The privacy gateway enforces a
+10-minute minimum interval between checks for a given handle.
+Sibling to **Action delay**: same window construction, same ~12
+hour hard floor; randomized within bounds driven by observed
+network activity for similar result-shapes. See [Architecture
+overview, §4.8](design-docs/2026-05-05-0948-architecture-overview.md#48-result-mailbox).
 
 Purpose: a second layer of de-correlation. Even if a global observer
 eventually links the on-chain action back to our node, the AI's

@@ -72,7 +72,10 @@ AI
   |
   v
 [privacy gateway]                         (filter outbound result; band, tokenize, redact)
-  |  asynchronous delivery (poll or callback; see open questions)
+  |  deposit into result mailbox
+  v
+[result mailbox]                          (pull-only, 10-min poll floor; §4.8)
+  |  petitioner polls; "result" or "not yet", nothing in between
   v
 [petitioner]
   |
@@ -167,6 +170,20 @@ On a successful add the arbiter prints the entry's local-only numeric ID and the
 - The numeric `id` is local-only by intent, but anything the operator writes down or speaks aloud while reading it from the console is outside the trust boundary. Operator-side discipline is part of the security surface.
 - The 7-day default expiry trades usability (longer = more time to actually send) against exposure window (shorter = real-address mapping discarded sooner). Tunable at creation; not yet measured against real workflows.
 
+### 4.8 Result mailbox
+
+The petitioner-facing endpoint for asynchronous result delivery. After the [result delay](../GLOSSARY.md#result-delay) window elapses, the privacy gateway deposits the (filtered, banded, tokenized) result into a per-handle mailbox. The petitioner retrieves it by polling.
+
+**Pull-only.** The arbiter never initiates contact with the petitioner; the petitioner asks. There is no callback, no push, no notification channel. This keeps every outbound timing signal on the petitioner side and avoids any arbiter-initiated traffic that could correlate with internal completions.
+
+**Binary state.** A check returns either the result for a given handle or "not yet." There is no "in progress," no "running," no progress percentage, no estimated time remaining. The petitioner reasons about elapsed time entirely from its own local estimate (§5.2).
+
+**10-minute poll floor.** Successive checks for the same handle by the same petitioner are throttled to a minimum interval of **10 minutes**. The privacy gateway enforces the floor; check requests issued more frequently get the same "not yet" response without consulting state, so a checking cadence faster than 10 min reveals nothing the cadence at 10 min would not. The 10-min floor (a) matches the natural bitcoin block cadence, (b) pins polling resolution well below any inference precision useful against the multi-hour delay window, (c) flattens result-shape-specific cadences so chain-vs-LN cannot be inferred from polling rhythm, and (d) caps the load the AI can put on the gateway by check-storming.
+
+**Idempotent retrieval.** A successful retrieval marks the entry consumed. Subsequent checks for the same handle return "not yet" indistinguishably from a never-existed handle, so the petitioner cannot replay a result by re-asking and a handle that was retrieved cannot be distinguished from a handle that never existed.
+
+**Caveat.** The mailbox handle (the opaque acknowledgment string returned at submission time) is itself a stable identifier and links submission to retrieval. The petitioner can correlate "I submitted with handle H, then later got a result for H." This is intentional - the AI must be able to find its own results - but it means the handle is sensitive on the petitioner side; if it leaks elsewhere (e.g., into another AI's context), that other party can probe for the result.
+
 ---
 
 ## 5. Components on the petitioner
@@ -207,8 +224,7 @@ The privacy gateway is the primary AI-facing defense; world-facing mitigations (
 
 ## 7. Open design questions
 
-- **Result delivery mechanism.** Poll, callback, mailbox, or some combination. Source: [result delay](../GLOSSARY.md#result-delay) ("the petitioner polls or receives a callback").
-- **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / lost-or-expired / others?) and how each is signaled. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
+- **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / "failed temporary (try again)" per the [Latency fingerprinting](../GLOSSARY.md#latency-fingerprinting) entry / others?) and how each is signaled inside the [result mailbox](#48-result-mailbox)'s "result or not yet" envelope. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
 - **HITL channel sharing.** Whether [HITL approval](../GLOSSARY.md#human-in-the-loop-approval) requests and assents travel on the same out-of-band plumbing as result delivery, or a dedicated separate one. Both are out-of-band relative to the petitioner's RPC channel, but they may or may not share transport.
 - **Policy table format.** The schema for the [outbound allowlist](../GLOSSARY.md#outbound-allowlist)'s policy tables: how destinations and amounts are expressed, how staleness is handled, how new entries are added without leaking the change to the AI. Source: outbound allowlist status callout.
 - **Dynamic window calculation.** The algorithm by which the arbiter observes "global activity for similar actions" and converts it into a window. Includes: what counts as "similar," where the observation comes from (gossip, mempool, block stats, esplora?), and how the parameters are bounded so the window itself does not become a fingerprint.
