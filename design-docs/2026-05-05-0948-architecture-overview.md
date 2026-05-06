@@ -196,6 +196,8 @@ Arbiter-side storage for pending and completed results - and for delayed rejecti
 
 The only first-class function of the [petitioner](../GLOSSARY.md#petitioner) is translating AI requests into spacer-protocol messages and presenting the arbiter's responses back. It holds no secrets, no policy, no state that the AI cannot already reach.
 
+The petitioner is exposed to the AI as a single CLI tool named **`pet`**. The implementer is asked to organize `pet` as a nested tree of commands and subcommands with informative `--help` at every node, so the AI can discover available operations by walking the help output rather than relying on external documentation. The specific command shape - which commands, what subcommand structure, what flags - is deliberately not enumerated in this doc; that is an implementation decision.
+
 ### 5.2 Estimate display
 
 Because [result delay](../GLOSSARY.md#result-delay) makes results asynchronous, the petitioner needs an estimate of total elapsed time (action delay + result delay) so the AI can reason about the decision tree:
