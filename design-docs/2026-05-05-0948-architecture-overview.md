@@ -113,7 +113,7 @@ Wrapped access to LND over `lncli` plus gRPC/REST. The current testbed wrapper [
 
 Holds:
 
-- The token-to-real mapping that backs [pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization).
+- The token-to-real mapping that backs [pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization). For outbound recipient destinations specifically, this is the [recipient address registry](#47-recipient-address-registry) described in §4.7.
 - The policy tables that back the [outbound allowlist](../GLOSSARY.md#outbound-allowlist).
 - The pending [HITL approval](../GLOSSARY.md#human-in-the-loop-approval) queue.
 - Any pending action+result deferrals being tracked by the timing layer.
@@ -132,6 +132,34 @@ The arbiter component that enforces both anonymity-set delays:
 - [Result delay](../GLOSSARY.md#result-delay): wait between the arbiter completing the action and the petitioner being able to learn the result. Same window construction, same ~12h floor, computed against observed network activity for similar result-shapes.
 
 The dynamic window calculation observes global activity for actions or results of the same shape and stretches or compresses the window to keep the anonymity set above a target. Constant or naive parameters defeat the mechanism (the distribution itself becomes a fingerprint), so the calculation is part of the security surface, not just a tuning knob.
+
+### 4.7 Recipient address registry
+
+Manages the pseudonymized handles the petitioner uses to refer to Bitcoin and Lightning destinations the operator has approved as send targets. Concrete implementation of [pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization) for outbound destinations, combined with one-time-use enforcement and an explicit human-driven creation flow.
+
+**Entry creation.** Real recipient addresses (Bitcoin addresses, BOLT-11 invoices, BOLT-12 offers, or LN node pubkeys depending on the send type) enter the registry **only** via direct human interaction with the arbiter: a keyboard and monitor physically connected to the arbiter host. The petitioner has no way to add an entry; the AI never sees the real address. The operator runs a registry-add command at the console and pastes the real address; the arbiter creates a new entry and prints back the entry's local-only numeric ID and the public-facing token.
+
+**Entry shape (logical).**
+
+- `id`: monotonically increasing local sequence number (1, 2, 3, ...), assigned at creation. **Local-only.** Never crosses the privacy gateway, never appears in petitioner-visible responses. It exists so the operator at the console can refer to "address number 42" in their own notes - giving the human a stable, ordered, easy-to-speak handle without exposing creation order to the petitioner.
+- `token`: short randomly-generated alphanumeric string. This is the **only** handle the petitioner sees. Length is chosen so the namespace is large enough to keep collisions improbable while staying short enough for a human to retype; exact length is open (§7).
+- `real`: the actual destination (Bitcoin address or LN invoice / offer / pubkey). Held only on the arbiter; subject to [hide secrets](../GLOSSARY.md#hide-secrets).
+- `created_at` / `expires_at`: timestamp pair. Default expiry is `created_at + 7 days` if the entry has not been used by then; operator can override at creation.
+- `used`: boolean, default `false`. Flipped to `true` on the first successful send against this entry and never flipped back.
+- `consumed_by`: when `used == true`, the txid (Bitcoin) or payment hash (Lightning) that consumed the entry, for audit traceability.
+
+**Token generation.** Tokens are drawn uniformly at random from a fixed character set with no visually ambiguous characters (no `0/O`, no `1/I/l`). On creation the arbiter checks for token-namespace collisions and re-rolls until it finds a free token. The sequential numeric `id` is indexed independently of `token` and cannot collide.
+
+**One-time use.** Every send-to-token call is gated on `used == false` and `expires_at > now`. On a successful send the arbiter sets `used = true` and records `consumed_by`. Subsequent sends to the same token are refused. This prevents on-chain / on-LN address reuse independent of operator discipline: the petitioner cannot reuse a destination even if it remembers the token.
+
+**Refusal behavior.** When the petitioner submits a send to a token that does not exist, has expired, or has already been used, the arbiter returns a single generic "destination unavailable" response that does not differentiate the cases. Differentiating them would let the petitioner probe registry state by submission.
+
+**Namespace pressure and cleanup.** Used and expired entries are retained by default for audit and operator tracking; the registry is not aggressive about garbage-collecting them. The arbiter monitors namespace utilization (live entry count / token-namespace size) and warns the operator when it crosses **1%**. At that point the operator manually removes old entries to keep collision probability and re-roll cost low. With a sensibly-sized token length this threshold is rarely reached in practice; cleanup is an operator decision, not a hot-path concern.
+
+**Caveats.**
+
+- The numeric `id` is local-only by intent, but anything the operator writes down or speaks aloud while reading it from the console is outside the trust boundary. Operator-side discipline is part of the security surface.
+- The 7-day default expiry trades usability (longer = more time to actually send) against exposure window (shorter = real-address mapping discarded sooner). Tunable at creation; not yet measured against real workflows.
 
 ---
 
@@ -157,7 +185,7 @@ The petitioner computes this estimate locally. It estimates the anonymity set si
 
 Where each glossary mitigation fires in the data flow.
 
-- [Pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization): privacy gateway, on outbound responses. The token-to-real mapping lives in arbiter local state.
+- [Pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization): privacy gateway, on outbound responses. The token-to-real mapping lives in arbiter local state. Outbound recipient destinations are handled by the [recipient address registry](#47-recipient-address-registry) (§4.7), which adds one-time-use enforcement and a human-driven creation flow on top of the pseudonymize mapping.
 - [Banding](../GLOSSARY.md#banding-numeric-value-banding): privacy gateway, on outbound responses to balance / amount / fee fields.
 - [Outbound allowlist](../GLOSSARY.md#outbound-allowlist): privacy gateway, on every state-changing or network-touching call before it reaches bitcoind/LND. Backed by policy tables in local state.
 - [Human-in-the-loop approval](../GLOSSARY.md#human-in-the-loop-approval): triggered by the privacy gateway when an inbound call falls outside the allowlist fast path; the call parks in the HITL queue (local state) until an out-of-band human assent arrives. The out-of-band channel is intentionally not the petitioner's RPC channel; whether it shares plumbing with result delivery is open (§7).
@@ -180,6 +208,8 @@ The privacy gateway is the primary AI-facing defense; world-facing mitigations (
 - **Policy table format.** The schema for the [outbound allowlist](../GLOSSARY.md#outbound-allowlist)'s policy tables: how destinations and amounts are expressed, how staleness is handled, how new entries are added without leaking the change to the AI. Source: outbound allowlist status callout.
 - **Dynamic window calculation.** The algorithm by which the arbiter observes "global activity for similar actions" and converts it into a window. Includes: what counts as "similar," where the observation comes from (gossip, mempool, block stats, esplora?), and how the parameters are bounded so the window itself does not become a fingerprint.
 - **Band-edge randomization for aggregate counts.** How the arbiter randomizes anonymity-set bucket boundaries (per [Aggregate-by-default](../GLOSSARY.md#aggregate-by-default) and [JIT liquidity](../GLOSSARY.md#jit-liquidity)) so that band transitions cannot be triangulated back to specific underlying events: scheme for choosing per-arbiter offsets, how often they rotate, how they avoid becoming a fingerprint themselves.
+- **Recipient address registry token format.** Token length and character set for the [recipient address registry](#47-recipient-address-registry) (§4.7): the tradeoff between human-retypeable shortness and namespace size large enough that the 1% cleanup warning is rarely hit. Includes the choice of unambiguous-character alphabet.
+- **Recipient address registry refusal severity.** Whether the audit log differentiates "token does not exist" / "token expired" / "token already used" even though the petitioner-visible response is uniformly "destination unavailable" (§4.7). Differentiating in audit only would help the operator triage suspicious activity without giving the petitioner a probe channel.
 
 ---
 
