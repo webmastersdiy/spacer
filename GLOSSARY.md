@@ -422,13 +422,23 @@ See also: [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-
 
 When a proposed state-changing call falls outside the allowlist
 fast path - new destination, unusual amount, tx shape the operator
-has not seen before - the arbiter pauses the call and sends the
-operator (a human) a structured approval request out of band. The
-call only proceeds on explicit human assent. The allowlist handles
-the routine cases without ceremony; HITL catches the ambiguous
-ones. Out-of-band means: the request and response travel on a
-channel the AI does not see (push notification, hardware button,
-dedicated terminal), not the same RPC channel the AI is already on.
+has not seen before - the arbiter pauses the call and surfaces it
+to the operator (a human) on a fully out-of-band channel. The call
+only proceeds on explicit human assent. The allowlist handles the
+routine cases without ceremony; HITL catches the ambiguous ones.
+
+Out-of-band means: the request and response never travel on the
+petitioner's RPC channel and the AI never sees the request. The
+recommended setup is a keyboard and monitor (KVM) physically
+attached to the arbiter, the same console used to add entries to
+the **recipient address registry**. Anything that needs to cross
+back to the AI side after a HITL decision (e.g., a newly-issued
+recipient token the operator wants the AI to use) is hand-retyped
+by the operator on the AI / petitioner side - there is no
+clipboard between the arbiter console and the AI's environment, so
+only handles the operator deliberately retypes can ever leave the
+arbiter.
+
 Caveat: a human who clicks "approve" on every prompt provides no
 defense; the surface must be scoped tightly enough that approvals
 are rare and meaningful.
@@ -530,14 +540,14 @@ petitioner learning the result. After the action goes out, the
 petitioner does NOT get a synchronous "ok, here is the txid / here
 is the payment_hash / success/failure" - it gets nothing for at
 least the secondary wait window. Result delivery is therefore
-asynchronous via a pull-only result mailbox: the petitioner polls
-the mailbox (not the original action) and gets either "result" or
-"not yet," nothing in between. The privacy gateway enforces a
-10-minute minimum interval between checks for a given handle.
-Sibling to **Action delay**: same window construction, same ~12
-hour hard floor; randomized within bounds driven by observed
-network activity for similar result-shapes. See [Architecture
-overview, §4.8](design-docs/2026-05-05-0948-architecture-overview.md#48-result-mailbox).
+asynchronous via a pull-only result registry on the arbiter: the
+petitioner polls a privacy-gateway endpoint for a given handle and
+gets either "result" or "not yet," nothing in between. The privacy
+gateway enforces a 10-minute minimum interval between polls for a
+given handle. Sibling to **Action delay**: same window construction,
+same ~12 hour hard floor; randomized within bounds driven by
+observed network activity for similar result-shapes. See
+[Architecture overview, §4.8](design-docs/2026-05-05-0948-architecture-overview.md#48-result-registry).
 
 Purpose: a second layer of de-correlation. Even if a global observer
 eventually links the on-chain action back to our node, the AI's

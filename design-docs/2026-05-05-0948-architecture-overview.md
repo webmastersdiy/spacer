@@ -72,9 +72,9 @@ AI
   |
   v
 [privacy gateway]                         (filter outbound result; band, tokenize, redact)
-  |  deposit into result mailbox
+  |  deposit into result registry (arbiter-side)
   v
-[result mailbox]                          (pull-only, 10-min poll floor; §4.8)
+[result registry]                         (pull-only, 10-min poll floor; §4.8)
   |  petitioner polls; "result" or "not yet", nothing in between
   v
 [petitioner]
@@ -170,19 +170,19 @@ On a successful add the arbiter prints the entry's local-only numeric ID and the
 - The numeric `id` is local-only by intent, but anything the operator writes down or speaks aloud while reading it from the console is outside the trust boundary. Operator-side discipline is part of the security surface.
 - The 7-day default expiry trades usability (longer = more time to actually send) against exposure window (shorter = real-address mapping discarded sooner). Tunable at creation; not yet measured against real workflows.
 
-### 4.8 Result mailbox
+### 4.8 Result registry
 
-The petitioner-facing endpoint for asynchronous result delivery. After the [result delay](../GLOSSARY.md#result-delay) window elapses, the privacy gateway deposits the (filtered, banded, tokenized) result into a per-handle mailbox. The petitioner retrieves it by polling.
+Arbiter-side storage for pending and completed results, queried by the petitioner via a polling endpoint on the privacy gateway. After the [result delay](../GLOSSARY.md#result-delay) window elapses, the privacy gateway writes the (filtered, banded, tokenized) result into the registry against the original handle. The petitioner retrieves it by polling for that handle. The registry itself never reaches over the wire to the petitioner; the petitioner only ever sees the gateway's poll response.
 
 **Pull-only.** The arbiter never initiates contact with the petitioner; the petitioner asks. There is no callback, no push, no notification channel. This keeps every outbound timing signal on the petitioner side and avoids any arbiter-initiated traffic that could correlate with internal completions.
 
-**Binary state.** A check returns either the result for a given handle or "not yet." There is no "in progress," no "running," no progress percentage, no estimated time remaining. The petitioner reasons about elapsed time entirely from its own local estimate (§5.2).
+**Binary state.** A poll returns either the result for a given handle or "not yet." There is no "in progress," no "running," no progress percentage, no estimated time remaining. The petitioner reasons about elapsed time entirely from its own local estimate (§5.2).
 
-**10-minute poll floor.** Successive checks for the same handle by the same petitioner are throttled to a minimum interval of **10 minutes**. The privacy gateway enforces the floor; check requests issued more frequently get the same "not yet" response without consulting state, so a checking cadence faster than 10 min reveals nothing the cadence at 10 min would not. The 10-min floor (a) matches the natural bitcoin block cadence, (b) pins polling resolution well below any inference precision useful against the multi-hour delay window, (c) flattens result-shape-specific cadences so chain-vs-LN cannot be inferred from polling rhythm, and (d) caps the load the AI can put on the gateway by check-storming.
+**10-minute poll floor.** Successive polls for the same handle by the same petitioner are throttled to a minimum interval of **10 minutes**. The privacy gateway enforces the floor; poll requests issued more frequently get the same "not yet" response without consulting registry state, so a polling cadence faster than 10 min reveals nothing the cadence at 10 min would not. The 10-min floor (a) matches the natural bitcoin block cadence, (b) pins polling resolution well below any inference precision useful against the multi-hour delay window, (c) flattens result-shape-specific cadences so chain-vs-LN cannot be inferred from polling rhythm, and (d) caps the load the AI can put on the gateway by poll-storming.
 
-**Idempotent retrieval.** A successful retrieval marks the entry consumed. Subsequent checks for the same handle return "not yet" indistinguishably from a never-existed handle, so the petitioner cannot replay a result by re-asking and a handle that was retrieved cannot be distinguished from a handle that never existed.
+**Idempotent retrieval.** A successful retrieval marks the entry consumed. Subsequent polls for the same handle return "not yet" indistinguishably from a never-existed handle, so the petitioner cannot replay a result by re-asking and a handle that was retrieved cannot be distinguished from a handle that never existed.
 
-**Caveat.** The mailbox handle (the opaque acknowledgment string returned at submission time) is itself a stable identifier and links submission to retrieval. The petitioner can correlate "I submitted with handle H, then later got a result for H." This is intentional - the AI must be able to find its own results - but it means the handle is sensitive on the petitioner side; if it leaks elsewhere (e.g., into another AI's context), that other party can probe for the result.
+**Caveat.** The handle (the opaque acknowledgment string returned at submission time) is itself a stable identifier and links submission to retrieval. The petitioner can correlate "I submitted with handle H, then later got a result for H." This is intentional - the AI must be able to find its own results - but it means the handle is sensitive on the petitioner side; if it leaks elsewhere (e.g., into another AI's context), that other party can probe for the result.
 
 ---
 
@@ -211,7 +211,7 @@ Where each glossary mitigation fires in the data flow.
 - [Pseudonymize](../GLOSSARY.md#pseudonymize-identifier-pseudonymization): privacy gateway, on outbound responses. The token-to-real mapping lives in arbiter local state. Outbound recipient destinations are handled by the [recipient address registry](#47-recipient-address-registry) (§4.7), which adds one-time-use enforcement and a human-driven creation flow on top of the pseudonymize mapping.
 - [Banding](../GLOSSARY.md#banding-numeric-value-banding): privacy gateway, on outbound responses to balance / amount / fee fields.
 - [Outbound allowlist](../GLOSSARY.md#outbound-allowlist): privacy gateway, on every state-changing or network-touching call before it reaches bitcoind/LND. Backed by policy tables in local state.
-- [Human-in-the-loop approval](../GLOSSARY.md#human-in-the-loop-approval): triggered by the privacy gateway when an inbound call falls outside the allowlist fast path; the call parks in the HITL queue (local state) until an out-of-band human assent arrives. The out-of-band channel is intentionally not the petitioner's RPC channel; whether it shares plumbing with result delivery is open (§7).
+- [Human-in-the-loop approval](../GLOSSARY.md#human-in-the-loop-approval): triggered by the privacy gateway when an inbound call falls outside the allowlist fast path; the call parks in the HITL queue (local state) until an out-of-band human assent arrives. The out-of-band channel is the directly-attached arbiter console (the same KVM used by the [recipient address registry](#47-recipient-address-registry) in §4.7) - never the petitioner's RPC channel. The operator sees the pending request on the console and approves or denies at the keyboard. Anything that needs to flow back to the AI side from a HITL decision (e.g., a freshly-issued recipient token) does so by the operator manually retyping it on the AI / petitioner side; there is no clipboard between the arbiter console and the AI's environment.
 - [Aggregate-by-default](../GLOSSARY.md#aggregate-by-default): privacy gateway, on outbound responses to list-style calls. Per-item detail requires per-call justification audit-logged at the gateway.
 - [Hide secrets](../GLOSSARY.md#hide-secrets): arbitrarily wide rule applied across the arbiter. The privacy gateway enforces it on every outbound response; longer-lived secrets (preimages, signatures, macaroons, descriptors, xpubs, PSBTs, raw values behind any pseudonym) live only in arbiter local state.
 - [Default --private channels](../GLOSSARY.md#default---private-channels): policy on the LND client access path. The arbiter passes `--private` (LND) or `open_channel` (ldk-node) by default when calling channel-open. AI-facing this hides the channel from `listchannels`; world-facing it suppresses the gossip entry.
@@ -224,8 +224,7 @@ The privacy gateway is the primary AI-facing defense; world-facing mitigations (
 
 ## 7. Open design questions
 
-- **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / "failed temporary (try again)" per the [Latency fingerprinting](../GLOSSARY.md#latency-fingerprinting) entry / others?) and how each is signaled inside the [result mailbox](#48-result-mailbox)'s "result or not yet" envelope. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
-- **HITL channel sharing.** Whether [HITL approval](../GLOSSARY.md#human-in-the-loop-approval) requests and assents travel on the same out-of-band plumbing as result delivery, or a dedicated separate one. Both are out-of-band relative to the petitioner's RPC channel, but they may or may not share transport.
+- **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / "failed temporary (try again)" per the [Latency fingerprinting](../GLOSSARY.md#latency-fingerprinting) entry / others?) and how each is signaled inside the [result registry](#48-result-registry)'s "result or not yet" envelope. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
 - **Policy table format.** The schema for the [outbound allowlist](../GLOSSARY.md#outbound-allowlist)'s policy tables: how destinations and amounts are expressed, how staleness is handled, how new entries are added without leaking the change to the AI. Source: outbound allowlist status callout.
 - **Dynamic window calculation.** The algorithm by which the arbiter observes "global activity for similar actions" and converts it into a window. Includes: what counts as "similar," where the observation comes from (gossip, mempool, block stats, esplora?), and how the parameters are bounded so the window itself does not become a fingerprint.
 - **Band-edge randomization for aggregate counts.** How the arbiter randomizes anonymity-set bucket boundaries (per [Aggregate-by-default](../GLOSSARY.md#aggregate-by-default) and [JIT liquidity](../GLOSSARY.md#jit-liquidity)) so that band transitions cannot be triangulated back to specific underlying events: scheme for choosing per-arbiter offsets, how often they rotate, how they avoid becoming a fingerprint themselves.
