@@ -523,7 +523,7 @@ similar actions for the anonymity set to actually hold.
 
 ### Result delay
 
-> **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (action+result delay estimate API, result delivery mechanism, result-delivery status enum).
+> **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (result delivery mechanism, result-delivery status enum).
 
 Mandatory wait between the arbiter completing an action and the
 petitioner learning the result. After the action goes out, the
@@ -559,9 +559,10 @@ UX implication: the petitioner (and the AI it serves) need an
 estimate of total elapsed time (action delay + result delay) so the
 AI can reason about the decision tree - still within window -> wait;
 past the upper bound and no result -> assume lost, decide whether to
-re-initiate; result arrived -> success / failure / explicit
-lost-or-expired status. The arbiter should expose this estimate at
-acknowledgment time and update it as conditions change.
+re-initiate; result arrived -> success / failure. The petitioner
+computes this estimate locally from its own view of similar global
+activity; no estimate information comes from the arbiter, and the
+arbiter offers no guarantee on the bound. See [Architecture overview, §5.2](design-docs/2026-05-05-0948-architecture-overview.md#52-estimate-display).
 
 Caveat: a long secondary wait increases the risk that real-world
 conditions change (fees, channel state, counterparty behavior)

@@ -207,7 +207,6 @@ The privacy gateway is the primary AI-facing defense; world-facing mitigations (
 
 ## 7. Open design questions
 
-- **Action+result delay estimate API.** Shape of the elapsed-time estimate the arbiter exposes at acknowledgment time, and the protocol for updating it as the dynamic window recomputes. Source: [result delay](../GLOSSARY.md#result-delay).
 - **Result delivery mechanism.** Poll, callback, mailbox, or some combination. Source: [result delay](../GLOSSARY.md#result-delay) ("the petitioner polls or receives a callback").
 - **Result-delivery status enum.** The set of terminal states the petitioner can observe (success / failure / lost-or-expired / others?) and how each is signaled. Source: [result delay](../GLOSSARY.md#result-delay) status callout.
 - **HITL channel sharing.** Whether [HITL approval](../GLOSSARY.md#human-in-the-loop-approval) requests and assents travel on the same out-of-band plumbing as result delivery, or a dedicated separate one. Both are out-of-band relative to the petitioner's RPC channel, but they may or may not share transport.
