@@ -283,3 +283,48 @@ The directory tree is itself part of the vocabulary: "under `arbiter/`", "in `te
 The following directories also exist at the root but fall outside the arbiter/petitioner/test-harness split: `go/` and `go-cache/` (Go module/build caches populated by other tooling; not part of spacer's own dependency surface) and `first-game/` (an unrelated C# project that predates spacer in this workspace).
 
 This is a snapshot. Paths cited in §2-§5 (`spacer/arbiter/src/`, `test-harness/scripts/`) reflect the layout at the time of writing and may move; the logical architecture in this doc is the load-bearing description.
+
+---
+
+## 10. Exit criteria for the implementation closed loop
+
+This section defines the gate for declaring the implementation done. It is process-side rather than a logical-architecture concern; it lives here for convenience because the gate references components defined elsewhere in this doc.
+
+**Definition of done.** Implementation is complete when, for every command and variant in the [petcli](#51-protocol-shim) command tree, an end-to-end validation run executes the command, traverses the privacy gateway, the timing layer, the relevant arbiter components, and the test-harness's bitcoind / LND infrastructure, and returns a result via the [result registry](#48-result-registry) that matches the validation's expected outcome - and the raw artifacts of that run are preserved verbatim under `exit-loop/`.
+
+**Coverage scope.** Every leaf of the `petcli` command tree (whatever shape the implementer chooses; see §5.1) **and** every argument variant that exercises a distinct code path inside the arbiter. Both happy-path and rejection-path variants. Both Bitcoin and Lightning send paths where the underlying command applies to either.
+
+**Test-mode timing.** Production [action delay](../GLOSSARY.md#action-delay) and [result delay](../GLOSSARY.md#result-delay) windows have ~12-hour floors, and the rejection-delivery delay (§4.7) is 1 hour ± 30 min. Validating at production timing would take days per pass and is impractical at the volume needed for full coverage and iteration. The arbiter therefore exposes a test-mode timing parameter that compresses these windows:
+
+- Action delay: from the production floor to a randomized **5-15 seconds**.
+- Result delay: same randomized 5-15 seconds.
+- Rejection-delivery delay: compressed proportionally (a few seconds, randomized within a comparable band).
+
+Test-mode timing is selected per environment and **must** be off in any environment that touches non-test infrastructure. Production timing is restored before any environment that observes real bitcoin or lightning traffic.
+
+**Parallel execution.** Validations run in parallel wherever they touch independent state (different handles, different recipient tokens, separate arbiter instances spun up by the test harness). The implementer is expected to use the workspace's existing parallel-dispatch infrastructure (the bead queue under `.beads/` driven via the Gas City rigs under `.gc/`) to fan out validation runs as work items, the same way implementation tasks are dispatched.
+
+**Iteration loop.** Failed validations feed back into the implementation cycle: the failure's raw output is captured under `exit-loop/`, the cause is fixed, and the validation re-runs. The loop terminates only when every validation passes. There is no manual sign-off; the gate is binary on the artifact set.
+
+**Exit gate.** The implementation closed loop closes when:
+
+1. Every `petcli` command and variant has at least one passing end-to-end validation run on file under `exit-loop/`.
+2. The raw output of each run is preserved verbatim - not summarized - so a non-AI human reviewer (per §2.1's auditability discipline) can confirm the run actually executed.
+3. No validation is in failed state.
+
+**Artifact layout.** Validation artifacts live under `exit-loop/`. The expected layout is:
+
+```
+exit-loop/
+  README.md                 # one-line pointer back to this section
+  petcli/
+    <command>/              # one directory per petcli command (leaf or intermediate)
+      <variant-name>/       # one directory per validated argument variant
+        stdout.log          # raw petcli stdout for this run
+        stderr.log          # raw petcli stderr for this run
+        arbiter-events.log  # arbiter-side audit / state transitions for this run
+        infra-events.log    # bitcoind / LND test-harness events for this run
+        result.json         # final result returned via the result-registry poll
+```
+
+The tree is scaffolded empty initially. A populated `<variant-name>/` directory signals that variant has been validated; an empty one signals not-yet-validated.
