@@ -13,12 +13,18 @@ Per design-docs/2026-05-05-0948-architecture-overview.md §2.1, §3, §4.1.
 import audit
 import gateway
 import state
+# Subsystems with their own SQLite tables are imported here so their
+# state.register_schema() calls run at import time, before
+# state.migrate() applies the union. A subsystem that is not imported
+# at boot does not get its tables created. Adding a new subsystem is
+# a one-line edit here plus its own module.
+import timing  # noqa: F401  (registers pending_actions, pending_results)
 
 
 def main(host=None, port=None, latency_target=None):
     """Boot the arbiter. Configure the audit log and the state DB,
-    apply any registered schema fragments (none in the skeleton; later
-    beads register their own), then start the privacy gateway. The
+    apply any registered schema fragments (the subsystems imported
+    above register their own), then start the privacy gateway. The
     call blocks until the gateway is shut down."""
     audit.configure()
     state.configure()
