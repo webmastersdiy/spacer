@@ -1,0 +1,30 @@
+"""
+Arbiter entry point.
+
+Wires the audit log and local state into the privacy gateway and
+starts the network listener. There is no other way to launch the
+arbiter from inside this codebase; this is the single audit-loggable
+boot path. Operator-side commands (registry-add, HITL-approve, etc.)
+arrive in their own files in later beads and reach state directly,
+not through the gateway.
+
+Per design-docs/2026-05-05-0948-architecture-overview.md §2.1, §3, §4.1.
+"""
+import audit
+import gateway
+import state
+
+
+def main(host=None, port=None, latency_target=None):
+    """Boot the arbiter. Configure the audit log and the state DB,
+    apply any registered schema fragments (none in the skeleton; later
+    beads register their own), then start the privacy gateway. The
+    call blocks until the gateway is shut down."""
+    audit.configure()
+    state.configure()
+    state.migrate()
+    gateway.serve(host=host, port=port, latency_target=latency_target)
+
+
+if __name__ == "__main__":
+    main()
