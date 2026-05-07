@@ -47,8 +47,14 @@ go.work.sum
 .runtime/
 .gc/tmp/
 
-# Daemon binaries, datadirs, credentials (all of arbiter/ is non-source)
-arbiter/
+# Daemon binaries, datadirs, credentials. Subdirs of arbiter/ are
+# non-source by default; only arbiter/src/ holds the auditable code,
+# so enumerate the ignored subdirs rather than ignoring arbiter/ as a
+# whole (git cannot re-include children of an excluded directory).
+arbiter/bin/
+arbiter/bitcoin/
+arbiter/lnd/
+arbiter/data/
 
 # Local Go SDK / module cache
 go/
