@@ -31,6 +31,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
+import registry
 import state
 
 # Loopback by default. The gateway binds the loopback interface because
@@ -153,10 +154,16 @@ def process_request(handler):
         _respond_refused(handler, deadline)
         return
 
-    # Inbound pseudonymize: resolve any petitioner-supplied tokens to
-    # the real identifiers held in local state. Currently a no-op; the
-    # mapping table lands with sp-77lxs.13.
+    # Inbound pseudonymize: resolve any petitioner-supplied tokens
+    # to the real identifiers held in local state. The recipient
+    # address registry (§4.7) is consulted for the recipient_token
+    # field; on refusal the request collapses to the uniform
+    # "destination unavailable" body, audit-differentiated by the
+    # registry. None signals refuse-to-petitioner.
     request = _pseudonymize_inbound(request)
+    if request is None:
+        _respond_refused(handler, deadline)
+        return
 
     # Dispatch into arbiter internals. The internals do not exist yet
     # (timing layer + bitcoind/LND clients are downstream beads), so
@@ -247,13 +254,34 @@ def _hitl_park(request):
 def _pseudonymize_inbound(request):
     """Resolve petitioner-supplied tokens to real identifiers.
 
-    The token-to-real mapping is local state (§4.4). For outbound
-    recipient destinations specifically the mapping is the recipient
-    address registry (§4.7), which lands with sp-77lxs.13. Until that
-    bead lands the gateway has no token entries to resolve, so this
-    function is a no-op pass-through.
+    Looks for an optional `recipient_token` field. If present, the
+    recipient address registry (§4.7) resolves the token to the real
+    address, and the request is rewritten to carry both the
+    `recipient_address` (for dispatch) and the original
+    `recipient_token` (so the dispatch layer can call
+    registry.consume() after a successful send). On any registry
+    refusal (unknown / expired / used / bad checksum / anomalous /
+    wrong type), returns None so the caller emits the uniform
+    "destination unavailable" body. If the field is absent, returns
+    the request unchanged.
+
+    Per §4.7 production timing, registry refusals are deferred by
+    the rejection-delivery delay (1 hour ± 30 min) before the
+    petitioner sees them. The current gateway refuses synchronously;
+    sp-77lxs.14 (result registry) wires the deferred-rejection path
+    so the petitioner picks up "destination unavailable" via the
+    normal poll cadence, breaking the submission-to-response timing
+    channel.
     """
-    return request
+    token = request.get("recipient_token")
+    if token is None:
+        return request
+    status, real, _fmt = registry.lookup(token)
+    if status != "ok":
+        return None
+    out = dict(request)
+    out["recipient_address"] = real
+    return out
 
 
 def _dispatch(request):
