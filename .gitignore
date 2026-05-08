@@ -43,6 +43,12 @@ go.work.sum
 # macOS junk
 .DS_Store
 
+# Python build artifacts (created when running module-level smoke
+# tests under arbiter/src/ or petitioner/src/).
+__pycache__/
+*.pyc
+*.pyo
+
 # Session / runtime state
 .runtime/
 .gc/tmp/
