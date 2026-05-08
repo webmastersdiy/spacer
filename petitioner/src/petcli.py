@@ -144,8 +144,13 @@ def _do_query_channels(args):
 
 
 def _do_result_poll(args):
+    # Wire op is "poll" because the gateway's read-only fast-path
+    # (gateway.py: process_request) routes on op == "poll" rather
+    # than the longer petcli command path "result poll". The petcli
+    # function name and the command path stay descriptive; the wire
+    # op stays terse to match the gateway's single-token routing.
     response = protocol.submit(
-        op="result_poll",
+        op="poll",
         params={"handle": args.handle},
         host=args.host,
         port=args.port,

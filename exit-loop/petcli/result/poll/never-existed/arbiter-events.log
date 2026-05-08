@@ -1,0 +1,4 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59821},"ts":"2026-05-08T13:36:32Z"}
+{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-08T13:36:33Z"}
+{"event":"result_poll_unknown","payload":{"handle":"h_never_existed"},"ts":"2026-05-08T13:36:33Z"}
+{"event":"decision_allow","payload":{"op":"poll"},"ts":"2026-05-08T13:36:33Z"}

@@ -1,0 +1,5 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":60072},"ts":"2026-05-08T13:36:35Z"}
+{"event":"result_deposit","payload":{"created_at":1778247395.748488,"handle":"h_consumed","kind":"result"},"ts":"2026-05-08T13:36:35Z"}
+{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-08T13:36:35Z"}
+{"event":"result_poll_already_consumed","payload":{"handle":"h_consumed"},"ts":"2026-05-08T13:36:35Z"}
+{"event":"decision_allow","payload":{"op":"poll"},"ts":"2026-05-08T13:36:35Z"}

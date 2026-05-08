@@ -200,7 +200,9 @@ def main():
             ["result", "poll", "--handle", "h_abc"] + common
         ).strip()
         decoded = json.loads(out)
-        assert decoded == {"op": "result_poll", "handle": "h_abc"}, decoded
+        # Wire op is "poll" (gateway's single-token routing key); the
+        # petcli command path is still "result poll".
+        assert decoded == {"op": "poll", "handle": "h_abc"}, decoded
     finally:
         server.shutdown()
         server.server_close()

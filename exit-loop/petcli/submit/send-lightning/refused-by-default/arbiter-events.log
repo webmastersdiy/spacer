@@ -1,0 +1,3 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":60082},"ts":"2026-05-08T13:36:37Z"}
+{"event":"request_received","payload":{"op":"send_lightning"},"ts":"2026-05-08T13:36:37Z"}
+{"event":"decision_defer_hitl","payload":{"op":"send_lightning"},"ts":"2026-05-08T13:36:37Z"}
