@@ -1,0 +1,8 @@
+#!/bin/sh
+# petcli launcher: locate src/petcli.py relative to this wrapper and
+# run it under python3. Resolving via dirname keeps the wrapper
+# location-independent (works whether bin/ is symlinked onto PATH or
+# called directly).
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../src/petcli.py" "$@"
