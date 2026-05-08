@@ -19,6 +19,7 @@ import state
 # at boot does not get its tables created. Adding a new subsystem is
 # a one-line edit here plus its own module.
 import registry  # noqa: F401  (registers recipient_addresses)
+import results  # noqa: F401  (registers results, result_poll_floor)
 import timing  # noqa: F401  (registers pending_actions, pending_results)
 
 

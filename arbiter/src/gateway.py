@@ -20,6 +20,7 @@ later beads:
   (recipient address registry).
 - dispatch into arbiter internals (timing layer, bitcoind/LND access):
   wired up by sp-77lxs.10/11/12.
+- result-poll endpoint: wired up by sp-77lxs.14 (result registry).
 
 The placeholders are kept as their own named functions so a non-AI
 reviewer can confirm at a glance which mechanisms are present in
@@ -32,6 +33,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
 import registry
+import results
 import state
 
 # Loopback by default. The gateway binds the loopback interface because
@@ -143,6 +145,24 @@ def process_request(handler):
 
     op = request.get("op")
     audit.record("request_received", {"op": op})
+
+    # Read-only result poll (§4.8). The poll path is the only
+    # petitioner-reachable read into arbiter state and is structurally
+    # different from state-changing calls:
+    # - The outbound allowlist gates state-changing or network-touching
+    #   calls; a read of arbiter-internal storage is not state-changing.
+    # - The pseudonymize-inbound step resolves recipient tokens; a poll
+    #   carries a result handle, not a recipient token.
+    # - The hide-secrets / band / aggregate filters apply to backend
+    #   responses; the result registry's payload was already filtered
+    #   at deposit time per §4.8 ("the privacy gateway writes the
+    #   filtered, banded, tokenized result into the registry").
+    # - The 10-min poll floor and idempotent retrieval are enforced
+    #   inside results.poll(); this fast-path just routes the call.
+    # Latency normalization still applies via the deadline stamp.
+    if op == "poll":
+        _handle_poll(handler, request, deadline)
+        return
 
     # Outbound allowlist gate. State-changing or network-touching calls
     # must be admitted by policy before they reach bitcoind/LND. Calls
@@ -282,6 +302,48 @@ def _pseudonymize_inbound(request):
     out = dict(request)
     out["recipient_address"] = real
     return out
+
+
+def _handle_poll(handler, request, deadline):
+    """Route a result-registry poll (§4.8) to results.poll() and emit
+    the binary-state response.
+
+    Petitioner-visible response shape:
+      {"status": "result", "result": <payload>}  - first successful
+                                                    retrieval; the
+                                                    deposited payload
+                                                    is returned verbatim.
+      {"status": "not_yet"}                       - every other case
+                                                    (floor throttle,
+                                                    unknown handle,
+                                                    already consumed,
+                                                    bad input).
+
+    The "result" / "not_yet" pair is the §4.8 binary state; there is
+    no "in progress", no progress percentage, no estimated time
+    remaining. The deposited payload is whatever the depositor
+    placed in the registry; the registry kind ("result" /
+    "rejection") is recorded for audit triage but is not part of
+    the wire response (§4.8: the payload is self-describing).
+
+    Bad input (missing or non-string handle) maps to the same
+    "not_yet" wire response as a floor throttle or unknown handle.
+    The audit log differentiates inside results.poll() and here.
+    """
+    handle = request.get("handle")
+    if not isinstance(handle, str) or not handle:
+        # Wire-indistinguishable from a floor throttle / unknown
+        # handle; uniform "not_yet" body, latency-normalized.
+        audit.record("decision_poll_bad_input", {"op": "poll"})
+        _respond_ok(handler, {"status": "not_yet"}, deadline)
+        return
+    status, payload, _kind = results.poll(handle)
+    if status == "result":
+        response = {"status": "result", "result": payload}
+    else:
+        response = {"status": "not_yet"}
+    audit.record("decision_allow", {"op": "poll"})
+    _respond_ok(handler, response, deadline)
 
 
 def _dispatch(request):
@@ -464,20 +526,102 @@ if __name__ == "__main__":
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+
+        # Result-poll path (§4.8). Deposit a result behind the gateway,
+        # then exercise the poll fast-path end-to-end via HTTP. The
+        # poll bypasses the allowlist (read-only) and returns the
+        # binary {"status": "result"|"not_yet"} envelope.
+        H = "smoke_handle"
+        results.deposit(H, {"txid": "deadbeef"}, kind="result")
+
+        body = json.dumps({"op": "poll", "handle": H}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            poll_body = json.loads(resp.read().decode("utf-8"))
+        assert poll_body == {
+            "status": "result",
+            "result": {"txid": "deadbeef"},
+        }, f"unexpected poll body: {poll_body!r}"
+
+        # Second poll within the 10-min floor: indistinguishable
+        # "not_yet" envelope, registry state untouched.
+        body = json.dumps({"op": "poll", "handle": H}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            poll_body = json.loads(resp.read().decode("utf-8"))
+        assert poll_body == {"status": "not_yet"}, (
+            f"floor-throttled poll must return not_yet: {poll_body!r}"
+        )
+
+        # Poll for a never-existed handle: "not_yet", same envelope as
+        # floor throttle and as already-consumed.
+        body = json.dumps({"op": "poll", "handle": "never_existed"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            poll_body = json.loads(resp.read().decode("utf-8"))
+        assert poll_body == {"status": "not_yet"}
+
+        # Poll with no handle field: "not_yet" (bad input maps to the
+        # uniform envelope on the wire).
+        body = json.dumps({"op": "poll"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            poll_body = json.loads(resp.read().decode("utf-8"))
+        assert poll_body == {"status": "not_yet"}
     finally:
         server.shutdown()
         server.server_close()
         t.join(timeout=2)
 
-    # Verify the audit log captured the boot event, both request
-    # receipts, and both refusals (the parse-failure refusal logs only
-    # decision_refuse; the well-formed request logs request_received
-    # then decision_defer_hitl).
+    # Verify the audit log captured the boot event, every request
+    # receipt, the HITL deferral, the parse-failure refusal, and the
+    # result-poll path (deposit, ok, throttled, unknown, bad_input,
+    # decision_allow for the four poll calls).
     with open(tmp_audit) as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert "gateway_start" in events, events
-    assert events.count("request_received") == 1, events
+    # 5 well-formed requests reach _parse_request: the original
+    # smoke_ping, plus four polls. The malformed request is rejected
+    # before request_received via send_error.
+    assert events.count("request_received") == 5, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
+    # Poll path: deposit, ok, throttled, unknown, bad_input must all
+    # appear. The bad-input case audit-logs at the gateway layer
+    # (decision_poll_bad_input) without reaching results.poll().
+    for required in (
+        "result_deposit",
+        "result_poll_ok",
+        "result_poll_throttled",
+        "result_poll_unknown",
+        "decision_poll_bad_input",
+    ):
+        assert required in events, f"audit missing {required}: {events!r}"
+    # Three successful poll routings (ok, throttled, unknown) plus
+    # the bad-input case all log decision_allow / decision_poll_bad_input;
+    # decision_allow appears exactly 3 times (one per non-bad-input
+    # poll) - the bad-input path uses its own marker.
+    assert events.count("decision_allow") == 3, events
     print(f"OK: gateway pipeline round-trips at audit={tmp_audit}, port={bind_port}")
     sys.exit(0)
