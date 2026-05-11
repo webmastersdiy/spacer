@@ -405,6 +405,60 @@ bands themselves are a fingerprint, and an AI that can probe
 "can fund X?" across many X values can binary-search the exact
 balance unless paired with rate limits and noise.
 
+### Scale cloaking
+
+Stronger sibling of [banding](#banding-numeric-value-banding) that
+covers not just the precise satoshi figure but the **order of
+magnitude** of the wallet. Instead of letting a balance grow from
+"in the 100k band" to "in the 10M band" (which leaks that the wallet
+is now an order of magnitude larger than it used to be), the privacy
+gateway projects the real total into a fixed presentation window,
+nominally `0 - 100,000` sats. Every petitioner read of balance or
+channel capacity is rescaled before egress; the AI sees a number in
+that window regardless of whether the wallet holds 50k, 5M, or 500M
+sats.
+
+The mechanism has three pieces:
+
+- **Cloak tier.** The arbiter assigns the wallet to a tier based on
+  its real total: T0 = `[0, 100k)` (no scaling), T1 = `[100k, 1M)`
+  (scale roughly `0.1`), T2 = `[1M, 10M)` (scale roughly `0.01`), and
+  so on by powers of 10. The scale within a tier is randomized within
+  a band rather than fixed at the exact power, so two wallets in the
+  same tier do not present identical numbers for identical
+  underlying balances.
+- **Tier shift.** When the real total crosses a tier boundary, the
+  arbiter does **not** change the active scale immediately. It
+  schedules a *tier shift* with a multi-day randomized delay (test
+  mode collapses this to seconds). During the delay the wallet keeps
+  presenting under the old tier's scale, so the petitioner-visible
+  drift is gradual and decoupled from the moment of the underlying
+  send/receive. When the shift fires, the active scale flips and the
+  petitioner sees a discrete change in presented balance - which by
+  construction looks identical to a normal payment in or out of the
+  wallet.
+- **Drift > range.** Privacy beats range-fidelity: during a pending
+  tier shift the presented value can briefly fall outside the
+  `0 - 100k` window (e.g., real grew to 150k but the active tier is
+  still T0, so presented = 150k). That is acceptable. Forcing the
+  range immediately would re-couple the tier shift to the underlying
+  fund movement, which is exactly the leak the delay is there to
+  break.
+
+Audit log records every tier shift, the real before/after, the new
+scale, and the randomized delay; the operator can see at the
+arbiter console that a given drop in presented balance was a tier
+shift rather than a real send. The petitioner cannot tell the two
+apart - that is the property the cloak is buying.
+
+Caveat: a petitioner that polls fast enough to observe the *exact*
+moment of a tier shift can flag it as suspicious if the magnitude
+of the change is implausibly large for a single transaction.
+Mitigation lives in the band of randomized scale factors plus the
+random delay: the shift is deferred so it does not align with the
+known fund movement, and the band makes the magnitude variable
+across wallets and across shifts.
+
 ### Outbound allowlist
 
 > **Status: open.** See [Architecture overview, §7](design-docs/2026-05-05-0948-architecture-overview.md#7-open-design-questions) (policy table format).
