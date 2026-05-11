@@ -1,0 +1,1 @@
+# Read-only variants dispatch through arbiter/src/lnd.py to the fake lncli at $LNCLI_BIN; state-changing variants remain refused at the allowlist and never reach the lnd module. No live bitcoind / LND traffic for any variant in the current manifest.

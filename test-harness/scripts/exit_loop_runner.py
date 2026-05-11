@@ -107,20 +107,39 @@ _LNCLI_FAKE.write_text(
     """#!/bin/sh
 # Fake lncli for the exit-loop runner. Strips the connection flags
 # the way arbiter/src/lnd.py prepends them, then dispatches on the
-# RPC name. Values are deterministic; the runner's variant matchers
-# encode the banded form (floor to 10_000 sats) directly.
+# RPC name. The scenario is selected via $LNCLI_SCENARIO so the same
+# fake binary can stand in for different node states (funded vs.
+# empty wallet, channels vs. no channels) across variants without
+# swapping the binary. Values are deterministic; the runner's
+# variant matchers encode the banded form (floor to 10_000 sats)
+# directly.
 while [ $# -gt 0 ]; do
   case "$1" in
     --rpcserver=*|--tlscertpath=*|--macaroonpath=*|--network=*) shift;;
     *) break;;
   esac
 done
+scenario="${LNCLI_SCENARIO:-funded}"
 case "$1" in
   walletbalance)
-    printf '{"total_balance":"100000","confirmed_balance":"100000","unconfirmed_balance":"0"}'
+    case "$scenario" in
+      empty)
+        printf '{"total_balance":"0","confirmed_balance":"0","unconfirmed_balance":"0"}'
+        ;;
+      *)
+        printf '{"total_balance":"100000","confirmed_balance":"100000","unconfirmed_balance":"0"}'
+        ;;
+    esac
     ;;
   channelbalance)
-    printf '{"local_balance":{"sat":"50000","msat":"50000000"},"remote_balance":{"sat":"30000","msat":"30000000"}}'
+    case "$scenario" in
+      no-channels)
+        printf '{"local_balance":{"sat":"0","msat":"0"},"remote_balance":{"sat":"0","msat":"0"}}'
+        ;;
+      *)
+        printf '{"local_balance":{"sat":"50000","msat":"50000000"},"remote_balance":{"sat":"30000","msat":"30000000"}}'
+        ;;
+    esac
     ;;
   *)
     echo "unknown rpc: $1" >&2
@@ -445,6 +464,44 @@ VARIANTS = [
             "§4.3). Audit logs request_received and decision_allow."
         ),
     },
+    {
+        "path": ("query", "balance", "empty-wallet"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "lncli_scenario": "empty",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 0,
+        },
+        "description": (
+            "Same dispatch path as the funded variant, but the fake "
+            "lncli reports total_balance=0 under LNCLI_SCENARIO=empty. "
+            "The gateway's banded response is balance_sats=0, which is "
+            "petitioner-visibly indistinguishable from any wallet "
+            "balance below the 10_000-sat band. Confirms the dispatch "
+            "and banding logic handle the zero-balance edge without "
+            "leaking the precise (zero) figure as a different status."
+        ),
+    },
+    {
+        "path": ("query", "channels", "no-channels"),
+        "petcli_args": ["query", "channels"],
+        "uses_arbiter": True,
+        "lncli_scenario": "no-channels",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "capacity_sats": 0,
+        },
+        "description": (
+            "Channels query when lncli reports zero local + zero "
+            "remote capacity (LNCLI_SCENARIO=no-channels). The gateway "
+            "returns capacity_sats=0; same status as a funded pool "
+            "below the 10_000-sat band, so the wire response does not "
+            "distinguish 'no channels' from 'sub-band channels'."
+        ),
+    },
 ]
 
 
@@ -459,6 +516,15 @@ def _run_variant(variant):
     state_dir = Path(tempfile.mkdtemp(prefix="exit-loop-state-"))
     audit_path = audit_dir / "audit.log"
     state_path = state_dir / "state.db"
+
+    # Per-variant fake-lncli scenario. The fake binary reads
+    # $LNCLI_SCENARIO to pick which canned reply to print; the runner
+    # sets it to the variant's "lncli_scenario" (default "funded")
+    # before the in-thread arbiter dispatches to lnd.py, and restores
+    # the prior value after the variant runs so a later variant's
+    # env is not contaminated.
+    saved_lncli_scenario = os.environ.get("LNCLI_SCENARIO")
+    os.environ["LNCLI_SCENARIO"] = variant.get("lncli_scenario", "funded")
 
     server = thread = port = None
     try:
@@ -571,6 +637,13 @@ def _run_variant(variant):
     finally:
         if server is not None:
             _stop_arbiter(server, thread)
+        # Restore the prior LNCLI_SCENARIO so cross-variant env state
+        # is not sticky. Setting a None back means "delete the var"
+        # rather than setting it to the literal string "None".
+        if saved_lncli_scenario is None:
+            os.environ.pop("LNCLI_SCENARIO", None)
+        else:
+            os.environ["LNCLI_SCENARIO"] = saved_lncli_scenario
         # Best-effort cleanup of the per-variant tempdirs.
         for d in (audit_dir, state_dir):
             try:
