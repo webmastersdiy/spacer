@@ -45,6 +45,7 @@ Per design-docs/2026-05-05-0948-architecture-overview.md §10.
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,56 @@ os.environ["SPACER_TIMING_MODE"] = "test"
 # estimate on submit responses, so submit-* variants see the 30s bound
 # rather than the 24h production-placeholder default.
 os.environ["PETCLI_TEST_TIMING"] = "1"
+
+
+# === Fake lncli for the read-only query variants ====================
+#
+# gateway._dispatch wires query_balance / query_channels through
+# arbiter/src/lnd.py, which shells out to `lncli`. The runner stands up
+# a fake lncli script (same pattern lnd.py's own smoke test uses) so
+# the read-only variants exercise the full gateway -> dispatch -> lnd
+# argv-construction -> JSON parse stack without a live lnd. Real-lnd
+# coverage will land alongside the test-harness's bitcoind/LND
+# fixtures; the §10 exit gate only requires that each variant
+# traverse the gateway and produce a verifiable result, which the
+# fake covers deterministically.
+_LNCLI_FAKE_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-lncli-"))
+_LNCLI_FAKE = _LNCLI_FAKE_DIR / "lncli"
+_LNCLI_FAKE.write_text(
+    """#!/bin/sh
+# Fake lncli for the exit-loop runner. Strips the connection flags
+# the way arbiter/src/lnd.py prepends them, then dispatches on the
+# RPC name. Values are deterministic; the runner's variant matchers
+# encode the banded form (floor to 10_000 sats) directly.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rpcserver=*|--tlscertpath=*|--macaroonpath=*|--network=*) shift;;
+    *) break;;
+  esac
+done
+case "$1" in
+  walletbalance)
+    printf '{"total_balance":"100000","confirmed_balance":"100000","unconfirmed_balance":"0"}'
+    ;;
+  channelbalance)
+    printf '{"local_balance":{"sat":"50000","msat":"50000000"},"remote_balance":{"sat":"30000","msat":"30000000"}}'
+    ;;
+  *)
+    echo "unknown rpc: $1" >&2
+    exit 64
+    ;;
+esac
+"""
+)
+_LNCLI_FAKE.chmod(
+    _LNCLI_FAKE.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+)
+os.environ["LNCLI_BIN"] = str(_LNCLI_FAKE)
+os.environ["LNCLI_TLSCERT"] = str(_LNCLI_FAKE_DIR / "tls.cert")
+os.environ["LNCLI_MACAROON"] = str(_LNCLI_FAKE_DIR / "admin.macaroon")
+os.environ["LNCLI_RPCSERVER"] = "fake:10009"
+os.environ["LNCLI_NETWORK"] = "signet"
+os.environ["LNCLI_TIMEOUT_S"] = "5.0"
 
 
 # === Arbiter lifecycle ==============================================
@@ -181,14 +232,17 @@ def _apply_precondition(precondition):
 #                    exercises and which audit events fire.
 #
 # Variants in this list are the ones that exercise distinct code
-# paths reachable in the current code base. Happy-path send-bitcoin
-# / send-lightning, real query-balance / query-channels paths, and
-# registry-token rejection paths (unknown / expired / used / bad
-# checksum) are not yet validatable end-to-end: the gateway's
-# allowlist defaults to refusing every state-changing call until
-# sp-77lxs.2 lands the policy table format, and the gateway's
-# dispatch is a not-implemented stub. Those variants will be added
-# here once their code paths are reachable.
+# paths reachable in the current code base. Read-only query_balance
+# and query_channels now traverse the partial allowlist
+# (_ALLOWED_READ_OPS in gateway.py) and dispatch through
+# arbiter/src/lnd.py against a fake lncli the runner installs at
+# module-import time, producing deterministic banded responses.
+# Happy-path send-bitcoin / send-lightning and registry-token
+# rejection paths (unknown / expired / used / bad checksum) remain
+# not-yet-validatable end-to-end: the allowlist still refuses every
+# state-changing call until sp-77lxs.2 lands the full policy table
+# format. Those variants will be added once their code paths are
+# reachable.
 VARIANTS = [
     # --- estimate window: local-only, no arbiter ---
     {
@@ -355,29 +409,40 @@ VARIANTS = [
         ),
     },
     {
-        "path": ("query", "balance", "refused-by-default"),
+        "path": ("query", "balance", "allowlisted"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
         "preconditions": [],
-        "expected": lambda r: r == {"status": "refused"},
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 100000,
+        },
         "description": (
-            "Read-only balance query is also gated through the "
-            "allowlist (it touches the LND backend) and refuses by "
-            "default. No estimate stamp on read-only queries - "
-            "those are not subject to action+result delay. Audit "
-            "logs decision_defer_hitl."
+            "Read-only balance query traverses the partial allowlist "
+            "(query_balance is in _ALLOWED_READ_OPS), dispatch reads "
+            "lnd.walletbalance() via the fake lncli (total_balance=100000),"
+            " and the gateway floor-bands the value to 10_000-sat "
+            "resolution. The fake's value is already a band multiple "
+            "so the banded result matches verbatim. Audit logs "
+            "request_received and decision_allow."
         ),
     },
     {
-        "path": ("query", "channels", "refused-by-default"),
+        "path": ("query", "channels", "allowlisted"),
         "petcli_args": ["query", "channels"],
         "uses_arbiter": True,
         "preconditions": [],
-        "expected": lambda r: r == {"status": "refused"},
+        "expected": lambda r: r == {
+            "status": "ok",
+            "capacity_sats": 80000,
+        },
         "description": (
-            "Channels query, like balance, is allowlist-gated and "
-            "refuses by default until sp-77lxs.2 lands. Audit logs "
-            "decision_defer_hitl."
+            "Channels query traverses the partial allowlist, dispatch "
+            "reads lnd.channelbalance() via the fake lncli "
+            "(local=50000, remote=30000), and the gateway returns "
+            "the aggregate capacity (80000) floor-banded to 10_000 sat. "
+            "Per-channel detail is suppressed (aggregate-by-default, "
+            "§4.3). Audit logs request_received and decision_allow."
         ),
     },
 ]
@@ -441,18 +506,28 @@ def _run_variant(variant):
         else:
             (artifact_dir / "arbiter-events.log").write_text("")
 
-        # The gateway's dispatch is a not-implemented stub, so no
-        # bitcoind / LND subprocess fires for any variant in this
-        # manifest. Record that fact verbatim rather than leaving the
-        # file empty, so a non-AI reviewer can see the run intentionally
-        # exercised the no-infra path.
-        (artifact_dir / "infra-events.log").write_text(
-            "# No bitcoind / LND infrastructure events: gateway "
-            "dispatch (_dispatch in arbiter/src/gateway.py) is a "
-            "not-implemented stub until sp-77lxs.2 (allowlist policy) "
-            "and downstream wiring land. No RPC traffic is emitted "
-            "for any variant in the current manifest.\n"
-        )
+        # Bitcoind / LND infrastructure events. Variants that dispatch
+        # through the read-only allowlist exercise lnd.py against a
+        # fake lncli installed at module-import time; everything else
+        # remains stubbed. The runner does not capture per-variant
+        # lncli stdout (the fake's reply lands in the petcli response
+        # and is therefore already in result.json); the log records
+        # which mode this variant ran under so a non-AI reviewer can
+        # tell at a glance.
+        if variant.get("uses_arbiter", True):
+            infra_note = (
+                "# Read-only variants dispatch through arbiter/src/lnd.py "
+                "to the fake lncli at $LNCLI_BIN; state-changing variants "
+                "remain refused at the allowlist and never reach the "
+                "lnd module. No live bitcoind / LND traffic for any "
+                "variant in the current manifest.\n"
+            )
+        else:
+            infra_note = (
+                "# Local-only variant: never reaches the arbiter, so no "
+                "bitcoind / LND interaction is possible.\n"
+            )
+        (artifact_dir / "infra-events.log").write_text(infra_note)
 
         # The petcli prints one JSON object on stdout (compact, key-
         # sorted). Parse for the expected check and re-emit pretty-

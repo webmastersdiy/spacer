@@ -1,3 +1,0 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":60088},"ts":"2026-05-08T13:36:39Z"}
-{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-05-08T13:36:39Z"}
-{"event":"decision_defer_hitl","payload":{"op":"query_channels"},"ts":"2026-05-08T13:36:39Z"}

@@ -13,7 +13,11 @@ not-yet-validated.
 
 Variants currently absent from the manifest correspond to code paths
 that are not yet reachable end-to-end (happy-path send-bitcoin /
-send-lightning, real query-balance / query-channels, registry-token
-rejection paths). They will be added once the gateway's allowlist
-policy table format (sp-77lxs.2) lands and the gateway dispatch is
-wired through to bitcoin / LND clients.
+send-lightning, registry-token rejection paths). They will be added
+once the gateway's allowlist policy table format (sp-77lxs.2) lands
+for the state-changing ops and the gateway dispatch is wired through
+to the bitcoin client. Read-only query-balance / query-channels are
+already wired: the gateway admits them through a hardcoded read-only
+allowlist (a partial sp-77lxs.2 stand-in), dispatch reads
+arbiter/src/lnd.py, and the runner installs a fake lncli so the
+variants validate deterministically.

@@ -32,6 +32,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
+import lnd
 import registry
 import results
 import state
@@ -243,16 +244,29 @@ def _parse_request(raw):
     return obj
 
 
+# Read-only ops the gateway admits without consulting a policy table.
+# These touch arbiter-internal node state (LND wallet / channel
+# balances), have no recipient_token, are not state-changing, and the
+# response is banded before egress so per-call values do not leak
+# precise satoshi totals to the petitioner. sp-77lxs.2's policy table
+# format will replace this hardcoded set with a queryable schema; until
+# then this minimal frozenset is the partial allowlist the read-only
+# exit-loop variants exercise end-to-end. State-changing ops
+# (send_bitcoin, send_lightning) remain default-refused.
+_ALLOWED_READ_OPS = frozenset({"query_balance", "query_channels"})
+
+
 def _allowlist_admits(request):
     """Outbound allowlist gate.
 
     Backed by policy tables in local state. Schema for those tables is
-    blocked on sp-77lxs.2; until then the skeleton refuses every call,
-    which is the strict-default safe behavior: no skeleton call ever
-    reaches network. A reviewer can confirm by inspection that nothing
-    state-changing escapes this gate while the policy is unwritten.
+    blocked on sp-77lxs.2; until that lands, the gateway admits the
+    fixed read-only set in _ALLOWED_READ_OPS and refuses every other
+    call. State-changing ops therefore still hit the strict-default
+    refuse path - no send_bitcoin or send_lightning request escapes
+    this gate while the policy is unwritten.
     """
-    return False
+    return request.get("op") in _ALLOWED_READ_OPS
 
 
 def _hitl_park(request):
@@ -346,16 +360,49 @@ def _handle_poll(handler, request, deadline):
     _respond_ok(handler, response, deadline)
 
 
+# Fixed band resolution for the read-only query responses. Production
+# banding (sp-77lxs.4) replaces this with randomized band edges that
+# rotate per call; the floored form here is deterministic so the
+# exit-loop test artifacts diff cleanly across runs. The 10_000-sat
+# (~0.0001 BTC) resolution is wide enough that wallet-level dust
+# movements do not change the banded value.
+_BAND_SATS = 10_000
+
+
+def _band_sats(amount):
+    """Floor-band an integer satoshi amount to _BAND_SATS resolution."""
+    return (int(amount) // _BAND_SATS) * _BAND_SATS
+
+
 def _dispatch(request):
     """Hand the (post-allowlist, post-pseudonymize) request to arbiter
     internals.
 
-    The dispatch table is empty in the skeleton. Returning a uniform
-    not-implemented response makes the no-bypass property explicit for
-    review: this function is the only call site from the gateway into
-    the rest of the arbiter, and right now it reaches nothing.
+    Only the read-only query ops are wired in this skeleton. State-
+    changing ops never reach this function (the allowlist refuses
+    them above) so dispatch's "not_implemented" fallback covers
+    forward-compatibility for any op that slips past a future
+    allowlist change without a matching dispatch entry.
+
+    query_balance returns the LND on-chain wallet's total balance,
+    floor-banded to _BAND_SATS so the precise satoshi value never
+    leaves the arbiter (mitigation map: numeric banding).
+
+    query_channels returns the LND channel pool's aggregate capacity
+    (local + remote, also banded). Aggregate-by-default per §4.3:
+    per-channel detail is suppressed without a per-call justification.
     """
-    return {"status": "not_implemented", "op": request.get("op")}
+    op = request.get("op")
+    if op == "query_balance":
+        raw = lnd.walletbalance()
+        total = int(raw.get("total_balance", "0"))
+        return {"status": "ok", "balance_sats": _band_sats(total)}
+    if op == "query_channels":
+        raw = lnd.channelbalance()
+        local = int(raw.get("local_balance", {}).get("sat", "0"))
+        remote = int(raw.get("remote_balance", {}).get("sat", "0"))
+        return {"status": "ok", "capacity_sats": _band_sats(local + remote)}
+    return {"status": "not_implemented", "op": op}
 
 
 def _hide_secrets(response):

@@ -1,1 +1,1 @@
-# No bitcoind / LND infrastructure events: gateway dispatch (_dispatch in arbiter/src/gateway.py) is a not-implemented stub until sp-77lxs.2 (allowlist policy) and downstream wiring land. No RPC traffic is emitted for any variant in the current manifest.
+# Local-only variant: never reaches the arbiter, so no bitcoind / LND interaction is possible.
