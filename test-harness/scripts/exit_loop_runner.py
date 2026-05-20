@@ -68,11 +68,13 @@ import gateway  # noqa: E402
 import results  # noqa: E402
 import state  # noqa: E402
 
-# registry and timing register their own SQLite schemas at import time
-# (their _SCHEMA fragments call state.register_schema). The arbiter
-# boot path imports them for that side effect; mirror it here so the
-# in-thread arbiter sees the full schema, not just gateway+results.
+# registry, timing, and scale register their own SQLite schemas at
+# import time (their _SCHEMA fragments call state.register_schema). The
+# arbiter boot path imports them for that side effect; mirror it here
+# so the in-thread arbiter sees the full schema, not just
+# gateway+results.
 import registry  # noqa: E402, F401
+import scale  # noqa: E402
 import timing  # noqa: E402, F401
 
 # Test-mode timing on the arbiter side: SPACER_TIMING_MODE=test
@@ -82,6 +84,13 @@ import timing  # noqa: E402, F401
 # import-time check that lands later will see the test-mode value
 # without a re-run of the runner.
 os.environ["SPACER_TIMING_MODE"] = "test"
+
+# Scale cloak in test mode: deterministic per-tier scales (0.1^tier)
+# and 5-15s transition windows. Production scale-cloak (multi-day
+# randomized delays, randomized within-tier scales) is gated behind a
+# NotImplementedError in scale.py, so without this opt-in every
+# read-only query variant would refuse uniformly at dispatch time.
+os.environ["SPACER_SCALE_MODE"] = "test"
 
 # Test-deployment estimate regime on the petitioner side (§10): the
 # petcli's estimate.py honors this when stamping the local upper-bound
@@ -109,10 +118,10 @@ _LNCLI_FAKE.write_text(
 # the way arbiter/src/lnd.py prepends them, then dispatches on the
 # RPC name. The scenario is selected via $LNCLI_SCENARIO so the same
 # fake binary can stand in for different node states (funded vs.
-# empty wallet, channels vs. no channels) across variants without
-# swapping the binary. Values are deterministic; the runner's
-# variant matchers encode the banded form (floor to 10_000 sats)
-# directly.
+# empty wallet, channels vs. no channels, cloak-tier 1 vs 2) across
+# variants without swapping the binary. Values are deterministic;
+# the runner's variant matchers encode the cloaked-and-presented
+# form (scale.present(real) at the active tier) directly.
 while [ $# -gt 0 ]; do
   case "$1" in
     --rpcserver=*|--tlscertpath=*|--macaroonpath=*|--network=*) shift;;
@@ -126,8 +135,19 @@ case "$1" in
       empty)
         printf '{"total_balance":"0","confirmed_balance":"0","unconfirmed_balance":"0"}'
         ;;
+      tier-1)
+        # 150_000 sat -> natural cloak tier T1.
+        printf '{"total_balance":"150000","confirmed_balance":"150000","unconfirmed_balance":"0"}'
+        ;;
+      tier-2)
+        # 1_500_000 sat -> natural cloak tier T2.
+        printf '{"total_balance":"1500000","confirmed_balance":"1500000","unconfirmed_balance":"0"}'
+        ;;
       *)
-        printf '{"total_balance":"100000","confirmed_balance":"100000","unconfirmed_balance":"0"}'
+        # Default funded scenario: 50_000 sat is clearly inside T0
+        # so the cloak is a no-op (scale 1.0) and the wire response
+        # is the raw figure - the simplest legible reference variant.
+        printf '{"total_balance":"50000","confirmed_balance":"50000","unconfirmed_balance":"0"}'
         ;;
     esac
     ;;
@@ -204,6 +224,15 @@ def _apply_precondition(precondition):
       ("consume", handle)
         Marks a deposited result already-consumed. Exercises the
         idempotent-retrieval path without a prior poll.
+      ("seed_scale_state", active_tier, active_scale, target_tier,
+                           target_scale, due_at_delta_s)
+        Direct write of the singleton scale_state row via
+        scale.seed_for_test(). due_at_delta_s is interpreted relative
+        to now (positive = future, negative = past, None = no pending
+        transition); the runner converts it to an absolute epoch
+        timestamp before handing to scale. Lets cloaked-tier variants
+        exercise the pending-transition and applied-transition paths
+        without driving a real wall-clock delay.
     """
     op = precondition[0]
     if op == "deposit":
@@ -226,6 +255,16 @@ def _apply_precondition(precondition):
                 "UPDATE results SET consumed = 1, consumed_at = ? WHERE handle = ?",
                 (time.time(), handle),
             )
+    elif op == "seed_scale_state":
+        (_, active_tier, active_scale, target_tier, target_scale,
+         due_at_delta_s) = precondition
+        due_at = (
+            None if due_at_delta_s is None
+            else time.time() + float(due_at_delta_s)
+        )
+        scale.seed_for_test(
+            active_tier, active_scale, target_tier, target_scale, due_at,
+        )
     else:
         raise ValueError(f"unknown precondition op {op!r}")
 
@@ -434,16 +473,18 @@ VARIANTS = [
         "preconditions": [],
         "expected": lambda r: r == {
             "status": "ok",
-            "balance_sats": 100000,
+            "balance_sats": 50000,
         },
         "description": (
             "Read-only balance query traverses the partial allowlist "
             "(query_balance is in _ALLOWED_READ_OPS), dispatch reads "
-            "lnd.walletbalance() via the fake lncli (total_balance=100000),"
-            " and the gateway floor-bands the value to 10_000-sat "
-            "resolution. The fake's value is already a band multiple "
-            "so the banded result matches verbatim. Audit logs "
-            "request_received and decision_allow."
+            "lnd.walletbalance() via the fake lncli (total_balance=50000),"
+            " and the gateway routes it through scale.present(). 50k is "
+            "comfortably inside T0 [0, 100k) so the cloak is a no-op "
+            "(scale 1.0) and the wire response is the raw figure. "
+            "Confirms the no-cloak branch of dispatch is wired "
+            "correctly. Audit logs request_received, scale_tier_init, "
+            "decision_allow."
         ),
     },
     {
@@ -458,10 +499,11 @@ VARIANTS = [
         "description": (
             "Channels query traverses the partial allowlist, dispatch "
             "reads lnd.channelbalance() via the fake lncli "
-            "(local=50000, remote=30000), and the gateway returns "
-            "the aggregate capacity (80000) floor-banded to 10_000 sat. "
-            "Per-channel detail is suppressed (aggregate-by-default, "
-            "§4.3). Audit logs request_received and decision_allow."
+            "(local=50000, remote=30000), aggregates to 80000, and the "
+            "gateway routes it through scale.present(). 80k is inside "
+            "T0 [0, 100k) so the cloak is a no-op. Per-channel detail "
+            "is suppressed (aggregate-by-default, §4.3). Audit logs "
+            "request_received, scale_tier_init, decision_allow."
         ),
     },
     {
@@ -477,11 +519,10 @@ VARIANTS = [
         "description": (
             "Same dispatch path as the funded variant, but the fake "
             "lncli reports total_balance=0 under LNCLI_SCENARIO=empty. "
-            "The gateway's banded response is balance_sats=0, which is "
-            "petitioner-visibly indistinguishable from any wallet "
-            "balance below the 10_000-sat band. Confirms the dispatch "
-            "and banding logic handle the zero-balance edge without "
-            "leaking the precise (zero) figure as a different status."
+            "0 is inside T0 so the cloak is a no-op (scale 1.0) and "
+            "the wire response is balance_sats=0. Confirms the zero-"
+            "balance edge without leaking the precise (zero) figure as "
+            "a different status."
         ),
     },
     {
@@ -496,10 +537,121 @@ VARIANTS = [
         },
         "description": (
             "Channels query when lncli reports zero local + zero "
-            "remote capacity (LNCLI_SCENARIO=no-channels). The gateway "
-            "returns capacity_sats=0; same status as a funded pool "
-            "below the 10_000-sat band, so the wire response does not "
-            "distinguish 'no channels' from 'sub-band channels'."
+            "remote capacity (LNCLI_SCENARIO=no-channels). 0 is inside "
+            "T0 so the cloak is a no-op; the gateway returns "
+            "capacity_sats=0, petitioner-visibly indistinguishable "
+            "from any wallet that has channels but real capacity below "
+            "the cloak's sub-tier resolution."
+        ),
+    },
+    # --- scale cloaking: GLOSSARY 'Scale cloaking'. The first two
+    # exercise the no-pending-transition path at higher tiers (cloak
+    # init picks the natural tier and the deterministic test-mode
+    # scale). The last two exercise the transition state machine:
+    # one with a future due_at (drift > range allowed) and one with a
+    # past due_at (apply on next present() call).
+    {
+        "path": ("query", "balance", "cloaked-tier-1"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "lncli_scenario": "tier-1",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 15000,
+        },
+        "description": (
+            "Wallet real total 150_000 sat -> natural tier T1. With "
+            "no prior scale_state row, scale.present() initializes "
+            "the cloak at T1 (test-mode deterministic scale 0.1) and "
+            "presents 150_000 * 0.1 = 15_000. Confirms the cloak's "
+            "init path picks the natural tier from a non-T0 wallet "
+            "and the petitioner sees a sat figure compressed by an "
+            "order of magnitude. Audit logs scale_tier_init."
+        ),
+    },
+    {
+        "path": ("query", "balance", "cloaked-tier-2"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "lncli_scenario": "tier-2",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 15000,
+        },
+        "description": (
+            "Wallet real total 1_500_000 sat -> natural tier T2 "
+            "(scale 0.01). scale.present() initializes at T2 and "
+            "presents 1_500_000 * 0.01 = 15_000. The wire response "
+            "is IDENTICAL to the cloaked-tier-1 variant despite the "
+            "real total being 10x larger - that is the point of the "
+            "cloak (GLOSSARY 'Scale cloaking'). Audit logs "
+            "scale_tier_init."
+        ),
+    },
+    {
+        "path": ("query", "balance", "transition-pending"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "lncli_scenario": "tier-1",
+        "preconditions": [
+            # Seed: wallet was at T0 (scale 1.0); a transition to T1
+            # (scale 0.1) has been scheduled for 1h in the future.
+            # present() must NOT apply it yet; presented value comes
+            # from the OLD active scale (1.0), so 150_000 * 1.0 =
+            # 150_000 is the wire response. This is the GLOSSARY's
+            # 'drift > range' property: real grew past 100k while
+            # active_tier is still T0, presented = 150_000 deliberately
+            # exceeds the 0-100k window.
+            ("seed_scale_state", 0, 1.0, 1, 0.1, 3600.0),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 150000,
+        },
+        "description": (
+            "Pending tier shift, future due_at. scale_state was seeded "
+            "with active_tier=0 / target_tier=1 / due_at=now+1h before "
+            "the petitioner's call; present(150_000) sees the pending "
+            "transition is not yet due, uses the OLD active scale "
+            "(1.0), and returns 150_000. The presented value briefly "
+            "falls outside the 0-100k cloak window - this is the "
+            "GLOSSARY 'drift > range' property: privacy beats range-"
+            "fidelity because forcing the range immediately would "
+            "re-couple the tier shift to the underlying fund movement. "
+            "Audit log does NOT contain scale_tier_shift_applied for "
+            "this variant."
+        ),
+    },
+    {
+        "path": ("query", "balance", "transition-applied"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "lncli_scenario": "tier-1",
+        "preconditions": [
+            # Seed: wallet was at T0; a transition to T1 was scheduled
+            # 5s AGO. present() must auto-apply the shift, audit-log
+            # scale_tier_shift_applied, and present at the new scale:
+            # 150_000 * 0.1 = 15_000.
+            ("seed_scale_state", 0, 1.0, 1, 0.1, -5.0),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 15000,
+        },
+        "description": (
+            "Past-due tier shift. scale_state was seeded with "
+            "active_tier=0 / target_tier=1 / due_at=now-5s. The "
+            "petitioner's first call drives present(150_000), which "
+            "applies the pending shift atomically (active becomes T1 / "
+            "0.1, target_* cleared, audit-logs "
+            "scale_tier_shift_applied) and returns 150_000 * 0.1 = "
+            "15_000. The petitioner-visible drop from a presumably "
+            "higher pre-shift presented value (under the old T0 scale) "
+            "to 15_000 is by construction indistinguishable from a "
+            "real send. arbiter-events.log MUST contain a "
+            "scale_tier_shift_applied entry for this variant."
         ),
     },
 ]

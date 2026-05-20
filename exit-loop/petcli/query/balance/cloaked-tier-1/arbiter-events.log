@@ -1,0 +1,4 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":63406},"ts":"2026-05-20T18:06:12Z"}
+{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-05-20T18:06:12Z"}
+{"event":"scale_tier_init","payload":{"real_sats":150000,"scale":0.1,"tier":1},"ts":"2026-05-20T18:06:12Z"}
+{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-05-20T18:06:12Z"}

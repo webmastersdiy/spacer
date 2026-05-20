@@ -35,6 +35,7 @@ import audit
 import lnd
 import registry
 import results
+import scale
 import state
 
 # Loopback by default. The gateway binds the loopback interface because
@@ -360,20 +361,6 @@ def _handle_poll(handler, request, deadline):
     _respond_ok(handler, response, deadline)
 
 
-# Fixed band resolution for the read-only query responses. Production
-# banding (sp-77lxs.4) replaces this with randomized band edges that
-# rotate per call; the floored form here is deterministic so the
-# exit-loop test artifacts diff cleanly across runs. The 10_000-sat
-# (~0.0001 BTC) resolution is wide enough that wallet-level dust
-# movements do not change the banded value.
-_BAND_SATS = 10_000
-
-
-def _band_sats(amount):
-    """Floor-band an integer satoshi amount to _BAND_SATS resolution."""
-    return (int(amount) // _BAND_SATS) * _BAND_SATS
-
-
 def _dispatch(request):
     """Hand the (post-allowlist, post-pseudonymize) request to arbiter
     internals.
@@ -385,23 +372,33 @@ def _dispatch(request):
     allowlist change without a matching dispatch entry.
 
     query_balance returns the LND on-chain wallet's total balance,
-    floor-banded to _BAND_SATS so the precise satoshi value never
-    leaves the arbiter (mitigation map: numeric banding).
+    routed through scale.present() so the precise satoshi value AND
+    the wallet's order of magnitude are hidden from the petitioner.
+    The cloak is on; numeric banding (the old _band_sats step) is
+    deliberately dropped for these ops because the cloak's per-tier
+    scale already provides 10x+ compression of the presented value -
+    layering a fixed-resolution band on top would muddy the math
+    without adding meaningful privacy. Banding remains the design for
+    fields that are NOT cloak-eligible (e.g., per-call fee amounts on
+    send paths); those land with their own beads.
 
     query_channels returns the LND channel pool's aggregate capacity
-    (local + remote, also banded). Aggregate-by-default per §4.3:
-    per-channel detail is suppressed without a per-call justification.
+    (local + remote), also routed through scale.present(). Aggregate-
+    by-default per §4.3: per-channel detail is suppressed without a
+    per-call justification.
+
+    Per GLOSSARY 'Scale cloaking' and §4.3.
     """
     op = request.get("op")
     if op == "query_balance":
         raw = lnd.walletbalance()
         total = int(raw.get("total_balance", "0"))
-        return {"status": "ok", "balance_sats": _band_sats(total)}
+        return {"status": "ok", "balance_sats": scale.present(total)}
     if op == "query_channels":
         raw = lnd.channelbalance()
         local = int(raw.get("local_balance", {}).get("sat", "0"))
         remote = int(raw.get("remote_balance", {}).get("sat", "0"))
-        return {"status": "ok", "capacity_sats": _band_sats(local + remote)}
+        return {"status": "ok", "capacity_sats": scale.present(local + remote)}
     return {"status": "not_implemented", "op": op}
 
 
