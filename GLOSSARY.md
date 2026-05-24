@@ -500,13 +500,15 @@ glyphs (no I, L, O, U); operator-typed I or L normalize to 1 and O
 to 0 before validation. Damm32 catches every single-character
 mutation and every adjacent transposition of distinct characters.
 
-**Destination gate.** The registry IS the destination gate. There
-is no separate outbound-policy mechanism: a state-changing call
-carries a `recipient_token`; the privacy gateway calls
-`registry.lookup()` during pseudonymize-inbound; any outcome other
-than `ok` (bad checksum, unknown, expired, already used, anomalous)
-collapses to the uniform "destination unavailable" refusal. The
-audit log differentiates the cause for operator triage.
+**Destination gate (who).** The registry gates *who* can be a
+destination. A state-changing call carries a `recipient_token`;
+the privacy gateway calls `registry.lookup()` during
+pseudonymize-inbound; any outcome other than `ok` (bad checksum,
+unknown, expired, already used, anomalous) collapses to the
+uniform "destination unavailable" refusal. The audit log
+differentiates the cause for operator triage. *Which* actions to a
+resolved destination flow through without a HITL pause is a
+separate gate - see [standing approvals](#standing-approvals).
 
 **Probing infeasibility.** An AI cannot map the destination
 universe by submitting candidate tokens in a tight loop. Four
@@ -536,15 +538,71 @@ with response time. (Test mode collapses this delay; see the
 test-mode timing rules in the architecture overview's exit
 criteria.)
 
+### Standing approvals
+
+The operator's pre-approved-actions config. By default, every
+state-changing call - even one that resolves a valid recipient
+token through the [registry](#recipient-address-registry) - pauses
+at the arbiter console for [HITL](#human-in-the-loop-hitl-approval)
+approval. A standing approval is a rule the operator has written
+down ahead of time that lets a specific (op, destination,
+amount-band) tuple dispatch without pausing. The privacy gateway
+checks the resolved call against the standing approvals after the
+registry resolves the destination; first match wins and dispatch
+proceeds; no match parks in HITL.
+
+**Default-pause is the design.** The standing approvals file ships
+empty. Two reasons:
+
+1. **Pedagogy.** The operator builds working knowledge of what the
+   AI is actually trying to do by reviewing each call in person
+   before ratifying it. After approving the same shape of call a
+   few times via HITL, the operator can convert it to a standing
+   approval. The friction is the teacher.
+2. **Asymmetric risk.** The cost of accidentally letting a
+   malicious or buggy AI call through is financial loss; the cost
+   of a pause is the operator's time. The first dominates. Default
+   to pause; loosen as trust develops.
+
+**Storage substrate.** A YAML file at a known path on the arbiter,
+hand-edited by the operator at the directly-attached console (same
+KVM and same edit workflow as the recipient address registry, per
+§2.1's minimal-and-manual discipline). The arbiter does not learn
+what to approve from the AI's behavior; the operator decides what
+gets exempted, writes it down, and the change is captured by the
+[arb-auditability](../design-docs/origin/06--2026-05-24-0623-arb-auditability.md)
+snapshot.
+
+**Entry shape (sketch).** Each rule names an op, a destination
+token (or "any" for broader rules the operator chose to write),
+optional amount band ("up to N sats", "exactly N sats"), and a
+free-text rationale the operator wrote for their own future self.
+Schema details land with the implementation.
+
+**Scope.** Standing approvals apply to state-changing ops
+(`send_bitcoin`, `send_lightning`). Read-only ops (`query_balance`,
+`query_channels`) dispatch unconditionally - they are protected by
+other mechanisms ([banding](#banding-numeric-value-banding),
+[scale cloaking](#scale-cloaking),
+[aggregate-by-default](#aggregate-by-default)) and HITL on every
+balance check would be unworkable friction.
+
+**Caveat.** Every line of standing approval is a decision the
+operator made that some future call would not get reviewed. A long
+config means a small surface of real human oversight. The
+discipline is to keep the config short and concrete, not to grow
+it indefinitely.
+
 ### Human-in-the-loop (HITL) approval
 
-When the arbiter receives a request whose op is not one of the
-recognized handlers - any op outside the known read set
-(`query_balance`, `query_channels`) and the known write set
-(`send_bitcoin`, `send_lightning`) - the arbiter pauses the call
-and surfaces it to the operator (a human) on a fully out-of-band
-channel. The call only proceeds on explicit human assent. The
-recognized ops dispatch without ceremony; HITL catches the rest.
+When the privacy gateway receives a state-changing call that does
+not match any [standing approval](#standing-approvals) on the
+arbiter, the gateway pauses the call and surfaces it to the
+operator (a human) on a fully out-of-band channel. The call only
+proceeds on explicit human assent. Unknown ops - anything outside
+the recognized read set (`query_balance`, `query_channels`) and
+write set (`send_bitcoin`, `send_lightning`) - also trip HITL by
+default, regardless of standing approvals.
 
 Out-of-band means: the request and response never travel on the
 petitioner's RPC channel and the AI never sees the request. The
@@ -558,9 +616,17 @@ clipboard between the arbiter console and the AI's environment, so
 only handles the operator deliberately retypes can ever leave the
 arbiter.
 
+**Default-pause is deliberate.** Early in a deployment HITL fires
+often because the [standing approvals](#standing-approvals) config
+starts empty. That is intentional: the operator builds working
+knowledge of the AI's behavior by reviewing each call in person,
+then ratifies trusted patterns as standing approvals. The pause is
+both a safety mechanism and a pedagogy mechanism.
+
 Caveat: a human who clicks "approve" on every prompt provides no
 defense; the surface must be scoped tightly enough that approvals
-are rare and meaningful.
+are rare and meaningful, and the standing-approvals config short
+enough that the operator remembers what is in it.
 
 ### Aggregate-by-default
 
