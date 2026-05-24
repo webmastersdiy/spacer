@@ -13,7 +13,7 @@ calling register_schema() at import time; migrate() applies all
 registered fragments idempotently. Subsystems reach the database via
 the connect() context manager.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.4.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.4.
 """
 import os
 import sqlite3

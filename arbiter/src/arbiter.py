@@ -8,7 +8,7 @@ boot path. Operator-side commands (registry-add, HITL-approve, etc.)
 arrive in their own files in later beads and reach state directly,
 not through the gateway.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §2.1, §3, §4.1.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §2.1, §3, §4.1.
 """
 import audit
 import gateway

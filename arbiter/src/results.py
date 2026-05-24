@@ -9,7 +9,7 @@ window elapses on a §4.7 "destination unavailable" outcome, the
 registry against the original handle. The petitioner retrieves it
 by polling the privacy gateway for that handle.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.8.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.8.
 
 Four properties:
 

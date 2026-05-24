@@ -9,7 +9,7 @@ point. There are no other entry points to the arbiter from the network:
 bitcoind, LND, the audit log, local state, and the timing layer all sit
 behind this module.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.1.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.1.
 
 Several mechanisms are placeholders pending open design questions or
 later beads:

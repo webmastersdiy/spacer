@@ -8,7 +8,7 @@ write. There is no code path in this module that edits or deletes
 existing records; immutability rests on that absence and on the fact
 that the petitioner cannot reach the arbiter's filesystem at all.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.5.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.5.
 """
 import json
 import os

@@ -5,7 +5,7 @@ The single first-class function of the petitioner is to translate AI
 requests into spacer-protocol messages and present the arbiter's
 responses back. This module is the protocol layer.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §5.1, §3, §4.1.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §5.1, §3, §4.1.
 
 Wire format (matches arbiter/src/gateway.py):
 - Transport: HTTP POST to http://<host>:<port>/, Content-Type:

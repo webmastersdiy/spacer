@@ -10,7 +10,7 @@ translates AI requests into spacer-protocol messages, presents the
 arbiter's responses back, and computes a local upper-bound estimate
 for the action+result delay window (§5.2).
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §5.1, §5.2.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §5.1, §5.2.
 
 Constraints:
 - Holds no secrets, no policy, no state the AI cannot already reach.

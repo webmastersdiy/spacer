@@ -413,7 +413,7 @@ browser funding in step 2.
 ## 11. Pointers
 
 - **Privacy/leak analysis** for every API call above:
-  `~/spacer/design-docs/2026-05-02-1601-privacy-and-timing-leaks.md`
+  `~/spacer/design-docs/origin/01-2026-05-02-1601-privacy-and-timing-leaks.md`
 - **ldk-node install investigation:** `~/spacer/test-harness/state/INSTALL_BLOCKER.md`
 - **Node credentials:** `~/spacer/test-harness/state/nodeA.env`, `~/spacer/test-harness/state/faucet.env`
 - **Voltage dashboard:** `https://voltage.cloud`

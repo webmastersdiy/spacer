@@ -30,7 +30,7 @@ The arbiter is single-process and single-threaded by design (§4.1,
 gateway.serve()), so the singleton scale_state row is read-modify-
 written without explicit locking; SQLite's WAL serializes writers.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.1, §4.3,
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.1, §4.3,
 §6, and GLOSSARY 'Scale cloaking'.
 
 Mode selection (SPACER_SCALE_MODE) mirrors timing.py:

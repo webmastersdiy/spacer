@@ -1,5 +1,5 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":63384},"ts":"2026-05-20T18:06:04Z"}
-{"event":"result_deposit","payload":{"created_at":1779300364.97209,"handle":"h_result","kind":"result"},"ts":"2026-05-20T18:06:04Z"}
-{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-20T18:06:05Z"}
-{"event":"result_poll_ok","payload":{"handle":"h_result","kind":"result"},"ts":"2026-05-20T18:06:05Z"}
-{"event":"decision_allow","payload":{"op":"poll"},"ts":"2026-05-20T18:06:05Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":57940},"ts":"2026-05-24T12:44:52Z"}
+{"event":"result_deposit","payload":{"created_at":1779626692.1601012,"handle":"h_result","kind":"result"},"ts":"2026-05-24T12:44:52Z"}
+{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-24T12:44:52Z"}
+{"event":"result_poll_ok","payload":{"handle":"h_result","kind":"result"},"ts":"2026-05-24T12:44:52Z"}
+{"event":"decision_allow","payload":{"op":"poll"},"ts":"2026-05-24T12:44:52Z"}

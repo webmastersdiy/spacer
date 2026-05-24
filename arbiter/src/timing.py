@@ -32,7 +32,7 @@ The arbiter is single-process and single-threaded by design (§4.1,
 gateway.serve()), so the database operations here run without
 contention and need no explicit locking.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.6, §4.7,
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.6, §4.7,
 §10.
 """
 import json

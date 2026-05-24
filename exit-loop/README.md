@@ -1,7 +1,7 @@
 # exit-loop/
 
 Implementation closed loop artifacts. See §10 of
-`../design-docs/2026-05-05-0948-architecture-overview.md` for the
+`../design-docs/origin/05-2026-05-05-0948-architecture-overview.md` for the
 exit gate, coverage scope, test-mode timing rules, parallel-execution
 guidance, iteration loop, and artifact layout.
 

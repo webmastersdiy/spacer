@@ -2,7 +2,7 @@
 LND client access: subprocess wrapper for the deployment's LND
 instance via lncli.
 
-Per design-docs/2026-05-05-0948-architecture-overview.md §4.3.
+Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.3.
 
 Wrapper choice: this module shells out to lncli directly via
 subprocess (argv list, no shell). It deliberately does NOT depend
