@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 End-to-end validation runner for the spacer implementation closed
-loop (§10 of design-docs/origin/05-2026-05-05-0948-architecture-overview.md).
+loop (§10 of design-docs/origin/05--2026-05-05-0948-architecture-overview.md).
 
 For every variant declared in VARIANTS:
   1. Spin up a fresh arbiter in a daemon thread, isolated to its own
@@ -40,7 +40,7 @@ pending sp-77lxs.2's allowlist policy table format), so
 infra-events.log records that fact rather than capturing real RPC
 traffic.
 
-Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §10.
+Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
 import json
 import os

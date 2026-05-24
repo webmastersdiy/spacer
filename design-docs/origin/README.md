@@ -1,35 +1,14 @@
 # Design docs - origin set
 
-The original spacer design docs, frozen here for historical reference.
-These are the docs that defined the architecture and threat model up
-to and including the implementation closed loop (§10). New design work
-goes elsewhere under `design-docs/` (one directory per initiative);
-this `origin/` folder is the founding set.
+The founding spacer design docs: the set that established the
+architecture, the threat model, and the implementation closed loop
+(§10). Still actively edited - this folder is not frozen. New design
+work that fits the founding set continues here under the same naming
+convention; new work for a separate initiative goes in a sibling
+directory under `design-docs/`.
 
-## Naming
-
-Every doc here uses a two-part filename:
-
-```
-NN-YYYY-MM-DD-HHMM-<name>.md
-```
-
-- `NN` - two-digit chronological index across the origin set (`00`,
-  `01`, ...). Indices are assigned once at archive time and never
-  rewritten, so a reader can cite "doc 05" without retyping the full
-  date. The `NN-` prefix is the load-bearing sort key (`ls` orders by
-  it directly); the embedded date is kept for provenance.
-- `YYYY-MM-DD-HHMM` - creation date and 24-hour time the doc was
-  originally authored (no separator inside the time). Kept verbatim
-  from the pre-prefix filenames so the historical record is preserved.
-- `<name>` - short kebab-case slug describing the doc.
-
-## Examples
-
-```
-00-2026-05-02-1600-lnd-mutinynet-test-flow.md
-05-2026-05-05-0948-architecture-overview.md
-```
+See the top-level [`design-docs/README.md`](../README.md) for the
+filename convention.
 
 ## Rule: AI-facing vs world-facing privacy
 

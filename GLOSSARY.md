@@ -76,7 +76,7 @@ Arbiter implementation discipline (manual auditability,
 `spacer/arbiter/src/` layout, minimal-and-inline-documented-only
 constraints) is documented in the architecture doc.
 
-See also: [Architecture overview, §2.1](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#21-arbiter-implementation-discipline).
+See also: [Architecture overview, §2.1](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#21-arbiter-implementation-discipline).
 
 ### Petitioner
 
@@ -110,7 +110,7 @@ artifact. Position in the data flow, the limited-and-airtight
 constraints, and the per-request mechanism list are documented in
 the architecture doc.
 
-See also: [Architecture overview, §3](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#3-end-to-end-data-flow) and [§4.1](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#41-privacy-gateway).
+See also: [Architecture overview, §3](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#3-end-to-end-data-flow) and [§4.1](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#41-privacy-gateway).
 
 ### AI-facing privacy
 
@@ -461,7 +461,7 @@ across wallets and across shifts.
 
 ### Outbound allowlist
 
-> **Status: open.** See [Architecture overview, §7](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#7-open-design-questions) (policy table format).
+> **Status: open.** See [Architecture overview, §7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions) (policy table format).
 
 Every state-changing or network-touching call (`connect`, `sendcoins`,
 `openchannel`, `payinvoice`, `sendrawtransaction`) is gated against a
@@ -470,7 +470,7 @@ direct funds or connections to arbitrary targets. Caveat: a static
 allowlist that never changes is its own fingerprint ("this operator
 only ever pays 3 destinations").
 
-See also: [Architecture overview, §7](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#7-open-design-questions).
+See also: [Architecture overview, §7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions).
 
 ### Human-in-the-loop (HITL) approval
 
@@ -587,7 +587,7 @@ similar actions for the anonymity set to actually hold.
 
 ### Result delay
 
-> **Status: open.** See [Architecture overview, §7](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#7-open-design-questions) (result-delivery status enum).
+> **Status: open.** See [Architecture overview, §7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions) (result-delivery status enum).
 
 Mandatory wait between the arbiter completing an action and the
 petitioner learning the result. After the action goes out, the
@@ -601,7 +601,7 @@ gateway enforces a 10-minute minimum interval between polls for a
 given handle. Sibling to **Action delay**: same window construction,
 same ~12 hour hard floor; randomized within bounds driven by
 observed network activity for similar result-shapes. See
-[Architecture overview, §4.8](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#48-result-registry).
+[Architecture overview, §4.8](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#48-result-registry).
 
 Purpose: a second layer of de-correlation. Even if a global observer
 eventually links the on-chain action back to our node, the AI's
@@ -629,14 +629,14 @@ past the upper bound and no result -> assume lost, decide whether to
 re-initiate; result arrived -> success / failure. The petitioner
 computes this estimate locally from its own view of similar global
 activity; no estimate information comes from the arbiter, and the
-arbiter offers no guarantee on the bound. See [Architecture overview, §5.2](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#52-estimate-display).
+arbiter offers no guarantee on the bound. See [Architecture overview, §5.2](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#52-estimate-display).
 
 Caveat: a long secondary wait increases the risk that real-world
 conditions change (fees, channel state, counterparty behavior)
 between action and result-knowledge, so the floor is a tradeoff
 with operational reliability, not just a knob to turn up.
 
-See also: [Architecture overview, §4.6](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#46-timing-layer) and [§7](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#7-open-design-questions).
+See also: [Architecture overview, §4.6](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#46-timing-layer) and [§7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions).
 
 ### Audit log
 
@@ -731,7 +731,7 @@ do not function as event signals.
 The world-facing side of this leak (chain observers correlating a
 funding tx with downstream payment activity) is a separate threat
 model, addressed in
-`design-docs/origin/04-2026-05-02-1700-node-privacy-from-the-world.md`.
+`design-docs/origin/04--2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ## Inherent leaks
 
@@ -792,7 +792,7 @@ parent folders live under `arbiter/`, `petitioner/`, or
 `test-harness/`, with project-level artifacts at the root - is
 itself part of the vocabulary.
 
-See also: [Architecture overview, §9](design-docs/origin/05-2026-05-05-0948-architecture-overview.md#9-current-physical-layout).
+See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#9-current-physical-layout).
 
 ## See also
 

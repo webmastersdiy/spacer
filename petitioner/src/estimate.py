@@ -1,7 +1,7 @@
 """
 Local upper-bound estimate for the action+result delay window (§5.2).
 
-Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §5.2:
+Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §5.2:
 - The petitioner computes the estimate locally from its own view of
   similar global activity.
 - No estimate information comes from the arbiter, and the arbiter

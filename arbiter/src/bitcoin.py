@@ -2,7 +2,7 @@
 Bitcoin client access: subprocess wrapper for the locally self-hosted
 bitcoind under arbiter/bitcoin/.
 
-Per design-docs/origin/05-2026-05-05-0948-architecture-overview.md §4.2.
+Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §4.2.
 
 Wrapper choice: this module shells out to the bitcoin-cli binary
 directly via subprocess (argv list, no shell). It deliberately does
