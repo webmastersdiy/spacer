@@ -127,7 +127,7 @@ All of it stays on the arbiter. The petitioner cannot reach any of it.
 
 ### 4.5 Audit log
 
-The immutable, append-only [audit log](../../GLOSSARY.md#audit-log) records every AI request and every arbiter decision (allow, deny, redact, band, defer-to-human). The petitioner cannot reach it, so the AI cannot tamper with the record even if it fully owns its environment.
+The immutable, append-only [audit log](../../GLOSSARY.md#audit-log) records every AI request and every arbiter decision (allow, deny, redact, band, defer-to-human). The log lives in the arbiter's environment, which the petitioner does not own and cannot reach, so tampering from the AI side is structurally impossible.
 
 ### 4.6 Timing layer
 

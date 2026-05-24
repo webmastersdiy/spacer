@@ -134,8 +134,9 @@ threat axes:
    only records them.
 
 Both axes are backed by an immutable audit log on the arbiter:
-the petitioner cannot reach it, so the AI cannot tamper with the
-record even if it fully owns its environment. AI-facing privacy is the
+the log lives in the arbiter's environment, which the petitioner
+does not own and cannot reach, so tampering from the AI side is
+structurally impossible. AI-facing privacy is the
 **primary** scope of spacer; world-facing privacy is a separate,
 secondary concern, kept in different documents because the
 adversaries, mitigations, and priorities differ.
@@ -698,9 +699,10 @@ See also: [Architecture overview, §4.6](design-docs/origin/05--2026-05-05-0948-
 
 Every AI request and every arbiter decision (allow, deny, redact,
 band, defer-to-human) is appended to an immutable, append-only log
-on the arbiter. The petitioner cannot reach the log, so the AI
-cannot tamper with the record even if it fully owns its
-environment. Forensics trail for prompt injection, surveillance
+on the arbiter. The log lives in the arbiter's environment, which
+the petitioner does not own and cannot reach, so tampering from
+the AI side is structurally impossible. Forensics trail for prompt
+injection, surveillance
 attempts, and unexpected-action attempts. Caveat: logging records
 events; it does not prevent them. Logging is the floor, not the
 ceiling - prevention work belongs to the recipient address registry
