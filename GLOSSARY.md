@@ -138,8 +138,9 @@ the log lives in the arbiter's environment, which the petitioner
 does not own and cannot reach, so tampering from the AI side is
 structurally impossible. AI-facing privacy is the
 **primary** scope of spacer; world-facing privacy is a separate,
-secondary concern, kept in different documents because the
-adversaries, mitigations, and priorities differ.
+secondary concern, and we move world-facing docs to `archive/` to
+keep them out of the active design surface. The adversaries,
+mitigations, and priorities differ, so mixing them obscures both.
 
 ### World-facing privacy
 
@@ -152,6 +153,13 @@ identity-binding funding sources. World-facing privacy alone does not
 defend against the AI; AI-facing privacy alone makes world-facing
 leaks survivable (the AI cannot connect public observations to our
 node if it does not know our node's identity).
+
+Out of active design scope for spacer right now. Existing
+world-facing material lives in `archive/`; new design work in this
+area does not land in `design-docs/` unless and until world-facing
+becomes part of the active scope. The split is deliberate, not a
+backlog: world-facing is a different problem with different
+priority, and bundling it with AI-facing obscures both.
 
 ## Testbed
 
