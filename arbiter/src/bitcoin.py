@@ -173,9 +173,11 @@ def getbalance(minconf=1):
         raise BitcoinError(f"could not parse getbalance output: {out!r}")
 
 
-# State-changing RPCs. These are gated by the outbound allowlist
-# upstream in the gateway; this module trusts its caller to have
-# passed the allowlist + token-resolution path.
+# State-changing RPCs. These are gated by the recipient address
+# registry upstream in the gateway: the gateway resolves the
+# petitioner's recipient_token to a real address before dispatch
+# reaches this module, so the address arg is always operator-approved
+# by construction (§4.7).
 
 def sendtoaddress(address, amount_btc):
     """Send amount_btc to address. Returns the txid (64-char hex).
@@ -196,11 +198,12 @@ def sendtoaddress(address, amount_btc):
     Caller responsibility:
     - address is the **real** Bitcoin address, already resolved
       from the petitioner's token by the recipient address
-      registry (sp-77lxs.13). The AI never reaches this function
+      registry (sp-77lxs.13; §4.7 - the registry IS the
+      destination gate). The AI never reaches this function
       directly: an inbound state-changing call goes through the
-      gateway's allowlist, the registry's token-to-real
-      resolution, and the timing layer's action-delay queue
-      before the executor calls into here.
+      gateway's recipient-token resolution against the registry
+      and the timing layer's action-delay queue before the
+      executor calls into here.
     - amount_btc is a string in BTC decimal form ("0.001"), or a
       Decimal. Never pass a Python float: float -> str loses
       satoshi precision (1 sat = 1e-8 BTC is at the edge of

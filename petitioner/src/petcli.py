@@ -87,7 +87,14 @@ def _add_endpoint_flags(parser):
 def _do_submit_send_bitcoin(args):
     response = protocol.submit(
         op="send_bitcoin",
-        params={"to_token": args.to_token, "amount_sats": args.amount_sats},
+        # Wire field is `recipient_token`: the arbiter's privacy gateway
+        # resolves it through the recipient address registry (§4.7). The
+        # CLI flag stays `--to-token` for operator brevity; the rename
+        # happens here, on the wire boundary.
+        params={
+            "recipient_token": args.to_token,
+            "amount_sats": args.amount_sats,
+        },
         host=args.host,
         port=args.port,
         timeout_s=args.timeout_s,
@@ -107,8 +114,12 @@ def _do_submit_send_bitcoin(args):
 def _do_submit_send_lightning(args):
     response = protocol.submit(
         op="send_lightning",
+        # Same wire-field convention as send-bitcoin above: the CLI
+        # exposes `--to-token` for brevity, the wire body carries
+        # `recipient_token` because that is what the gateway's
+        # pseudonymize-inbound step looks for.
         params={
-            "to_token": args.to_token,
+            "recipient_token": args.to_token,
             "amount_msats": args.amount_msats,
         },
         host=args.host,

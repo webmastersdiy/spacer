@@ -22,8 +22,9 @@ These two go in **separate documents**:
 - **AI-facing privacy** docs cover the AI client as the adversary. Threat
   model: a potentially malicious or compromised AI exfiltrating via API
   responses. Mitigations: proxy filtering rules - tokenize identifiers,
-  band numeric values, withhold proofs, allowlist outbound, aggregate by
-  default, audit log.
+  band numeric values, withhold proofs, gate outbound destinations
+  through the recipient address registry, aggregate by default, audit
+  log.
 
 - **World-facing privacy** docs cover everyone except the AI: the public
   Bitcoin/LN networks, peers we connect to, block explorers we query,

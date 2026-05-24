@@ -1,3 +1,0 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":58551},"ts":"2026-05-24T12:57:53Z"}
-{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-05-24T12:57:53Z"}
-{"event":"decision_defer_hitl","payload":{"op":"send_bitcoin"},"ts":"2026-05-24T12:57:53Z"}

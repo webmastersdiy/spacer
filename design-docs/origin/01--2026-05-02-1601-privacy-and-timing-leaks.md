@@ -60,7 +60,7 @@ partial identifiers; **LOW** = status flags or booleans.
 | Call | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
 | `newaddress` | Fresh bech32 address | HIGH | Return opaque funding-pool token; proxy holds address↔pool mapping. |
-| `connect` | Exposes our pubkey + outbound IP to peer | HIGH | Allowlist-gate every connect target; log all attempts. |
+| `connect` | Exposes our pubkey + outbound IP to peer | HIGH | Gate every connect target against an operator-approved peer set; log all attempts. |
 | `decodepayreq` | Destination pubkey, payment_hash, amount, route hints | MEDIUM | Run internally; surface only policy predicates ("amount ≤ ceiling: yes"). |
 
 ### 3.2 Balance
@@ -90,7 +90,7 @@ partial identifiers; **LOW** = status flags or booleans.
 
 | Call | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
-| `sendcoins` | txid; tx itself is a permanent on-chain publication of our UTXOs and change address | HIGH | Validate destination against allowlist before broadcast; coin selection stays inside proxy. |
+| `sendcoins` | txid; tx itself is a permanent on-chain publication of our UTXOs and change address | HIGH | Validate destination against the recipient address registry before broadcast; coin selection stays inside proxy. |
 
 Note: the faucet `POST /api/onchain` call exposes our address to the faucet operator and
 links it to our GitHub identity. That is a world-facing leak (faucet as adversary), not
@@ -100,7 +100,7 @@ an AI-facing one. See `2026-05-02-1700-node-privacy-from-the-world.md` §3.6.
 
 | Call | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
-| `openchannel` | Funding txid returned to AI; channel_point and counterparty pubkey available via follow-up calls | HIGH | Policy-driven: default `--private`; band channel sizes (10k/50k/200k tiers); allowlist counterparty. Proxy holds funding txid internally; surfaces only success/fail status. |
+| `openchannel` | Funding txid returned to AI; channel_point and counterparty pubkey available via follow-up calls | HIGH | Policy-driven: default `--private`; band channel sizes (10k/50k/200k tiers); resolve counterparty through the recipient address registry (operator-approved set). Proxy holds funding txid internally; surfaces only success/fail status. |
 | `closechannel` | Closing txid returned to AI; channel_point identifies which channel was closed | HIGH | Channel-to-close = policy decision, not AI choice. Force-close requires explicit elevated authorization (irreversible signal of distrust). |
 
 Note: the gossip consequence of `openchannel` (pubkey-pair + capacity + SCID broadcast to the
@@ -116,7 +116,7 @@ The ldk-node Python API (v0.7.0) broadly mirrors LND's surface. A few items add 
   unsuccessfully used. Strongly fingerprintable; no LND equivalent exposes this as a
   discrete call. Should be blocked at proxy.
 - `sign_message(bytes)` - proves control of node_id pubkey to anyone with the result.
-  Classic "prove who you are" vector; allowlist-gate with explicit operator approval only.
+  Classic "prove who you are" vector; gate with explicit operator approval only.
 - `bolt12_payment()` offers - long-lived offer identifiers share the same pubkey as the
   node; repeated use of the same offer is linkable across payers. The AI learning the
   offer identifier can cross-reference it against on-chain data if it also knows the
@@ -210,7 +210,7 @@ Each mitigation is listed with its target threat and a note on its own residual 
 |---|---|---|
 | **Identifier tokenization** - addresses, pubkeys, channel_ids, payment_hashes replaced with opaque proxy-scoped tokens | AI exfiltration, prompt injection probing node identity | Token vocabulary size can itself be a leak (number of unique tokens ≈ number of channels/addresses the operator has). |
 | **Numeric value banding** - balances, fees, amounts surfaced as buckets (e.g., <10k / 10k-100k / 100k-1M / >1M sats) | Precision balance leakage to AI | Band boundaries are themselves a policy fingerprint; an attacker who can probe "can fund X?" across many X values can binary-search the exact balance. |
-| **Outbound allowlist** - every `connect`, `sendcoins`, `openchannel`, `payinvoice` gated against a policy table | Prompt-injection-induced fund movement; generic TCP-connect abuse | Allowlist staleness: a static allowlist that never changes is itself a fingerprint ("this operator only ever pays 3 destinations"). |
+| **Recipient address registry as destination gate** - every `connect`, `sendcoins`, `openchannel`, `payinvoice` resolves its destination through the registry's operator-curated set; misses refuse uniformly | Prompt-injection-induced fund movement; generic TCP-connect abuse | Probing-infeasibility argument lives in the registry entry (GLOSSARY 'Recipient address registry'). The static-set staleness concern (a static set of destinations could itself be a fingerprint) is a world-facing chain-analysis observation, not an AI-facing one - it does not reach the AI through this proxy. |
 | **Aggregate-by-default** - list-style calls return counts/summaries; per-item detail requires per-call justification logged | History dump via `listpayments`, `listchannels`, `listpeers` | Counts themselves can leak: "37 payments this session" is more information than "some payments." |
 | **Withhold proofs** - preimages, signatures, macaroons stay inside proxy and are never returned to AI | Proof-of-payment exfiltration; macaroon reuse for unauthorized calls | Proxy becomes a single point of failure for proof custody. |
 | **Default `--private` channels** - unless announcement is explicitly required by use case | AI learning channel_point + counterparty pubkey via `openchannel` / `listchannels` responses; also prevents gossip layer publication (world-facing benefit, see world-facing doc) | Private channels still appear on-chain; channel funding tx is public. HTLC amounts on private channels are still visible to routing peers on those channels. |

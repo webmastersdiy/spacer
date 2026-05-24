@@ -1,0 +1,4 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59569},"ts":"2026-05-24T13:27:02Z"}
+{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-05-24T13:27:02Z"}
+{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-05-24T13:27:02Z"}
+{"event":"decision_refuse_registry","payload":{"op":"send_bitcoin"},"ts":"2026-05-24T13:27:02Z"}

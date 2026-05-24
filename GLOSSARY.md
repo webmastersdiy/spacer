@@ -285,8 +285,8 @@ destination pubkey, amount, payment_hash, payment_addr, and route
 hints by spec - there is no opt-out. Anyone with the invoice has the
 destination's identity. Implication: when an AI hands the gateway an
 invoice to pay, the gateway must decode internally and surface only
-policy-relevant facts ("destination matches allowlist: yes", "amount
-within ceiling: yes"); the raw bolt11 stays inside the arbiter.
+policy-relevant facts ("destination resolves through the registry: yes",
+"amount within ceiling: yes"); the raw bolt11 stays inside the arbiter.
 
 ### bolt12
 
@@ -459,27 +459,83 @@ random delay: the shift is deferred so it does not align with the
 known fund movement, and the band makes the magnitude variable
 across wallets and across shifts.
 
-### Outbound allowlist
+### Recipient address registry
 
-> **Status: open.** See [Architecture overview, §7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions) (policy table format).
+The destination universe for state-changing calls. The arbiter holds
+a hand-curated list of physical destinations (Bitcoin addresses, LN
+node pubkeys, BOLT-11 / BOLT-12 invoices) the operator has approved
+as send targets; the petitioner never sees the real destinations,
+only opaque single-use tokens that resolve back to them inside the
+arbiter.
 
-Every state-changing or network-touching call (`connect`, `sendcoins`,
-`openchannel`, `payinvoice`, `sendrawtransaction`) is gated against a
-policy table of allowed destinations and amounts. The AI cannot
-direct funds or connections to arbitrary targets. Caveat: a static
-allowlist that never changes is its own fingerprint ("this operator
-only ever pays 3 destinations").
+**Storage substrate.** A YAML file at a known path on the arbiter,
+hand-edited by the operator at the directly-attached console. The
+arbiter is deliberately minimal and manually managed (architecture
+overview §2.1); adding a destination, retiring one, or auditing
+what is in the universe should be one open-file / edit / save
+round-trip, not a tool invocation against a SQL schema. The
+registry module reads the YAML; the operator owns the file.
+(Migration note: as of this writing the registry is backed by a
+SQLite table in arbiter local state; the YAML migration is the
+next milestone in this chain.)
 
-See also: [Architecture overview, §7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions).
+**Entry shape.** Each entry has a local-only numeric id (for
+operator notes), a public-facing token the petitioner sees, the
+real destination, a format tag, a created_at / expires_at pair
+(default 7-day expiry), and a used / consumed_by pair tracking
+one-time-use.
+
+**Token format.** 5 random Crockford-base32 characters plus 1
+Damm32 check character. Crockford-base32 omits visually ambiguous
+glyphs (no I, L, O, U); operator-typed I or L normalize to 1 and O
+to 0 before validation. Damm32 catches every single-character
+mutation and every adjacent transposition of distinct characters.
+
+**Destination gate.** The registry IS the destination gate. There
+is no separate outbound-policy mechanism: a state-changing call
+carries a `recipient_token`; the privacy gateway calls
+`registry.lookup()` during pseudonymize-inbound; any outcome other
+than `ok` (bad checksum, unknown, expired, already used, anomalous)
+collapses to the uniform "destination unavailable" refusal. The
+audit log differentiates the cause for operator triage.
+
+**Probing infeasibility.** An AI cannot map the destination
+universe by submitting candidate tokens in a tight loop. Four
+mechanisms compose to make the probing strategy prohibitively
+expensive in any realistic threat model:
+
+- [Action delay](#action-delay-and-result-delay) imposes a ~12h
+  floor on every state-changing call. 100 probes is ~50 days.
+- [HITL approval](#human-in-the-loop-hitl-approval) fires on every
+  inbound call that is not a recognized op, so the operator sees
+  unusual submission patterns on the directly-attached console.
+- [One-time-use](#recipient-address-registry) enforcement means a
+  token that *does* resolve is consumed on first use; the
+  petitioner cannot re-test a successful hit to confirm it.
+- The [audit log](#audit-log) records every attempt for non-AI
+  human review, and [latency normalization](#latency-normalization)
+  collapses the per-response timing channel that would otherwise
+  let a probe distinguish "registry miss" from "registry hit but
+  pending consume" by response time.
+
+**Refusal behavior.** Every refusal path collapses to one bit on
+the petitioner side: ok (the call proceeds) or refused. The
+production deployment defers refusals through the
+[result registry](#result-registry) on a 1-hour ± 30-minute
+randomized delay so the petitioner cannot correlate submission time
+with response time. (Test mode collapses this delay; see the
+test-mode timing rules in the architecture overview's exit
+criteria.)
 
 ### Human-in-the-loop (HITL) approval
 
-When a proposed state-changing call falls outside the allowlist
-fast path - new destination, unusual amount, tx shape the operator
-has not seen before - the arbiter pauses the call and surfaces it
-to the operator (a human) on a fully out-of-band channel. The call
-only proceeds on explicit human assent. The allowlist handles the
-routine cases without ceremony; HITL catches the ambiguous ones.
+When the arbiter receives a request whose op is not one of the
+recognized handlers - any op outside the known read set
+(`query_balance`, `query_channels`) and the known write set
+(`send_bitcoin`, `send_lightning`) - the arbiter pauses the call
+and surfaces it to the operator (a human) on a fully out-of-band
+channel. The call only proceeds on explicit human assent. The
+recognized ops dispatch without ceremony; HITL catches the rest.
 
 Out-of-band means: the request and response never travel on the
 petitioner's RPC channel and the AI never sees the request. The
@@ -647,7 +703,8 @@ cannot tamper with the record even if it fully owns its
 environment. Forensics trail for prompt injection, surveillance
 attempts, and unexpected-action attempts. Caveat: logging records
 events; it does not prevent them. Logging is the floor, not the
-ceiling - prevention work belongs to the allowlist and HITL.
+ceiling - prevention work belongs to the recipient address registry
+and HITL.
 
 ## Side channels
 

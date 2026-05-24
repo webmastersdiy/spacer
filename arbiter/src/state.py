@@ -3,12 +3,12 @@ Arbiter local state: a single SQLite database.
 
 Holds everything that lives on the arbiter and never crosses the privacy
 gateway: the token-to-real mapping that backs Pseudonymize (recipient
-destinations are the recipient address registry per §4.7), the policy
-tables that back the outbound allowlist, the pending HITL approval
-queue, and pending action+result deferrals.
+destinations are the recipient address registry per §4.7, which is
+also the destination gate for state-changing calls), the pending HITL
+approval queue, and pending action+result deferrals.
 
 This module is the framework only. Each subsystem (recipient registry,
-allowlist, HITL, timing layer) declares its own table schema by
+HITL, timing layer, scale cloak) declares its own table schema by
 calling register_schema() at import time; migrate() applies all
 registered fragments idempotently. Subsystems reach the database via
 the connect() context manager.

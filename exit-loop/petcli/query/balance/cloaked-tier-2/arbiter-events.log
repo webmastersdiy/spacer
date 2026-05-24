@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":58565},"ts":"2026-05-24T12:57:58Z"}
-{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-05-24T12:57:58Z"}
-{"event":"scale_tier_init","payload":{"real_sats":1500000,"scale":0.010000000000000002,"tier":2},"ts":"2026-05-24T12:57:58Z"}
-{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-05-24T12:57:58Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59583},"ts":"2026-05-24T13:27:07Z"}
+{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-05-24T13:27:07Z"}
+{"event":"scale_tier_init","payload":{"real_sats":1500000,"scale":0.010000000000000002,"tier":2},"ts":"2026-05-24T13:27:07Z"}
+{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-05-24T13:27:07Z"}

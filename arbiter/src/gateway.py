@@ -1,23 +1,32 @@
 """
 Privacy gateway: the only network-reachable component on the arbiter.
 
-Every petitioner request hits this module first. The handler runs each
-inbound request through a fixed pipeline of mechanisms (parse,
-allowlist, pseudonymize-inbound, dispatch, hide-secrets, band-outbound,
-aggregate-outbound, latency-normalize) and audit-logs at every decision
-point. There are no other entry points to the arbiter from the network:
-bitcoind, LND, the audit log, local state, and the timing layer all sit
-behind this module.
+Every petitioner request hits this module first. The handler routes
+each inbound request through one of three branches based on op:
 
-Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §4.1.
+- Known read ops (query_balance, query_channels): dispatch directly.
+- Known write ops (send_bitcoin, send_lightning): resolve the
+  recipient_token through the recipient address registry during
+  pseudonymize-inbound; on miss, refuse uniformly. The registry IS
+  the destination gate - there is no separate outbound-policy step.
+- Unknown ops: park in the HITL queue and refuse uniformly so the
+  operator can decide on the directly-attached console.
+
+Every branch audit-logs at each decision point, and the response is
+latency-normalized regardless of which branch fired. There are no
+other entry points to the arbiter from the network: bitcoind, LND,
+the audit log, local state, and the timing layer all sit behind this
+module.
+
+Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md
+§4.1, §4.7, §6.
 
 Several mechanisms are placeholders pending open design questions or
 later beads:
-- outbound allowlist: blocked on sp-77lxs.2 (policy table format).
 - numeric banding and aggregate-by-default: blocked on sp-77lxs.4
   (band-edge randomization).
-- inbound pseudonymize (token-to-real lookup): wired up by sp-77lxs.13
-  (recipient address registry).
+- inbound pseudonymize (recipient_token -> real address): wired up
+  by sp-77lxs.13 (recipient address registry).
 - dispatch into arbiter internals (timing layer, bitcoind/LND access):
   wired up by sp-77lxs.10/11/12.
 - result-poll endpoint: wired up by sp-77lxs.14 (result registry).
@@ -61,8 +70,9 @@ MAX_REQUEST_BYTES = 65536
 
 # Refusal response shape. A single uniform body for every refusal so
 # the response itself does not leak which step refused (parse failure,
-# allowlist refusal, HITL deferral, etc. all look identical to the
-# petitioner). The audit log differentiates the cause for the operator.
+# registry miss, HITL park on unknown op, etc. all look identical to
+# the petitioner). The audit log differentiates the cause for the
+# operator.
 _REFUSED_BODY = json.dumps({"status": "refused"}, separators=(",", ":")).encode("utf-8")
 
 
@@ -151,8 +161,9 @@ def process_request(handler):
     # Read-only result poll (§4.8). The poll path is the only
     # petitioner-reachable read into arbiter state and is structurally
     # different from state-changing calls:
-    # - The outbound allowlist gates state-changing or network-touching
-    #   calls; a read of arbiter-internal storage is not state-changing.
+    # - The recipient address registry (§4.7) is the destination gate
+    #   for state-changing calls; a read of arbiter-internal result
+    #   storage carries no destination at all.
     # - The pseudonymize-inbound step resolves recipient tokens; a poll
     #   carries a result handle, not a recipient token.
     # - The hide-secrets / band / aggregate filters apply to backend
@@ -166,44 +177,43 @@ def process_request(handler):
         _handle_poll(handler, request, deadline)
         return
 
-    # Outbound allowlist gate. State-changing or network-touching calls
-    # must be admitted by policy before they reach bitcoind/LND. Calls
-    # that fall outside the allowlist fast path park in the HITL queue
-    # for an out-of-band human assent (§6).
-    if not _allowlist_admits(request):
-        audit.record("decision_defer_hitl", {"op": op})
-        _hitl_park(request)
-        _respond_refused(handler, deadline)
+    # Known read ops dispatch directly. No recipient_token, no
+    # destination universe to resolve against; the gateway just calls
+    # into the backend wrapper. Outbound filtering still applies.
+    if op in _KNOWN_READ_OPS:
+        response = _dispatch(request)
+        response = _hide_secrets(response)
+        response = _band_outbound(response)
+        response = _aggregate_outbound(response)
+        audit.record("decision_allow", {"op": op})
+        _respond_ok(handler, response, deadline)
         return
 
-    # Inbound pseudonymize: resolve any petitioner-supplied tokens
-    # to the real identifiers held in local state. The recipient
-    # address registry (§4.7) is consulted for the recipient_token
-    # field; on refusal the request collapses to the uniform
-    # "destination unavailable" body, audit-differentiated by the
-    # registry. None signals refuse-to-petitioner.
-    request = _pseudonymize_inbound(request)
-    if request is None:
-        _respond_refused(handler, deadline)
+    # Known write ops resolve recipient_token through the recipient
+    # address registry (§4.7). The registry IS the destination gate:
+    # a non-`ok` lookup collapses to the uniform "destination
+    # unavailable" refusal here, audit-logged as
+    # decision_refuse_registry so the operator can see *which* token
+    # failed and why. There is no separate outbound-policy step.
+    if op in _KNOWN_WRITE_OPS:
+        resolved = _pseudonymize_inbound(request)
+        if resolved is None:
+            audit.record("decision_refuse_registry", {"op": op})
+            _respond_refused(handler, deadline)
+            return
+        response = _dispatch(resolved)
+        response = _hide_secrets(response)
+        response = _band_outbound(response)
+        response = _aggregate_outbound(response)
+        audit.record("decision_allow", {"op": op})
+        _respond_ok(handler, response, deadline)
         return
 
-    # Dispatch into arbiter internals. The internals do not exist yet
-    # (timing layer + bitcoind/LND clients are downstream beads), so
-    # every call lands on the not-implemented stub. Keeping this as a
-    # single function call makes the no-bypass property auditable: a
-    # reviewer can confirm by inspection that the gateway never reaches
-    # past _dispatch into anything else.
-    response = _dispatch(request)
-
-    # Outbound filtering. Each step is a placeholder until the
-    # corresponding read-path APIs land; structure is here so wiring
-    # is mechanical when the policy lands.
-    response = _hide_secrets(response)
-    response = _band_outbound(response)
-    response = _aggregate_outbound(response)
-
-    audit.record("decision_allow", {"op": op})
-    _respond_ok(handler, response, deadline)
+    # Unknown op. Park in the HITL queue and refuse uniformly so the
+    # operator can decide on the directly-attached console (§6).
+    audit.record("decision_defer_hitl", {"op": op})
+    _hitl_park(request)
+    _respond_refused(handler, deadline)
 
 
 def _read_body(handler):
@@ -245,60 +255,50 @@ def _parse_request(raw):
     return obj
 
 
-# Read-only ops the gateway admits without consulting a policy table.
+# Known read ops the gateway dispatches without registry resolution.
 # These touch arbiter-internal node state (LND wallet / channel
-# balances), have no recipient_token, are not state-changing, and the
-# response is banded before egress so per-call values do not leak
-# precise satoshi totals to the petitioner. sp-77lxs.2's policy table
-# format will replace this hardcoded set with a queryable schema; until
-# then this minimal frozenset is the partial allowlist the read-only
-# exit-loop variants exercise end-to-end. State-changing ops
-# (send_bitcoin, send_lightning) remain default-refused.
-_ALLOWED_READ_OPS = frozenset({"query_balance", "query_channels"})
+# balances), have no recipient_token, and are not state-changing.
+# Outbound filters (hide-secrets / band / aggregate) still apply on
+# the response.
+_KNOWN_READ_OPS = frozenset({"query_balance", "query_channels"})
 
-
-def _allowlist_admits(request):
-    """Outbound allowlist gate.
-
-    Backed by policy tables in local state. Schema for those tables is
-    blocked on sp-77lxs.2; until that lands, the gateway admits the
-    fixed read-only set in _ALLOWED_READ_OPS and refuses every other
-    call. State-changing ops therefore still hit the strict-default
-    refuse path - no send_bitcoin or send_lightning request escapes
-    this gate while the policy is unwritten.
-    """
-    return request.get("op") in _ALLOWED_READ_OPS
+# Known write ops the gateway resolves through the recipient address
+# registry (§4.7). The registry IS the destination gate: a miss
+# refuses uniformly with audit decision_refuse_registry; a hit
+# rewrites the request to carry the real recipient_address before
+# dispatch. New write ops added here MUST also be handled in
+# _dispatch and must require a recipient_token in their wire shape.
+_KNOWN_WRITE_OPS = frozenset({"send_bitcoin", "send_lightning"})
 
 
 def _hitl_park(request):
-    """Park an inbound call that fell outside the allowlist fast path
-    in the HITL queue. The operator approves or denies at the directly
-    attached arbiter console; the petitioner only learns the outcome
-    later, via the result registry, after the operator decides.
+    """Park an inbound call whose op the gateway does not have a
+    recognized handler for. The operator approves or denies at the
+    directly attached arbiter console; the petitioner only learns the
+    outcome later, via the result registry, after the operator decides.
 
-    The HITL queue table lands with sp-77lxs.7's local state schema
-    (table TBD). For the skeleton this is an audit-log-only marker;
-    no row is written, no async path runs, and the call returns
-    refused immediately. That preserves the petitioner-visible
-    behavior (uniform refusal) while leaving the wire-up point
-    explicit for review.
+    The HITL queue table is TBD. For the current skeleton this is an
+    audit-log-only marker; no row is written, no async path runs, and
+    the call returns refused immediately. That preserves the
+    petitioner-visible behavior (uniform refusal) while leaving the
+    wire-up point explicit for review.
     """
     pass
 
 
 def _pseudonymize_inbound(request):
-    """Resolve petitioner-supplied tokens to real identifiers.
+    """Resolve the petitioner-supplied recipient_token to a real
+    destination via the recipient address registry (§4.7).
 
-    Looks for an optional `recipient_token` field. If present, the
-    recipient address registry (§4.7) resolves the token to the real
-    address, and the request is rewritten to carry both the
-    `recipient_address` (for dispatch) and the original
+    Called only on known write ops, where a recipient_token is
+    mandatory by contract. Returns the request dict rewritten to
+    carry both `recipient_address` (for dispatch) and the original
     `recipient_token` (so the dispatch layer can call
-    registry.consume() after a successful send). On any registry
-    refusal (unknown / expired / used / bad checksum / anomalous /
-    wrong type), returns None so the caller emits the uniform
-    "destination unavailable" body. If the field is absent, returns
-    the request unchanged.
+    registry.consume() after a successful send). On any non-`ok`
+    lookup outcome (missing field, unknown token, bad checksum,
+    expired, used, anomalous, wrong type) returns None so the
+    caller emits the uniform "destination unavailable" body and
+    audit-logs decision_refuse_registry.
 
     Per §4.7 production timing, registry refusals are deferred by
     the rejection-delivery delay (1 hour ± 30 min) before the
@@ -310,7 +310,7 @@ def _pseudonymize_inbound(request):
     """
     token = request.get("recipient_token")
     if token is None:
-        return request
+        return None
     status, real, _fmt = registry.lookup(token)
     if status != "ok":
         return None
@@ -362,14 +362,15 @@ def _handle_poll(handler, request, deadline):
 
 
 def _dispatch(request):
-    """Hand the (post-allowlist, post-pseudonymize) request to arbiter
-    internals.
+    """Hand the (post-registry-resolved if write, post-routing if
+    read) request to arbiter internals.
 
-    Only the read-only query ops are wired in this skeleton. State-
-    changing ops never reach this function (the allowlist refuses
-    them above) so dispatch's "not_implemented" fallback covers
-    forward-compatibility for any op that slips past a future
-    allowlist change without a matching dispatch entry.
+    Only the read-only query ops are wired in this skeleton. The
+    write-op dispatch case currently has no implementation - the
+    timing layer + bitcoind / LND executor lands in a downstream
+    bead - so a known write op resolves through the registry and
+    then falls through to the "not_implemented" fallback. Wiring is
+    mechanical when the executor lands; structure is in place.
 
     query_balance returns the LND on-chain wallet's total balance,
     routed through scale.present() so the precise satoshi value AND
@@ -537,9 +538,9 @@ if __name__ == "__main__":
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     try:
-        # Send a well-formed request. The skeleton refuses everything
-        # via the allowlist (allowlist is unwritten), so the response
-        # is the uniform refusal body.
+        # Send a well-formed request with an unknown op. Unknown ops
+        # park in HITL and refuse uniformly, so the response is the
+        # standard refusal body.
         body = json.dumps({"op": "smoke_ping"}).encode("utf-8")
         req = urllib.request.Request(
             f"http://127.0.0.1:{bind_port}/",
@@ -573,8 +574,9 @@ if __name__ == "__main__":
 
         # Result-poll path (§4.8). Deposit a result behind the gateway,
         # then exercise the poll fast-path end-to-end via HTTP. The
-        # poll bypasses the allowlist (read-only) and returns the
-        # binary {"status": "result"|"not_yet"} envelope.
+        # poll has its own routing branch (read-only, no destination
+        # gate) and returns the binary {"status": "result"|"not_yet"}
+        # envelope.
         H = "smoke_handle"
         results.deposit(H, {"txid": "deadbeef"}, kind="result")
 

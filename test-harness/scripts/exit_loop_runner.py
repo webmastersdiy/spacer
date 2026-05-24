@@ -24,9 +24,9 @@ Validations that pass are populated under exit-loop/; validations
 that fail leave failure artifacts on disk and the runner exits
 non-zero so the §10 iterative cycle can pick them up. Variants whose
 underlying code paths are not yet wired (e.g., happy-path send via
-the still-unwritten allowlist policy) are absent from the manifest;
-their artifact directories therefore stay empty per §10's "an empty
-one signals not-yet-validated" convention.
+the still-unwritten timing-layer executor) are absent from the
+manifest; their artifact directories therefore stay empty per §10's
+"an empty one signals not-yet-validated" convention.
 
 The runner uses an in-thread arbiter rather than a subprocess for
 deterministic teardown and direct access to the arbiter-internal
@@ -35,10 +35,10 @@ acceptable because the runner lives next to the arbiter source in
 this repo and rebuilds in lockstep with it.
 
 Stdlib only. No bitcoind / LND infrastructure is exercised through
-the gateway dispatch in the current code base (dispatch is a stub
-pending sp-77lxs.2's allowlist policy table format), so
-infra-events.log records that fact rather than capturing real RPC
-traffic.
+the gateway dispatch in the current code base for state-changing
+ops (no executor wires the timing layer to bitcoin.py / lnd.py yet),
+so infra-events.log records that fact rather than capturing real
+RPC traffic. Read-only ops exercise the fake lncli installed below.
 
 Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
@@ -291,16 +291,17 @@ def _apply_precondition(precondition):
 #
 # Variants in this list are the ones that exercise distinct code
 # paths reachable in the current code base. Read-only query_balance
-# and query_channels now traverse the partial allowlist
-# (_ALLOWED_READ_OPS in gateway.py) and dispatch through
-# arbiter/src/lnd.py against a fake lncli the runner installs at
-# module-import time, producing deterministic banded responses.
-# Happy-path send-bitcoin / send-lightning and registry-token
-# rejection paths (unknown / expired / used / bad checksum) remain
-# not-yet-validatable end-to-end: the allowlist still refuses every
-# state-changing call until sp-77lxs.2 lands the full policy table
-# format. Those variants will be added once their code paths are
-# reachable.
+# and query_channels are known-read ops in gateway._KNOWN_READ_OPS
+# and dispatch through arbiter/src/lnd.py against a fake lncli the
+# runner installs at module-import time, producing deterministic
+# cloak-presented responses. State-changing send_bitcoin /
+# send_lightning are known-write ops; the runner currently exercises
+# only the registry-miss refusal path against an unknown test token
+# (decision_refuse_registry on the audit side, uniform refusal on
+# the wire). Happy-path sends and the other registry-rejection
+# subcases (expired / used / bad checksum / anomalous) become
+# reachable once the timing-layer executor lands and the runner
+# can seed registry entries to exercise each subcase distinctly.
 VARIANTS = [
     # --- estimate window: local-only, no arbiter ---
     {
@@ -422,13 +423,16 @@ VARIANTS = [
             "wire."
         ),
     },
-    # --- submit / query: currently allowlist-refused. Until
-    # sp-77lxs.2 lands the policy table format, every state-changing
-    # or non-poll-read call refuses uniformly at the gateway. The
-    # variant exercises that default-refuse path, which is the
-    # current end-to-end behavior for all four leaves.
+    # --- submit / query: state-changing ops resolve through the
+    # recipient address registry (§4.7). Sending with a token that
+    # is not in the registry (here, the made-up 'ABCDEF') refuses
+    # uniformly at the registry gate. The wire shape is the standard
+    # refusal body; the audit log carries decision_refuse_registry
+    # so the operator can see *which* token failed and why. These
+    # variants exercise that miss path; happy-path sends become
+    # reachable once registry seeding + the timing-layer executor land.
     {
-        "path": ("submit", "send-bitcoin", "refused-by-default"),
+        "path": ("submit", "send-bitcoin", "refused-unknown-token"),
         "petcli_args": [
             "submit", "send-bitcoin",
             "--to-token", "ABCDEF",
@@ -441,14 +445,16 @@ VARIANTS = [
             and r.get("_petcli_estimate_window_s") == 30.0
         ),
         "description": (
-            "Allowlist defaults to refusing every state-changing "
-            "call until sp-77lxs.2 lands the policy table format. "
-            "petcli stamps the §5.2 local 30s estimate alongside "
-            "the refusal. Audit logs decision_defer_hitl."
+            "send_bitcoin is a known write op; the gateway calls "
+            "registry.lookup() on recipient_token=ABCDEF, which "
+            "fails (bad checksum or unknown - either way non-`ok`), "
+            "and the gateway refuses uniformly. petcli stamps the "
+            "§5.2 local 30s estimate alongside the refusal. Audit "
+            "logs decision_refuse_registry."
         ),
     },
     {
-        "path": ("submit", "send-lightning", "refused-by-default"),
+        "path": ("submit", "send-lightning", "refused-unknown-token"),
         "petcli_args": [
             "submit", "send-lightning",
             "--to-token", "ABCDEF",
@@ -461,13 +467,13 @@ VARIANTS = [
             and r.get("_petcli_estimate_window_s") == 30.0
         ),
         "description": (
-            "Allowlist refuses Lightning sends by default for the "
-            "same reason as Bitcoin sends. Audit logs "
-            "decision_defer_hitl."
+            "Same registry-miss path as send-bitcoin/refused-unknown-"
+            "token, but for the Lightning send op. Audit logs "
+            "decision_refuse_registry."
         ),
     },
     {
-        "path": ("query", "balance", "allowlisted"),
+        "path": ("query", "balance", "default"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
         "preconditions": [],
@@ -476,19 +482,18 @@ VARIANTS = [
             "balance_sats": 50000,
         },
         "description": (
-            "Read-only balance query traverses the partial allowlist "
-            "(query_balance is in _ALLOWED_READ_OPS), dispatch reads "
-            "lnd.walletbalance() via the fake lncli (total_balance=50000),"
-            " and the gateway routes it through scale.present(). 50k is "
-            "comfortably inside T0 [0, 100k) so the cloak is a no-op "
-            "(scale 1.0) and the wire response is the raw figure. "
-            "Confirms the no-cloak branch of dispatch is wired "
-            "correctly. Audit logs request_received, scale_tier_init, "
-            "decision_allow."
+            "query_balance is a known read op (gateway._KNOWN_READ_OPS), "
+            "dispatch reads lnd.walletbalance() via the fake lncli "
+            "(total_balance=50000), and the gateway routes it through "
+            "scale.present(). 50k is comfortably inside T0 [0, 100k) "
+            "so the cloak is a no-op (scale 1.0) and the wire response "
+            "is the raw figure. Confirms the no-cloak branch of "
+            "dispatch is wired correctly. Audit logs request_received, "
+            "scale_tier_init, decision_allow."
         ),
     },
     {
-        "path": ("query", "channels", "allowlisted"),
+        "path": ("query", "channels", "default"),
         "petcli_args": ["query", "channels"],
         "uses_arbiter": True,
         "preconditions": [],
@@ -497,11 +502,11 @@ VARIANTS = [
             "capacity_sats": 80000,
         },
         "description": (
-            "Channels query traverses the partial allowlist, dispatch "
-            "reads lnd.channelbalance() via the fake lncli "
-            "(local=50000, remote=30000), aggregates to 80000, and the "
-            "gateway routes it through scale.present(). 80k is inside "
-            "T0 [0, 100k) so the cloak is a no-op. Per-channel detail "
+            "query_channels is a known read op, dispatch reads "
+            "lnd.channelbalance() via the fake lncli (local=50000, "
+            "remote=30000), aggregates to 80000, and the gateway "
+            "routes it through scale.present(). 80k is inside T0 "
+            "[0, 100k) so the cloak is a no-op. Per-channel detail "
             "is suppressed (aggregate-by-default, §4.3). Audit logs "
             "request_received, scale_tier_init, decision_allow."
         ),
@@ -725,20 +730,21 @@ def _run_variant(variant):
             (artifact_dir / "arbiter-events.log").write_text("")
 
         # Bitcoind / LND infrastructure events. Variants that dispatch
-        # through the read-only allowlist exercise lnd.py against a
-        # fake lncli installed at module-import time; everything else
-        # remains stubbed. The runner does not capture per-variant
+        # through the known-read branch exercise lnd.py against a fake
+        # lncli installed at module-import time; known-write variants
+        # refuse at the recipient address registry gate and never
+        # reach the lnd module. The runner does not capture per-variant
         # lncli stdout (the fake's reply lands in the petcli response
         # and is therefore already in result.json); the log records
         # which mode this variant ran under so a non-AI reviewer can
         # tell at a glance.
         if variant.get("uses_arbiter", True):
             infra_note = (
-                "# Read-only variants dispatch through arbiter/src/lnd.py "
-                "to the fake lncli at $LNCLI_BIN; state-changing variants "
-                "remain refused at the allowlist and never reach the "
-                "lnd module. No live bitcoind / LND traffic for any "
-                "variant in the current manifest.\n"
+                "# Known-read variants dispatch through arbiter/src/lnd.py "
+                "to the fake lncli at $LNCLI_BIN; known-write variants "
+                "refuse at the recipient address registry gate and never "
+                "reach the lnd module. No live bitcoind / LND traffic for "
+                "any variant in the current manifest.\n"
             )
         else:
             infra_note = (

@@ -92,7 +92,7 @@ or public chain data.
 | `getmempoolinfo` | size, bytes, fee floor, unbroadcast count | LOW | Safe; no identity linkage. |
 | `getrawmempool [verbose]` | List of all txids in local mempool; verbose adds fee, size, ancestors, descendants, time | MED | The *set* of txids our node sees can fingerprint our peer topology (different nodes see slightly different mempools). Strip verbose details; return count only unless AI has explicit diagnostic need. |
 | `getmempoolentry <txid>` | Fee, size, ancestor/descendant info for one tx | MED | Exposes our node's first-seen time for the tx. Return sanitized fee/size if needed; withhold time. |
-| `gettxspendingprevout` | Whether a given outpoint is spent in our mempool | MED | Caller can probe "is my UTXO being spent?" - maps to UTXO ownership. Gate on allowlist of txids the proxy already knows about. |
+| `gettxspendingprevout` | Whether a given outpoint is spent in our mempool | MED | Caller can probe "is my UTXO being spent?" - maps to UTXO ownership. Gate on the internal set of txids the proxy already knows about. |
 
 ### 3.3 Wallet / Keys (Critical)
 
@@ -121,7 +121,7 @@ or public chain data.
 
 | RPC | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
-| `createrawtransaction` | Raw tx hex (no wallet involvement) | LOW | Safe to expose. Input txids and output addresses in the request are controlled by the caller - but those came from the AI, so the proxy must validate inputs against its UTXO allowlist before passing through. |
+| `createrawtransaction` | Raw tx hex (no wallet involvement) | LOW | Safe to expose. Input txids and output addresses in the request are controlled by the caller - but those came from the AI, so the proxy must validate inputs against its internal known-UTXO set before passing through. |
 | `decoderawtransaction` | Full decoded tx: inputs, outputs, amounts, addresses, sizes | LOW | Safe to expose; the AI supplied the hex. Proxy can use this internally to audit tx structure before signing. |
 | `decodescript` | Script type, address forms (p2sh, segwit), asm | LOW | Safe to expose. |
 | `getdescriptorinfo` | Checksum, `isrange`, `issolvable`, `hasprivatekeys` | LOW/MED | `hasprivatekeys: true` confirms key material is present on the node. Gate: proxy may expose for operator-supplied descriptors; deny for AI-supplied descriptors. |
@@ -134,9 +134,9 @@ or public chain data.
 
 | RPC | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
-| `sendrawtransaction` | txid (tx immediately hits P2P network) | **HIGH** | Allowlist-gate every broadcast: proxy validates destination, amount, and change address before calling. Once called, the tx is globally visible and irreversible. |
-| `sendtoaddress` / `sendmany` / `send` / `sendall` | txid + coin selection + change address | **HIGH** | Same as `sendrawtransaction`. Proxy performs coin selection; AI supplies only a destination and an amount ceiling. Destinations validated against allowlist. |
-| `bumpfee` / `psbtbumpfee` | Replacement tx or PSBT; creates RBF-flagged replacement | **HIGH** | Allowlist-gate. Reveals that a prior tx exists and is stuck - confirming the UTXO being spent. |
+| `sendrawtransaction` | txid (tx immediately hits P2P network) | **HIGH** | Gate every broadcast through the recipient address registry: proxy validates destination, amount, and change address before calling. Once called, the tx is globally visible and irreversible. |
+| `sendtoaddress` / `sendmany` / `send` / `sendall` | txid + coin selection + change address | **HIGH** | Same as `sendrawtransaction`. Proxy performs coin selection; AI supplies only a destination and an amount ceiling. Destinations resolved against the recipient address registry. |
+| `bumpfee` / `psbtbumpfee` | Replacement tx or PSBT; creates RBF-flagged replacement | **HIGH** | Operator-approval gate. Reveals that a prior tx exists and is stuck - confirming the UTXO being spent. |
 
 ### 3.7 Tx History
 
@@ -194,7 +194,7 @@ A sequence of `getrawmempool` followed by `gettxout <txid> <vout>` for a specifi
 is a recognizable fingerprint of "watching for this specific transaction" - visible to the
 AI through the sequence of calls and responses. The AI can also deliberately probe
 arbitrary txids to map our mempool state. The proxy should gate which txids can be queried
-based on its internal allowlist of known txids.
+based on its internal set of known txids.
 
 ### 4.4 Block-height correlation and IBD-state inference
 
@@ -248,7 +248,7 @@ Each mitigation is listed with its target threats and a note on its own residual
 |---|---|---|
 | **Identifier tokenization** - txids, addresses, descriptor strings, label names replaced with opaque proxy-scoped tokens | AI exfiltration of txids/addresses; prompt injection probing wallet identity | Token vocabulary size can leak: number of unique tokens ≈ number of UTXOs/addresses the proxy has tracked in this session. |
 | **Numeric value banding** - balances, UTXO amounts, fees surfaced as buckets (e.g., `<10k / 10k-100k / 100k-1M / >1M sats`) | Precision balance/amount leak via `getbalances`, `listunspent`, tx history | Band boundaries are themselves a policy fingerprint. An AI can binary-search the exact balance by probing "can fund X?" across many values. Must be paired with rate limiting. |
-| **Outbound allowlist** - every `sendtoaddress`, `sendrawtransaction`, `addnode`, and peer-manipulation call gated against a policy table | Prompt-injection-induced fund movement; peer-manipulation abuse; eclipse attack setup | Allowlist staleness: a static allowlist that never changes is itself a fingerprint ("this node only ever sends to 2 destinations"). |
+| **Recipient address registry as destination gate** - every `sendtoaddress`, `sendrawtransaction`, `addnode`, and peer-manipulation call resolves its target through the registry's operator-curated set; misses refuse uniformly | Prompt-injection-induced fund movement; peer-manipulation abuse; eclipse attack setup | Probing-infeasibility argument lives in the registry entry (GLOSSARY 'Recipient address registry'). The static-set staleness concern (a static set of destinations could itself be a fingerprint) is a world-facing chain-analysis observation, not an AI-facing one - it does not reach the AI through this proxy. |
 | **Aggregate-by-default** - list-style calls (`listunspent`, `listtransactions`, `listsinceblock`) return counts/summaries; per-item detail requires per-call justification logged | History dump; UTXO enumeration | Counts themselves can leak: "14 UTXOs" is more information than "some UTXOs." |
 | **Withhold seed material absolutely** - xpubs, xprvs, descriptor private parts, `dumpprivkey` output: proxy never returns these under any circumstance | `listdescriptors`, `getaddressinfo`, `dumpprivkey` exfiltration | Proxy becomes the single custodian of key-derivation metadata; its own security is now the key-material boundary. |
 | **Deny wallet-import / descriptor-import to AI** - `importdescriptors`, `importprivkey`, `importaddress`, `importmulti` require operator-level auth only | Watch-list poisoning; DoS via expensive rescan; injection of adversarial descriptors | Operator must have an out-of-band channel to add keys. In-band import is unavailable even for legitimate AI use cases. |

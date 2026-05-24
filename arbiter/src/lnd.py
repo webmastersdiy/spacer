@@ -216,9 +216,11 @@ def channelbalance():
     return _run_json("channelbalance")
 
 
-# State-changing RPCs. These are gated by the outbound allowlist
-# upstream in the gateway; this module trusts its caller to have
-# passed the allowlist + token-resolution path.
+# State-changing RPCs. These are gated by the recipient address
+# registry upstream in the gateway: the gateway resolves the
+# petitioner's recipient_token to a real destination before dispatch
+# reaches this module, so the destination arg is always
+# operator-approved by construction (§4.7).
 
 def sendcoins(address, amount_sat):
     """Send amount_sat satoshis on-chain to address. Returns the
@@ -239,11 +241,11 @@ def sendcoins(address, amount_sat):
     Caller responsibility:
     - address is the **real** Bitcoin address, already resolved
       from the petitioner's token by the recipient address registry
-      (sp-77lxs.13). The AI never reaches this function directly:
-      an inbound state-changing call goes through the gateway's
-      allowlist, the registry's token-to-real resolution, and the
-      timing layer's action-delay queue before the executor calls
-      into here.
+      (sp-77lxs.13; §4.7 - the registry IS the destination gate).
+      The AI never reaches this function directly: an inbound
+      state-changing call goes through the gateway's recipient-
+      token resolution against the registry and the timing layer's
+      action-delay queue before the executor calls into here.
     - amount_sat is an integer number of satoshis. Pass an int (or
       a string of digits); never a Python float. lncli's --amt
       takes integer satoshis, so float values would either be

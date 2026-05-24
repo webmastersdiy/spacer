@@ -13,14 +13,22 @@ not-yet-validated.
 
 Variants currently absent from the manifest correspond to code paths
 that are not yet reachable end-to-end (happy-path send-bitcoin /
-send-lightning, registry-token rejection paths). They will be added
-once the gateway's allowlist policy table format (sp-77lxs.2) lands
-for the state-changing ops and the gateway dispatch is wired through
-to the bitcoin client. Read-only query-balance / query-channels are
-already wired: the gateway admits them through a hardcoded read-only
-allowlist (a partial sp-77lxs.2 stand-in), dispatch reads
-arbiter/src/lnd.py, and the runner installs a fake lncli so the
-variants validate deterministically.
+send-lightning, registry-rejection subcases beyond the bare miss).
+They will be added once the timing-layer executor wires the
+arbiter's send pipeline through to bitcoin.py / lnd.py and the
+runner gains the ability to seed registry entries to exercise each
+rejection subcase distinctly.
+
+The gateway currently routes inbound requests on a small fixed set
+of recognized ops: query_balance and query_channels (known reads,
+dispatch directly), send_bitcoin and send_lightning (known writes,
+resolve recipient_token through the recipient address registry per
+§4.7 and refuse uniformly on miss), and poll (the result-registry
+fast path). Any other op parks in HITL and refuses. Read-only
+query-balance / query-channels are validated end-to-end via the
+fake lncli installed by the runner; state-changing sends are
+currently validated only on the registry-miss path
+(refused-unknown-token variants) against a made-up test token.
 
 [Scale cloaking](../GLOSSARY.md#scale-cloaking) is wired for the
 read-only balance path. Four cloaked variants exercise the cloak's
