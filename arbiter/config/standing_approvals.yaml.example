@@ -1,0 +1,74 @@
+# Standing approvals: the WHAT gate.
+#
+# Read by arbiter/src/standing_approvals.py. The privacy gateway
+# checks every state-changing op (send_bitcoin, send_lightning)
+# against the rules below AFTER the recipient address registry
+# (§4.7) resolves the destination. First matching rule wins; no
+# match = the gateway HITL-parks the call and refuses uniformly.
+#
+# The arbiter ships this file empty (literally `approvals: []`).
+# Every state-changing call HITLs until you write a rule. That is
+# the design - the friction is the pedagogy. Build working knowledge
+# of what the AI is actually trying to do by reviewing each call in
+# person at the directly-attached console; ratify the patterns you
+# trust by adding them here.
+#
+# Schema:
+#   - op:                 send_bitcoin | send_lightning
+#     destination:        a registry token (5 Crockford-base32 + 1
+#                         Damm32 check char, e.g. ABCDE4); or the
+#                         literal 'any' for broader rules
+#     max_amount_sats:    optional inclusive upper bound (sats);
+#                         absence = any amount; for Lightning,
+#                         amount_msats is rounded up to sats before
+#                         this bound is checked
+#     rationale:          optional free-text note for your own
+#                         future self - what you approved, when,
+#                         and why
+#
+# Discipline:
+#   - Keep the file short. Long config = small surface of real human
+#     oversight. Every line here is a future call that will NOT get
+#     reviewed.
+#   - Concrete over broad. Prefer narrow rules ("this token, up to
+#     this much, for this reason") over `destination: any` blanket
+#     allows; reserve `any` for cases where you've already accepted
+#     that any registered destination is fair game (e.g., tiny LN
+#     test payments).
+#   - First match wins. If you stack rules, put the narrower ones
+#     above the broader ones.
+#
+# Edit at the directly-attached arbiter console (the same KVM used
+# to add entries to the recipient address registry). Changes are
+# captured by the arb-auditability snapshot tree under
+# arbiter/config/ - so the operator's edit history IS the audit
+# trail.
+#
+# Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md
+# §4.1, §6, §7 and GLOSSARY 'Standing approvals'.
+
+approvals: []
+
+# === Examples (uncomment and edit) ==================================
+#
+# Pre-approve small Lightning sends to one specific recipient:
+#
+# approvals:
+#   - op: send_lightning
+#     destination: ABCDE4
+#     max_amount_sats: 5000
+#     rationale: Coffee shop, approved 2026-05-15 after 3 HITL reviews
+#
+# Mix a narrow Bitcoin rule with a broad LN test-payment allowance.
+# The narrow rule is listed first because first-match wins:
+#
+# approvals:
+#   - op: send_bitcoin
+#     destination: FGHJK7
+#     max_amount_sats: 100000
+#     rationale: Monthly rent UTXO, approved 2026-05-20
+#
+#   - op: send_lightning
+#     destination: any
+#     max_amount_sats: 1000
+#     rationale: Sub-1k-sat test payments to any registered dest
