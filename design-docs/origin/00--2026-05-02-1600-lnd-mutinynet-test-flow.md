@@ -413,10 +413,30 @@ browser funding in step 2.
 ## 11. Pointers
 
 - **Privacy/leak analysis** for every API call above:
-  `~/spacer/design-docs/origin/01--2026-05-02-1601-privacy-and-timing-leaks.md`
+  `2026-05-02-1601-privacy-and-timing-leaks.md`
 - **ldk-node install investigation:** `~/spacer/test-harness/state/INSTALL_BLOCKER.md`
 - **Node credentials:** `~/spacer/test-harness/state/nodeA.env`, `~/spacer/test-harness/state/faucet.env`
 - **Voltage dashboard:** `https://voltage.cloud`
 - **Mutinynet esplora:** `https://mutinynet.com`
 - **Faucet:** `https://faucet.mutinynet.com`
 - **LND releases:** `https://github.com/lightningnetwork/lnd/releases`
+
+---
+
+## 12. Implementation learnings
+
+- 2026-05-24: reconciled doc against `test-harness/scripts/lncliA`. §5.5
+  wrapper contract holds verbatim: the script bakes in
+  `--rpcserver=first-test.u.voltageapp.io:10009`, `--tlscertpath`,
+  `--macaroonpath`, and `--network=signet` exactly as shown, with no extra
+  flags or env-var indirection. The doc is a one-time bring-up record: the
+  txids, addresses, node A pubkey, and faucet pubkey/host in §6-§7 are the
+  literal values from the 2026-05-02 run; §10 already disclaims their
+  reproducibility, so they were left as-is rather than relabeled as
+  "example". §11 companion-doc pointer normalized from
+  `~/spacer/design-docs/origin/01--...` to the bare-filename form sibling
+  docs (01--, 02--, 03--, 05--) use in their own pointer sections; the
+  absolute path was a pre-split artifact, since this repo now lives at
+  `~/spacer-github/` while `~/spacer/` is the testbed runtime tree that the
+  rest of the doc's `~/spacer/...` paths (binaries, creds, state) correctly
+  point at.
