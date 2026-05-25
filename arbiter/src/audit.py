@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from threading import Lock
 
-DEFAULT_PATH = Path.home() / "spacer" / "arbiter" / "data" / "audit.log"
+DEFAULT_PATH = Path.home() / "spacer" / "arbiter" / "state" / "audit.log"
 
 _lock = Lock()
 _fd = None

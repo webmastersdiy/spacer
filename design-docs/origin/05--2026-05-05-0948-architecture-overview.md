@@ -130,7 +130,17 @@ All of it stays on the arbiter. The petitioner cannot reach any of it.
 
 ### 4.5 Audit log
 
-The immutable, append-only [audit log](../../GLOSSARY.md#audit-log) records every AI request and every arbiter decision (allow, deny, redact, band, defer-to-human). The log lives in the arbiter's environment, which the petitioner does not own and cannot reach, so tampering from the AI side is structurally impossible.
+The append-only [audit log](../../GLOSSARY.md#audit-log) records every AI request and every arbiter decision (allow, deny, redact, band, defer-to-human). The log lives in the arbiter's environment, which the petitioner does not own and cannot reach, so tampering from the AI side is structurally impossible.
+
+**Format.** One JSON object per line (JSONL). Each record carries a UTC ISO-8601 timestamp, a short event tag (`request_received`, `decision_allow`, `decision_refuse_registry`, etc.), and a JSON-serializable payload.
+
+**Durability and atomicity.** Every record is fsynced before `record()` returns, so a successful return means the bytes are on disk. The underlying write uses `O_APPEND`, which on POSIX is atomic for buffers up to `PIPE_BUF` (4096 bytes); an in-process lock serializes any longer records. The single-process arbiter discipline (§4.1) is load-bearing here: it removes the need to coordinate across writers via filesystem locking.
+
+**Immutability rests on structure, not enforcement.** The module exposes only `configure()` and `record()`; there is no code path that edits or deletes existing records. Combined with the structural unreachability above, that absence is the entire immutability story.
+
+**Location.** `arbiter/state/audit.log`, gitignored alongside other runtime state per the [arb-auditability](06--2026-05-24-0623-arb-auditability.md) tree (§3). Overridable at startup via the `AUDIT_LOG_PATH` environment variable or an explicit `configure(path)` call, primarily for tests and for sites that put runtime state on a separate volume.
+
+**Companion primitive.** The runtime log captures every request and decision but says nothing about *what was deployed* when those decisions were made. The [continuous git snapshot](06--2026-05-24-0623-arb-auditability.md) covers that complementary axis: arbiter code and config on disk, committed every minute. Neither subsumes the other.
 
 ### 4.6 Timing layer
 
@@ -388,3 +398,4 @@ The tree is scaffolded empty initially. A populated `<variant-name>/` directory 
 - 2026-05-24: §4.8 floor-anchor invariants made explicit - anchor advances on the first non-throttled poll *before* the result table is consulted (so a crash cannot bypass the floor), and throttled polls do not advance the anchor (so polling spam cannot push the next allowed poll further out). A poll on a never-existed handle still anchors the floor. See [§4.8 Idempotent retrieval](#48-result-registry).
 - 2026-05-24: §7 "Result-delivery status enum" partially resolved - registry envelope is settled (binary status + opaque payload + audit-internal kind); residual is the payload shape, tracked under sp-77lxs.1. See [§7](#7-open-design-questions).
 - 2026-05-24: reconciled §4.6 (and §6's action/result timing entry) against `arbiter/src/timing.py`. Added a partial-status block to §4.6 noting test-mode 5-15s windows wired end-to-end, production blocked behind §7's dynamic window calculation with NotImplementedError gating on every enqueue path, conservative `SPACER_TIMING_MODE=test`-only mode selection (typo / miscased / unset all land in production), and that the same module also enforces the §4.7 rejection-delivery delay (test-mode 1-5s; production 1h ± 30 min) over a shared `pending_actions` / `pending_results` defer-then-pop substrate. §7's "Dynamic window calculation" open Q is the exact gating issue for production and needs no edit; the action executor (drains due actions) and result-registry consumer (drains due results) are not yet implemented.
+- 2026-05-24: §4.5 expanded to document the JSONL / fsync-per-write / atomic-within-PIPE_BUF / in-process-lock properties that `arbiter/src/audit.py` already carries; on-disk path moved from `arbiter/data/audit.log` to `arbiter/state/audit.log` per [arb-auditability §3](06--2026-05-24-0623-arb-auditability.md), and the snapshot primitive linked as the §4.5 companion (the §7 acceptance item from that doc). Note: `arbiter/src/state.py` still defaults to `arbiter/data/state.db`, and `.gitignore` covers `arbiter/data/` but not `arbiter/state/`; both follow-ups belong to the broader arb-auditability tree migration.
