@@ -1,0 +1,32 @@
+# Transient subtrees under the arbiter tree. Per
+# design-docs/origin/06--2026-05-24-0623-arb-auditability.md §3, the
+# continuous git snapshot must only capture src/ + config/ + bin/.
+# Everything below this line lives outside the snapshot history so
+# runtime chatter (SQLite WAL ticks, audit-log appends, on-disk
+# datadirs) does not bury real config edits and deploys in noise.
+
+# Runtime SQLite (+ WAL/SHM sidecars), audit log, pending HITL queue,
+# per-process scratch. The state subsystem also accepts STATE_DB_PATH
+# and AUDIT_LOG_PATH overrides; the gitignored defaults live here.
+state/
+
+# bitcoind datadir.
+bitcoin/
+
+# LND datadir / credentials.
+lnd/
+
+# Catch-all for any other transient runtime that does not fit one of
+# the named subtrees. Modules MUST NOT write outside this set; see
+# §3 implementation invariant.
+data/
+
+# Python bytecode and editor litter; would otherwise generate a
+# spurious snapshot commit every time a module is loaded or saved.
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-wal
+*.db-shm
+.DS_Store

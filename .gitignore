@@ -53,11 +53,15 @@ __pycache__/
 .runtime/
 .gc/tmp/
 
-# Daemon binaries, datadirs, credentials. Subdirs of arbiter/ are
-# non-source by default; only arbiter/src/ holds the auditable code,
-# so enumerate the ignored subdirs rather than ignoring arbiter/ as a
-# whole (git cannot re-include children of an excluded directory).
-arbiter/bin/
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §3,
+# arbiter/ now holds three tracked subtrees (src/, config/, bin/) plus
+# four gitignored runtime subtrees (state/, bitcoin/, lnd/, data/).
+# arbiter/.gitignore inside the arbiter tree is the load-bearing copy
+# (it is what the continuous git snapshot reads when run from the
+# deployed arbiter root). These root-level entries are defense in
+# depth for this monorepo so the runtime subtrees do not leak into
+# checkins from the repo root.
+arbiter/state/
 arbiter/bitcoin/
 arbiter/lnd/
 arbiter/data/
