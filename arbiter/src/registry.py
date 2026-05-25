@@ -11,7 +11,7 @@ Three responsibilities:
 1. Add (operator-side). The operator types a real address at the
    directly-attached arbiter console. The registry validates the
    address's built-in checksum, generates a fresh token (with
-   bounded retry on collision), and inserts the row. The operator
+   bounded retry on collision), and appends the entry. The operator
    reads the issued (id, token) from the console and hand-transcribes
    the token to the AI side.
 
@@ -25,8 +25,8 @@ Three responsibilities:
 
 3. Consume (dispatch-side). After a successful send, the dispatch
    layer marks the entry consumed so the same token cannot be reused.
-   The consume call is idempotent and race-safe via a single atomic
-   UPDATE.
+   The consume call is idempotent on a per-process basis: a second
+   consume against the same token returns False without rewriting.
 
 Token format (sp-77lxs.5): 5 random Crockford-base32 characters + 1
 Damm32 check character. Crockford-base32 is 0-9 + A-Z minus I, L,
@@ -41,15 +41,27 @@ Format detection runs in fixed order (bech32m, bech32, base58check);
 first match wins. Mainnet HRPs and version bytes are refused at
 add-time per the project's no-mainnet hard rule.
 
+Storage substrate (bl-2lbqu4): a YAML file at arbiter/config/
+destinations.yaml. The operator owns the file and can hand-edit it
+at the directly-attached console with any text editor; saved changes
+take effect on the next lookup (mtime-based reload, no arbiter
+restart needed). The arbiter is deliberately minimal and manually
+managed (architecture overview §2.1): adding a destination,
+retiring one, or auditing what is in the universe should be one
+open-file / edit / save round-trip with no tool, no schema
+migration, and no query language between the operator and the data.
+
 Stdlib only.
 """
 import hashlib
 import os
-import sqlite3
+import tempfile
 import time
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Lock
 
 import audit
-import state
 
 
 # === Token alphabet, namespace, and Damm32 checksum ===================
@@ -310,27 +322,379 @@ def canonicalize(addr, fmt):
     return addr
 
 
-# === Storage schema ==================================================
+# === YAML storage ====================================================
 #
-# One table. PRIMARY KEY AUTOINCREMENT gives the monotonic local
-# sequence id (§4.7: "id ... assigned at creation. Local-only.").
-# UNIQUE on token enforces collision-free allocation; the integrity
-# error on insert drives the bounded retry in add().
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS recipient_addresses (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    token       TEXT    NOT NULL UNIQUE,
-    real        TEXT    NOT NULL,
-    format      TEXT    NOT NULL,
-    created_at  REAL    NOT NULL,
-    expires_at  REAL    NOT NULL,
-    used        INTEGER NOT NULL DEFAULT 0,
-    consumed_by TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_recipient_addresses_token
-    ON recipient_addresses(token);
+# The on-disk substrate is a flat YAML list of entry mappings at
+# arbiter/config/destinations.yaml. The operator owns the file and
+# may hand-edit it; the arbiter reads on lookup (mtime-based reload)
+# and rewrites on add() / consume(). The header comment block in the
+# file documents the schema for the operator and is re-emitted on
+# every rewrite.
+#
+# Schema (per bead bl-2lbqu4):
+#   id:          int       monotonic local sequence (1, 2, 3, ...)
+#   token:       str       6-char Crockford-base32 (5 random + 1 Damm32)
+#   real:        str       real address (bech32* lowercased on storage)
+#   format:      str       bech32 | bech32m | base58check
+#                          | bolt11 | bolt12 | lightning_address (LN reserved)
+#   created_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   expires_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   used:        bool      true once consumed
+#   consumed_by: str|~     txid (Bitcoin) or payment hash (Lightning);
+#                          ~ if not used
+#
+# We hand-write a minimal YAML emitter and parser rather than depend
+# on PyYAML so this module stays stdlib-only. The schema is small and
+# closed (no anchors, refs, multi-line strings, nested lists), so the
+# subset we accept is tractable. Operator-friendly: bare alphanumeric
+# values and single-quoted strings both work; comments anywhere are
+# discarded.
+
+DEFAULT_PATH = (
+    Path(__file__).resolve().parent.parent / "config" / "destinations.yaml"
+)
+
+_FIELDS = (
+    "id",
+    "token",
+    "real",
+    "format",
+    "created_at",
+    "expires_at",
+    "used",
+    "consumed_by",
+)
+
+# Header block re-emitted on every rewrite. The schema doc here is
+# the operator's reference; keep it accurate as the schema evolves.
+_HEADER = """\
+# arbiter/config/destinations.yaml
+#
+# Recipient address registry (§4.7 of design-docs/origin/05--).
+# The arbiter never reveals the real address to the petitioner; this
+# file is the only place that maps the public token to the real
+# destination. See GLOSSARY.md "Recipient address registry" for
+# the threat model.
+#
+# Edit this file directly with any text editor. Saved changes take
+# effect on the next registry lookup (mtime-based reload, no arbiter
+# restart needed). The arbiter rewrites this file on registry_add
+# and registry_consume; any operator comments above individual
+# entries are NOT preserved across rewrites.
+#
+# Schema (per-entry mapping):
+#   id:          int       monotonic local sequence (1, 2, 3, ...)
+#   token:       str       6-char Crockford-base32 (5 random + 1 Damm32)
+#   real:        str       real address (bech32* stored lowercased)
+#   format:      str       bech32 | bech32m | base58check |
+#                          bolt11 | bolt12 | lightning_address
+#   created_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   expires_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   used:        bool      true once consumed
+#   consumed_by: str|~     txid (Bitcoin) or payment hash (Lightning);
+#                          ~ if not used
+#
+# To add an entry from the directly-attached arbiter console, run:
+#   arbiter/bin/registry add <real-address>
+# which validates the checksum, generates a token, and appends here.
+# Direct YAML edits are equally supported.
+#
 """
-state.register_schema(_SCHEMA)
+
+_lock = Lock()
+_path = None
+_entries = []         # in-memory parsed view: list of dicts (see _FIELDS)
+_mtime_ns = None      # last seen file mtime in ns; None if file absent
+
+
+def configure(path=None):
+    """Set the YAML file path and reset the in-memory cache. Falls back
+    to DESTINATIONS_PATH env var, then DEFAULT_PATH. Idempotent. Does
+    not require the file to exist; a missing file is treated as an
+    empty registry until the first write creates it."""
+    global _path, _entries, _mtime_ns
+    with _lock:
+        _path = Path(
+            path or os.environ.get("DESTINATIONS_PATH", DEFAULT_PATH)
+        )
+        # Reset the in-memory cache so a re-configure (e.g., between
+        # tests) does not serve stale entries from the previous path.
+        _entries = []
+        _mtime_ns = None
+
+
+def path():
+    """Return the currently-configured YAML path, or None if not
+    configured yet."""
+    return _path
+
+
+def _iso_from_epoch(t):
+    """Format an epoch float as ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _epoch_from_iso(s):
+    """Parse an ISO 8601 UTC string into an epoch float. Accepts the
+    canonical 'YYYY-MM-DDTHH:MM:SSZ' shape we emit, plus the
+    '+00:00' suffix variant fromisoformat accepts natively. Raises
+    ValueError on any other shape."""
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        # YAML doesn't carry tz; treat naive as UTC for safety. The
+        # only writer is _persist() and it always emits 'Z', so this
+        # branch only fires on operator hand-edits that dropped the
+        # suffix.
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _emit_str(s):
+    """Emit a string as a single-quoted YAML scalar. Single quotes
+    are the simplest YAML string quoting: the only escape needed is
+    doubling an embedded single quote. None of our stored fields
+    (Crockford tokens, bech32/base58 addresses, ISO timestamps,
+    format keywords, txids, payment hashes) contain single quotes
+    in practice, but the escape keeps us safe against
+    consumed_by values an operator might paste in by hand."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _emit(entries):
+    """Serialize the entries list to YAML text. Always re-emits the
+    schema header so the file remains self-documenting after every
+    arbiter rewrite. Entry order matches the input list (which is
+    insertion order, also id order since ids are monotonic)."""
+    out = [_HEADER]
+    if not entries:
+        out.append("[]\n")
+        return "".join(out)
+    for e in entries:
+        out.append(f"- id: {int(e['id'])}\n")
+        out.append(f"  token: {_emit_str(e['token'])}\n")
+        out.append(f"  real: {_emit_str(e['real'])}\n")
+        out.append(f"  format: {_emit_str(e['format'])}\n")
+        out.append(f"  created_at: {_emit_str(_iso_from_epoch(e['created_at']))}\n")
+        out.append(f"  expires_at: {_emit_str(_iso_from_epoch(e['expires_at']))}\n")
+        out.append(f"  used: {'true' if e['used'] else 'false'}\n")
+        cb = e.get("consumed_by")
+        if cb is None:
+            out.append("  consumed_by: ~\n")
+        else:
+            out.append(f"  consumed_by: {_emit_str(cb)}\n")
+        out.append("\n")
+    return "".join(out)
+
+
+def _parse_scalar(raw):
+    """Parse one YAML scalar from the right-hand side of a 'key: value'
+    line. Accepts: single-quoted strings ('foo' or 'it''s'), double-
+    quoted strings ("foo" with backslash escapes), bare integers
+    ('123' or '-1'), bare booleans ('true' / 'false'), nulls ('~' or
+    empty), and bare alphanumeric/punctuation strings. Trailing
+    '# comment' is stripped from BARE scalars only (quoted strings
+    pass through verbatim). Raises ValueError on unparseable input."""
+    s = raw.strip()
+    if not s or s == "~":
+        return None
+    if s.startswith("'"):
+        end = s.rfind("'")
+        if end <= 0:
+            raise ValueError(f"unterminated single-quoted string: {raw!r}")
+        body = s[1:end].replace("''", "'")
+        return body
+    if s.startswith('"'):
+        # Minimal double-quoted: backslash-escape, no flow indicators.
+        end = -1
+        i = 1
+        while i < len(s):
+            c = s[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                end = i
+                break
+            i += 1
+        if end < 0:
+            raise ValueError(f"unterminated double-quoted string: {raw!r}")
+        body = s[1:end]
+        out = []
+        i = 0
+        while i < len(body):
+            c = body[i]
+            if c == "\\" and i + 1 < len(body):
+                nxt = body[i + 1]
+                out.append({"n": "\n", "t": "\t", "\\": "\\", '"': '"'}.get(
+                    nxt, nxt))
+                i += 2
+            else:
+                out.append(c)
+                i += 1
+        return "".join(out)
+    # Bare scalar. Strip a trailing comment for tolerance with operator
+    # additions like "used: false  # consumed last week".
+    comment = s.find("#")
+    if comment >= 0:
+        s = s[:comment].rstrip()
+    if not s or s == "~":
+        return None
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.lstrip("-").isdigit():
+        return int(s)
+    return s
+
+
+def _parse(text):
+    """Parse YAML text into a list of entry dicts. Handles the closed
+    schema we control: a top-level list of mappings, comments, blank
+    lines, and the value shapes _parse_scalar understands.
+
+    Recognized item start lines:
+      '[]'           -> the canonical empty marker emitted by _emit()
+      '- key: value' -> start a new entry; the line carries the first key
+      '  key: value' -> continuation key on the current entry
+
+    Raises ValueError on structural or schema errors with a line
+    number, so operator edits that drift from the schema land an
+    error the operator can correct."""
+    entries = []
+    current = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        # Strip comments and trailing whitespace on bare lines. Quoted
+        # scalars are handled inside _parse_scalar so a '#' inside a
+        # quoted value is not treated as a comment.
+        stripped = line.rstrip()
+        if not stripped.strip() or stripped.lstrip().startswith("#"):
+            continue
+        # Top-level empty marker. Emitted by _emit() when entries is
+        # empty so the file is still well-formed YAML.
+        if stripped.strip() == "[]":
+            continue
+        if stripped.startswith("- "):
+            if current is not None:
+                entries.append(_finalize_entry(current, lineno))
+            current = {}
+            kv_line = stripped[2:]
+            _ingest_kv(current, kv_line, lineno)
+        elif stripped.startswith("  ") and current is not None:
+            _ingest_kv(current, stripped.strip(), lineno)
+        else:
+            raise ValueError(
+                f"line {lineno}: expected '- key: value' or '  key: value', "
+                f"got {line!r}"
+            )
+    if current is not None:
+        entries.append(_finalize_entry(current, lineno))
+    return entries
+
+
+def _ingest_kv(target, kv_line, lineno):
+    """Split 'key: value' (or 'key:' for an empty value) and stuff the
+    parsed result into target. Raises ValueError on missing colon."""
+    colon = kv_line.find(":")
+    if colon < 0:
+        raise ValueError(
+            f"line {lineno}: missing ':' in {kv_line!r}"
+        )
+    key = kv_line[:colon].strip()
+    val_raw = kv_line[colon + 1:]
+    target[key] = _parse_scalar(val_raw)
+
+
+def _finalize_entry(raw, lineno):
+    """Validate a parsed entry has every required field, normalize the
+    timestamp strings to epoch floats, and return the canonical dict
+    used by the in-memory cache."""
+    missing = [k for k in _FIELDS if k not in raw]
+    if missing:
+        raise ValueError(
+            f"line {lineno}: entry missing fields {missing!r}"
+        )
+    out = {}
+    out["id"] = int(raw["id"])
+    out["token"] = str(raw["token"])
+    out["real"] = str(raw["real"])
+    out["format"] = str(raw["format"])
+    # Timestamps: stored as ISO strings in YAML, kept as epoch floats
+    # in memory so the audit log payloads and the list_entries() tuple
+    # shape match the pre-migration SQLite contract.
+    out["created_at"] = _epoch_from_iso(str(raw["created_at"]))
+    out["expires_at"] = _epoch_from_iso(str(raw["expires_at"]))
+    out["used"] = bool(raw["used"])
+    cb = raw["consumed_by"]
+    out["consumed_by"] = None if cb is None else str(cb)
+    return out
+
+
+def _maybe_reload():
+    """Re-read the YAML file if its mtime has changed since the last
+    successful read. Called from every read path (lookup, list,
+    utilization). A missing file is treated as an empty list with
+    mtime=None so the first operator add() can create it.
+
+    Caller must NOT hold _lock; this function acquires it."""
+    global _entries, _mtime_ns
+    with _lock:
+        if _path is None:
+            configure()
+        try:
+            st = _path.stat()
+        except FileNotFoundError:
+            # File doesn't exist yet (fresh deployment, before the
+            # first add). Treat as empty; do not create the file
+            # here - that would be a write from a read path.
+            _entries = []
+            _mtime_ns = None
+            return
+        if _mtime_ns is not None and st.st_mtime_ns == _mtime_ns:
+            return
+        text = _path.read_text()
+        _entries = _parse(text)
+        _mtime_ns = st.st_mtime_ns
+
+
+def _persist(entries):
+    """Atomically write entries to the YAML path. Tempfile + rename
+    on the same filesystem is atomic on POSIX, so a reader concurrent
+    with the rewrite sees either the old or the new file in full,
+    never a torn half-written file.
+
+    Caller must hold _lock (so _entries and _mtime_ns updates are
+    coherent with this write)."""
+    global _entries, _mtime_ns
+    if _path is None:
+        configure()
+    _path.parent.mkdir(parents=True, exist_ok=True)
+    text = _emit(entries)
+    # Same-directory tempfile so os.replace() is a rename within one
+    # filesystem (cross-fs rename would not be atomic).
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".destinations.", suffix=".yaml.tmp", dir=str(_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, _path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    # Refresh the cached mtime after the rename so the next read does
+    # not trigger a redundant reload of our own write.
+    st = _path.stat()
+    _entries = list(entries)
+    _mtime_ns = st.st_mtime_ns
 
 
 # === Errors and public API ===========================================
@@ -345,8 +709,9 @@ class RegistryError(Exception):
 
 def add(real, expires_in_days=DEFAULT_EXPIRY_DAYS):
     """Console-side add. Validates the operator-typed address,
-    generates a fresh token (with bounded collision retry), inserts
-    a new row, audit-logs the success. Returns (id, token).
+    generates a fresh token (with bounded collision retry), appends
+    a new entry to the YAML file, audit-logs the success. Returns
+    (id, token).
 
     Raises RegistryError on any validation failure or on collision
     exhaustion. The operator sees the exception at the console; the
@@ -366,41 +731,51 @@ def add(real, expires_in_days=DEFAULT_EXPIRY_DAYS):
     canon = canonicalize(real, fmt)
     now = time.time()
     expires = now + float(expires_in_days) * 86400.0
-    last_err = None
-    for _ in range(MAX_COLLISION_RETRY):
-        token = generate_token()
-        try:
-            with state.connect() as conn:
-                cur = conn.execute(
-                    "INSERT INTO recipient_addresses "
-                    "(token, real, format, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (token, canon, fmt, now, expires),
-                )
-                rid = cur.lastrowid
-        except sqlite3.IntegrityError as e:
-            last_err = e
-            continue
-        audit.record(
-            "registry_add",
-            {
-                "id": rid,
-                "token": token,
-                "format": fmt,
-                "real": canon,
-                "expires_at": expires,
-            },
-        )
-        _maybe_warn_utilization()
-        return (rid, token)
+    _maybe_reload()
+    with _lock:
+        # Snapshot the existing token set so collision detection is
+        # cheap and consistent with the persisted state.
+        existing_tokens = {e["token"] for e in _entries}
+        next_id = (max((e["id"] for e in _entries), default=0)) + 1
+        token = None
+        for _ in range(MAX_COLLISION_RETRY):
+            cand = generate_token()
+            if cand not in existing_tokens:
+                token = cand
+                break
+        if token is None:
+            audit.record(
+                "registry_collision_exhausted",
+                {"attempts": MAX_COLLISION_RETRY},
+            )
+            raise RegistryError(
+                f"namespace unhealthy: {MAX_COLLISION_RETRY} consecutive "
+                f"token collisions; manual cleanup needed"
+            )
+        new_entry = {
+            "id": next_id,
+            "token": token,
+            "real": canon,
+            "format": fmt,
+            "created_at": now,
+            "expires_at": expires,
+            "used": False,
+            "consumed_by": None,
+        }
+        new_entries = list(_entries) + [new_entry]
+        _persist(new_entries)
     audit.record(
-        "registry_collision_exhausted",
-        {"attempts": MAX_COLLISION_RETRY},
+        "registry_add",
+        {
+            "id": next_id,
+            "token": token,
+            "format": fmt,
+            "real": canon,
+            "expires_at": expires,
+        },
     )
-    raise RegistryError(
-        f"namespace unhealthy: {MAX_COLLISION_RETRY} consecutive token "
-        f"collisions; manual cleanup needed (last sqlite error: {last_err})"
-    )
+    _maybe_warn_utilization()
+    return (next_id, token)
 
 
 def lookup(token):
@@ -411,7 +786,7 @@ def lookup(token):
       ("ok", real, format)         - token is live and unused
       ("bad_checksum", None, None) - typo, alphabet error, length
                                      mismatch, or non-string input
-      ("unknown", None, None)      - passes checksum but no row
+      ("unknown", None, None)      - passes checksum but no entry
       ("expired", None, None)      - past expires_at
       ("used", None, None)         - already consumed
       ("anomalous", None, None)    - re-validation of stored address
@@ -435,26 +810,28 @@ def lookup(token):
             {"reason": "bad_checksum", "token_len": len(token)},
         )
         return ("bad_checksum", None, None)
-    with state.connect() as conn:
-        row = conn.execute(
-            "SELECT id, real, format, expires_at, used FROM "
-            "recipient_addresses WHERE token = ?",
-            (norm,),
-        ).fetchone()
-    if row is None:
+    _maybe_reload()
+    match = None
+    for e in _entries:
+        if e["token"] == norm:
+            match = e
+            break
+    if match is None:
         audit.record(
             "registry_lookup_refuse",
             {"reason": "unknown", "token": norm},
         )
         return ("unknown", None, None)
-    rid, real, fmt, expires_at, used = row
-    if expires_at <= time.time():
+    rid = match["id"]
+    real = match["real"]
+    fmt = match["format"]
+    if match["expires_at"] <= time.time():
         audit.record(
             "registry_lookup_refuse",
             {"reason": "expired", "id": rid, "token": norm},
         )
         return ("expired", None, None)
-    if used:
+    if match["used"]:
         audit.record(
             "registry_lookup_refuse",
             {"reason": "used", "id": rid, "token": norm},
@@ -464,7 +841,10 @@ def lookup(token):
     # stored address's format. If the result differs from the stored
     # format, storage is corrupt or the validator changed since
     # add-time. Audit-log full detail so the operator can investigate.
-    if detect_format(real) != fmt:
+    # Only applies to on-chain formats the arbiter validates; LN
+    # formats (bolt11, bolt12, lightning_address) are not yet wired
+    # through detect_format, so re-validation is skipped for them.
+    if fmt in ("bech32", "bech32m", "base58check") and detect_format(real) != fmt:
         audit.record(
             "registry_lookup_anomalous",
             {"id": rid, "token": norm, "stored_format": fmt, "real": real},
@@ -480,9 +860,11 @@ def consume(token, consumed_by):
     payment hash (Lightning).
 
     Returns True on the first successful consume, False otherwise
-    (already used, unknown, or bad checksum). The single atomic
-    UPDATE makes consume idempotent and race-safe against a
-    concurrent lookup.
+    (already used, unknown, or bad checksum). The lock + rewrite
+    makes consume race-safe against a concurrent in-process
+    consume, but not against an operator hand-editing the YAML at
+    the same instant; that race is accepted (operator edits are
+    human-slow and the arbiter is single-process by design).
 
     Note: consume does NOT re-check expires_at. The lookup-time gate
     is the precondition; once the action was authorized at lookup,
@@ -503,34 +885,36 @@ def consume(token, consumed_by):
             {"reason": "bad_checksum", "token_len": len(token)},
         )
         return False
-    with state.connect() as conn:
-        cur = conn.execute(
-            "UPDATE recipient_addresses SET used = 1, consumed_by = ? "
-            "WHERE token = ? AND used = 0",
-            (consumed_by, norm),
-        )
-        affected = cur.rowcount
-    if affected == 1:
-        audit.record(
-            "registry_consume",
-            {"token": norm, "consumed_by": consumed_by},
-        )
-        return True
+    _maybe_reload()
+    with _lock:
+        new_entries = []
+        flipped = False
+        for e in _entries:
+            if e["token"] == norm and not e["used"]:
+                new_entries.append({**e, "used": True, "consumed_by": consumed_by})
+                flipped = True
+            else:
+                new_entries.append(e)
+        if not flipped:
+            audit.record(
+                "registry_consume_refuse",
+                {"token": norm, "consumed_by": consumed_by},
+            )
+            return False
+        _persist(new_entries)
     audit.record(
-        "registry_consume_refuse",
+        "registry_consume",
         {"token": norm, "consumed_by": consumed_by},
     )
-    return False
+    return True
 
 
 def utilization():
     """Return (total_entries, namespace_size, fraction). Operator-
     facing only; never crosses the privacy gateway. Used by the
     console list command and the post-add warning."""
-    with state.connect() as conn:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM recipient_addresses"
-        ).fetchone()[0]
+    _maybe_reload()
+    total = len(_entries)
     return (total, NAMESPACE_SIZE, total / NAMESPACE_SIZE)
 
 
@@ -548,17 +932,26 @@ def _maybe_warn_utilization():
 
 
 def list_entries():
-    """Return all entries in id order as raw rows for the operator
+    """Return all entries in id order as raw tuples for the operator
     console list command. Tuple shape:
     (id, token, format, real, created_at, expires_at, used, consumed_by).
 
     Real addresses ARE returned here; this function is operator-only
     and never crosses the privacy gateway."""
-    with state.connect() as conn:
-        return conn.execute(
-            "SELECT id, token, format, real, created_at, expires_at, "
-            "used, consumed_by FROM recipient_addresses ORDER BY id"
-        ).fetchall()
+    _maybe_reload()
+    return [
+        (
+            e["id"],
+            e["token"],
+            e["format"],
+            e["real"],
+            e["created_at"],
+            e["expires_at"],
+            int(bool(e["used"])),
+            e["consumed_by"],
+        )
+        for e in sorted(_entries, key=lambda x: x["id"])
+    ]
 
 
 # === Smoke test ======================================================
@@ -566,17 +959,14 @@ def list_entries():
 if __name__ == "__main__":
     import json
     import sys
-    import tempfile
-    from pathlib import Path
 
     tmp_audit = Path(tempfile.gettempdir()) / "arbiter-registry-smoke.log"
-    tmp_state = Path(tempfile.gettempdir()) / "arbiter-registry-smoke.db"
-    for p in (tmp_audit, tmp_state):
+    tmp_yaml = Path(tempfile.gettempdir()) / "arbiter-registry-smoke.yaml"
+    for p in (tmp_audit, tmp_yaml):
         if p.exists():
             p.unlink()
     audit.configure(tmp_audit)
-    state.configure(tmp_state)
-    state.migrate()
+    configure(tmp_yaml)
 
     # --- Damm32 invariants -------------------------------------------
     # Every single-character substitution in a generated token must
@@ -668,6 +1058,18 @@ if __name__ == "__main__":
     status, real, fmt = lookup(token)
     assert status == "ok" and real == addr.lower() and fmt == "bech32"
 
+    # The file exists on disk after the first add and parses back
+    # round-trip-clean. This is the load-bearing check the YAML
+    # substrate replaces: a fresh process can re-read the file and
+    # see the same entry.
+    assert tmp_yaml.exists(), f"YAML file should exist after add: {tmp_yaml}"
+    raw_text = tmp_yaml.read_text()
+    reparsed = _parse(raw_text)
+    assert len(reparsed) == 1, reparsed
+    assert reparsed[0]["token"] == token
+    assert reparsed[0]["real"] == addr.lower()
+    assert reparsed[0]["format"] == "bech32"
+
     # Crockford-normalized lookup. Lowercase the canonical token, swap
     # any "1" for "I" and any "0" for "O"; lookup must still resolve.
     perturbed = token.lower().replace("1", "i").replace("0", "o")
@@ -704,6 +1106,49 @@ if __name__ == "__main__":
     assert consume("nope", "x") is False
     assert consume(None, "x") is False
 
+    # Re-parse: the consume() rewrote the YAML and the flipped state
+    # is now persistent. Confirms the rewrite path round-trips.
+    reparsed = _parse(tmp_yaml.read_text())
+    consumed = [e for e in reparsed if e["token"] == token]
+    assert len(consumed) == 1 and consumed[0]["used"] is True
+    assert consumed[0]["consumed_by"] == "txid_smoke"
+
+    # --- Mtime-based reload ------------------------------------------
+    # The operator's hand-edit path: replace the file directly, lookup
+    # must see the new contents on the very next call. Construct a
+    # minimal valid entry by hand to simulate an operator edit; reuse
+    # the existing tokens and add a brand-new entry inline.
+    edited_token = None
+    for _ in range(20):
+        cand = generate_token()
+        if cand != token:
+            edited_token = cand
+            break
+    assert edited_token is not None
+    edited_addr = "tb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0l98cr"  # same valid addr
+    hand_edited = _HEADER + (
+        f"- id: 99\n"
+        f"  token: '{edited_token}'\n"
+        f"  real: '{edited_addr}'\n"
+        f"  format: 'bech32'\n"
+        f"  created_at: '2026-05-24T00:00:00Z'\n"
+        f"  expires_at: '2099-01-01T00:00:00Z'\n"
+        f"  used: false\n"
+        f"  consumed_by: ~\n"
+    )
+    # Sleep briefly to ensure st_mtime_ns advances on filesystems with
+    # coarse mtime; modern macOS/Linux are nanosecond, but a single
+    # ns is enough to differ.
+    time.sleep(0.01)
+    tmp_yaml.write_text(hand_edited)
+    status, real, _ = lookup(edited_token)
+    assert status == "ok" and real == edited_addr, (status, real)
+
+    # The reload also drops the prior in-memory entries (token now
+    # unknown because the hand-edit replaced the whole file).
+    status, _, _ = lookup(token)
+    assert status == "unknown", status
+
     # --- Expiry path -------------------------------------------------
     rid2, token2 = add(addr, expires_in_days=0)
     status, _, _ = lookup(token2)
@@ -711,11 +1156,15 @@ if __name__ == "__main__":
 
     # --- Anomalous: corrupt a stored address -------------------------
     rid3, token3 = add(addr)
-    with state.connect() as c:
-        c.execute(
-            "UPDATE recipient_addresses SET real = ? WHERE id = ?",
-            ("not_an_address", rid3),
-        )
+    # Hand-edit the file to mangle the stored address for token3.
+    current = _parse(tmp_yaml.read_text())
+    for e in current:
+        if e["token"] == token3:
+            e["real"] = "not_an_address"
+    # Manually re-emit (bypassing _persist so we exercise the parser /
+    # emitter directly here, plus a fresh mtime).
+    time.sleep(0.01)
+    tmp_yaml.write_text(_emit(current))
     status, _, _ = lookup(token3)
     assert status == "anomalous", status
 
@@ -770,15 +1219,14 @@ if __name__ == "__main__":
 
     # --- Collision exhaustion ----------------------------------------
     # Force every generate_token() call to return the same value.
-    # First add: succeeds (assuming the value isn't already in the DB,
-    # which we ensure explicitly). Second add: every retry collides
-    # on the UNIQUE token, loop hits MAX_COLLISION_RETRY, raises.
+    # First add: succeeds (assuming the value isn't already in the
+    # YAML, which we ensure explicitly). Second add: every retry
+    # collides on the in-memory token set, loop hits
+    # MAX_COLLISION_RETRY, raises.
     fixed = generate_token()
-    with state.connect() as c:
-        while c.execute(
-            "SELECT 1 FROM recipient_addresses WHERE token = ?", (fixed,)
-        ).fetchone():
-            fixed = generate_token()
+    existing = {e["token"] for e in _entries}
+    while fixed in existing:
+        fixed = generate_token()
     saved_gen = globals()["generate_token"]
     globals()["generate_token"] = lambda: fixed
     try:
@@ -792,5 +1240,24 @@ if __name__ == "__main__":
     finally:
         globals()["generate_token"] = saved_gen
 
-    print(f"OK: registry round-trips at audit={tmp_audit}, state={tmp_state}")
+    # --- list_entries shape preservation -----------------------------
+    # The CLI consumer (registry_cli.py cmd_list) iterates the tuple
+    # by position; the YAML migration must preserve that shape and
+    # the float-epoch type for the two timestamps (so the CLI's
+    # time.strftime(..., time.gmtime(t)) call still works).
+    rows = list_entries()
+    assert rows, "list_entries should not be empty after the adds above"
+    for row in rows:
+        assert len(row) == 8, row
+        rid, tok, fmt_, real_, ca, ea, used_, cb = row
+        assert isinstance(rid, int)
+        assert isinstance(tok, str) and len(tok) == TOKEN_TOTAL_LEN
+        assert isinstance(fmt_, str)
+        assert isinstance(real_, str)
+        assert isinstance(ca, float)
+        assert isinstance(ea, float)
+        assert used_ in (0, 1)
+        assert cb is None or isinstance(cb, str)
+
+    print(f"OK: registry round-trips at audit={tmp_audit}, yaml={tmp_yaml}")
     sys.exit(0)
