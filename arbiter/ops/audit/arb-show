@@ -1,0 +1,77 @@
+#!/bin/sh
+# arb-show <when>: show the snapshot diff closest to <when>.
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §8.
+#
+# Accepts the same date forms as arb-since; resolves to the snapshot
+# commit at or before <when> and prints the diff that landed at that
+# commit in a friendly form.
+#
+# Usage:
+#   arb-show '2026-05-24 14:32'
+#   arb-show 'yesterday'
+#   arb-show '2 hours ago'
+
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+ARBITER_ROOT="${ARBITER_ROOT:-$(cd "$here/../.." && pwd)}"
+cd "$ARBITER_ROOT"
+
+# Refuse if arbiter/ is not its own git repo top-level: walking a
+# parent repo's history would surface unrelated commits. Bootstrap
+# per arbiter/ops/README.md.
+if [ ! -e "$ARBITER_ROOT/.git" ]; then
+    printf "Error: %s is not a git repository.\n" "$ARBITER_ROOT" >&2
+    printf "Bootstrap: cd %s && git init && git add -A && git commit -m 'initial'\n" "$ARBITER_ROOT" >&2
+    exit 1
+fi
+
+if [ $# -lt 1 ]; then
+    cat >&2 <<EOF
+Usage: arb-show <when>
+
+  <when>  Any date form git log --before accepts.
+          Examples: '2026-05-24 14:32', 'yesterday', '2 hours ago'.
+
+EOF
+    exit 2
+fi
+when="$1"
+
+# Resolve to the most recent commit at or before <when>. -n 1 returns
+# at most one. If nothing matches (no commits in window), fall back
+# to the oldest commit and warn.
+hash="$(git log -n 1 --before="$when" --pretty=format:'%H' || true)"
+if [ -z "$hash" ]; then
+    printf "No snapshot at or before '%s'. The oldest commit is:\n" "$when"
+    git log --reverse -n 1 --pretty=format:'  %cI  %H' || true
+    printf "\n"
+    exit 1
+fi
+
+ts="$(git show --no-patch --format='%cI' "$hash")"
+date_human="$(echo "$ts" | cut -c1-16 | tr 'T' ' ')"
+files="$(git show --name-only --format= "$hash" | sed '/^$/d')"
+nfiles="$([ -z "$files" ] && echo 0 || printf '%s\n' "$files" | wc -l | tr -d ' ')"
+
+printf "Snapshot at %s (UTC):\n" "$date_human"
+
+if [ "$nfiles" -eq 0 ]; then
+    printf "  (empty commit - no file changes)\n"
+    exit 0
+fi
+
+if [ "$nfiles" -eq 1 ]; then
+    printf "  File:    %s\n" "$files"
+else
+    printf "  Files:   %d changed\n" "$nfiles"
+    printf '%s\n' "$files" | sed 's/^/             /'
+fi
+
+stat="$(git show --shortstat --format= "$hash" \
+    | awk -F'[,()]' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i ~ /insertion/||$i ~ /deletion/){printf "%s%s", (out?", ":""), $i; out=1}}}' \
+    | sed -e 's/ insertions*(+)/ lines added/' -e 's/ deletions*(-)/ lines removed/')"
+[ -n "$stat" ] && printf "  Change:  %s\n" "$stat"
+
+# The actual diff, unified, with context. Operator reads it directly.
+printf "\n"
+git show --format= --color=never "$hash"

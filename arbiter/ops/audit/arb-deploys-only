@@ -1,0 +1,62 @@
+#!/bin/sh
+# arb-deploys-only: only code / binary deploys. Hides config edits.
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §8.
+#
+# Answers: "When did the code actually change?" Output is
+# most-recent-first.
+#
+# No flags. Honors $ARB_AUDIT_LIMIT for the maximum number of entries
+# (default 50).
+
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+ARBITER_ROOT="${ARBITER_ROOT:-$(cd "$here/../.." && pwd)}"
+cd "$ARBITER_ROOT"
+
+# Refuse if arbiter/ is not its own git repo top-level: walking a
+# parent repo's history would surface unrelated commits. Bootstrap
+# per arbiter/ops/README.md.
+if [ ! -e "$ARBITER_ROOT/.git" ]; then
+    printf "Error: %s is not a git repository.\n" "$ARBITER_ROOT" >&2
+    printf "Bootstrap: cd %s && git init && git add -A && git commit -m 'initial'\n" "$ARBITER_ROOT" >&2
+    exit 1
+fi
+
+limit="${ARB_AUDIT_LIMIT:-50}"
+
+printf "Code deploys (most recent first):\n"
+
+# git log -- src/ bin/ restricts to commits that touched the deploy
+# subtrees. Either-or, not both-required.
+tmp="$(mktemp -t arb-deploys.XXXXXX)"
+trap 'rm -f "$tmp"' EXIT
+git log -n "$limit" --pretty=tformat:'%H %cI' -- src/ bin/ > "$tmp" || true
+
+if [ ! -s "$tmp" ]; then
+    printf "  (no deploys in history)\n"
+    exit 0
+fi
+
+while read -r hash ts; do
+    [ -z "$hash" ] && continue
+    date_time="$(echo "$ts" | cut -c1-16 | tr 'T' ' ')"
+
+    src_files="$(git show --name-only --format= "$hash" -- src/ | sed '/^$/d')"
+    bin_files="$(git show --name-only --format= "$hash" -- bin/ | sed '/^$/d')"
+
+    nsrc="$([ -z "$src_files" ] && echo 0 || printf '%s\n' "$src_files" | wc -l | tr -d ' ')"
+    nbin="$([ -z "$bin_files" ] && echo 0 || printf '%s\n' "$bin_files" | wc -l | tr -d ' ')"
+
+    parts=""
+    [ "$nsrc" -gt 0 ] && parts="$nsrc source file$([ "$nsrc" -eq 1 ] && echo "" || echo "s") changed"
+    [ "$nbin" -gt 0 ] && {
+        bin_part="$nbin binary file$([ "$nbin" -eq 1 ] && echo "" || echo "s") changed"
+        if [ -n "$parts" ]; then
+            parts="$parts, $bin_part"
+        else
+            parts="$bin_part"
+        fi
+    }
+
+    printf "  %s  %s\n" "$date_time" "$parts"
+done < "$tmp"

@@ -1,0 +1,112 @@
+#!/bin/sh
+# arb-status: is the snapshot system itself healthy?
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §8.
+#
+# Green-or-red one-shot. Reports:
+#   - When the last snapshot landed (cron firing? if so, recently?).
+#   - Whether there are uncommitted pending changes the cron has not
+#     yet picked up.
+#   - Repo size and commit count.
+#
+# Heuristic: a cron firing every minute should land at most one
+# commit per minute, so a gap over ~2 minutes is an early warning
+# and a gap over ~5 minutes is a problem.
+
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+ARBITER_ROOT="${ARBITER_ROOT:-$(cd "$here/../.." && pwd)}"
+cd "$ARBITER_ROOT"
+
+# Refuse if arbiter/ is not its own git repo top-level (just .git
+# existence; rev-parse alone would silently report a parent repo's
+# state, which masks a missing bootstrap).
+if [ ! -e "$ARBITER_ROOT/.git" ]; then
+    cat <<EOF
+Snapshot status: NOT INITIALIZED
+  No git repository at $ARBITER_ROOT. The snapshot loop has nothing
+  to extend. Bootstrap with:
+    cd "$ARBITER_ROOT" && git init && git add -A && git commit -m 'initial'
+
+EOF
+    exit 1
+fi
+
+now_epoch="$(date +%s)"
+last_ts="$(git log -1 --pretty=format:'%ct' 2>/dev/null || echo 0)"
+last_iso="$(git log -1 --pretty=format:'%cI' 2>/dev/null || echo 'never')"
+
+if [ "$last_ts" = "0" ]; then
+    cat <<EOF
+Snapshot cron:       NEVER RAN (no commits in repo)
+Last snapshot:       never
+Status:              WARN: history is empty. Bootstrap the repo per
+                     arbiter/ops/README.md before enabling the cron.
+
+EOF
+    exit 1
+fi
+
+age=$((now_epoch - last_ts))
+ncommits="$(git rev-list --count HEAD)"
+repo_size="$(du -sh .git 2>/dev/null | awk '{print $1}')"
+
+# Pending changes: anything staged or unstaged that the cron has not
+# committed yet. Includes untracked-but-not-ignored files.
+pending="$(git status --porcelain | wc -l | tr -d ' ')"
+
+# Cron state classification:
+#   <= 90s   : RUNNING (last firing was within one cron interval +
+#              30s grace)
+#   <= 300s  : WARN-LATE (cron has missed a few firings)
+#   > 300s   : NOT FIRING
+if [ "$age" -le 90 ]; then
+    cron_state="RUNNING"
+    cron_detail="last commit ${age}s ago"
+    overall="OK"
+    overall_detail=""
+elif [ "$age" -le 300 ]; then
+    cron_state="LATE"
+    cron_detail="last commit ${age}s ago (cron should fire every 60s)"
+    overall="WARN"
+    overall_detail="cron is falling behind. Check the timer/launchd unit."
+else
+    cron_state="NOT FIRING"
+    min=$((age / 60))
+    cron_detail="last commit ${min} minutes ago"
+    overall="WARN"
+    overall_detail="cron may have stopped. Check the timer/launchd unit."
+fi
+
+if [ "$pending" -gt 0 ]; then
+    pending_str="$pending file$([ "$pending" -eq 1 ] && echo "" || echo "s")"
+    # Pending changes during a healthy cron should clear within
+    # ~60s. Long-standing pending = cron is wedged.
+    if [ "$age" -le 90 ]; then
+        pending_note="$pending_str (will land in next snapshot)"
+    else
+        pending_note="$pending_str"
+    fi
+else
+    pending_note="NONE"
+fi
+
+printf "Snapshot cron:       %s (%s)\n" "$cron_state" "$cron_detail"
+printf "Pending changes:     %s\n" "$pending_note"
+printf "Last snapshot:       %s\n" "$last_iso"
+printf "Quiet for:           %ds\n" "$age"
+printf "Repo size:           %s, %s commits\n" "$repo_size" "$ncommits"
+printf "Status:              %s\n" "$overall"
+[ -n "$overall_detail" ] && printf "                     %s\n" "$overall_detail"
+
+# Untracked files that the .gitignore did not catch are a sign that
+# a module is writing transient state into a snapshotted path.
+# Surface them explicitly so the operator does not have to read the
+# pending list to spot them.
+unexpected="$(git ls-files --others --exclude-standard \
+    | grep -Ev '^(src|config|bin|ops|\.gitignore)' || true)"
+if [ -n "$unexpected" ]; then
+    printf "\nUNEXPECTED untracked files outside the four allowed subtrees:\n"
+    printf '%s\n' "$unexpected" | sed 's/^/  /'
+    printf "  -> a module is leaking transient state into the snapshot path.\n"
+    printf "     See 06-- §3 implementation invariant.\n"
+fi

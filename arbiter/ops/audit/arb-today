@@ -1,0 +1,92 @@
+#!/bin/sh
+# arb-today: what changed in the arbiter tree today?
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §8.
+#
+# Daily-glance script. Walks the snapshot history since local midnight
+# and translates each commit into one English line per category
+# (config edit / code deploy / binary update). Read each line and ask
+# yourself "did I do that, around then?"  - per §9 daily routine.
+#
+# No flags. Run by name; read the output.
+
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+ARBITER_ROOT="${ARBITER_ROOT:-$(cd "$here/../.." && pwd)}"
+cd "$ARBITER_ROOT"
+
+# Refuse if arbiter/ is not its own git repo top-level: walking a
+# parent repo's history would surface unrelated commits. Bootstrap
+# per arbiter/ops/README.md.
+if [ ! -e "$ARBITER_ROOT/.git" ]; then
+    printf "Error: %s is not a git repository.\n" "$ARBITER_ROOT" >&2
+    printf "Bootstrap: cd %s && git init && git add -A && git commit -m 'initial'\n" "$ARBITER_ROOT" >&2
+    exit 1
+fi
+
+today="$(date +%Y-%m-%d)"
+since="${today}T00:00:00"
+
+printf "Today (%s):\n" "$today"
+
+# Stream commits oldest-first so the operator reads them in
+# chronological order. %H = hash; %cI = ISO-8601 committer date; the
+# rest is parsed below.
+tmp="$(mktemp -t arb-today.XXXXXX)"
+trap 'rm -f "$tmp"' EXIT
+git log --since="$since" --reverse --pretty=tformat:'%H %cI' > "$tmp" || true
+
+if [ ! -s "$tmp" ]; then
+    printf "  (no changes today)\n"
+    exit 0
+fi
+
+n=0
+while read -r hash ts; do
+    [ -z "$hash" ] && continue
+    n=$((n + 1))
+
+    # HH:MM from the committer date.
+    hhmm="$(echo "$ts" | cut -c12-16)"
+
+    files="$(git show --name-only --format= "$hash" | sed '/^$/d')"
+    cfg="$(printf '%s\n' "$files" | grep '^config/' || true)"
+    src="$(printf '%s\n' "$files" | grep '^src/' || true)"
+    bin_="$(printf '%s\n' "$files" | grep '^bin/' || true)"
+
+    if [ -n "$cfg" ]; then
+        # Single config file with line delta if straightforward; otherwise list paths.
+        nfiles="$(printf '%s\n' "$cfg" | wc -l | tr -d ' ')"
+        if [ "$nfiles" = "1" ]; then
+            stat="$(git show --shortstat --format= "$hash" -- "$cfg" \
+                | awk -F'[,()]' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i ~ /insertion/||$i ~ /deletion/){printf "%s%s", (out?", ":""), $i; out=1}}}' \
+                | sed -e 's/ insertions*(+)/ lines added/' -e 's/ deletions*(-)/ lines removed/')"
+            if [ -n "$stat" ]; then
+                printf "  %s  config edit    %s  (%s)\n" "$hhmm" "$cfg" "$stat"
+            else
+                printf "  %s  config edit    %s\n" "$hhmm" "$cfg"
+            fi
+        else
+            paths="$(printf '%s\n' "$cfg" | paste -sd ',' - | sed 's/,/, /g')"
+            printf "  %s  config edit    %s\n" "$hhmm" "$paths"
+        fi
+    fi
+
+    if [ -n "$src" ]; then
+        nfiles="$(printf '%s\n' "$src" | wc -l | tr -d ' ')"
+        if [ "$nfiles" -le 2 ]; then
+            paths="$(printf '%s\n' "$src" | paste -sd ',' - | sed 's/,/, /g')"
+            printf "  %s  code deploy    %s\n" "$hhmm" "$paths"
+        else
+            first2="$(printf '%s\n' "$src" | head -n 2 | paste -sd ',' - | sed 's/,/, /g')"
+            extra=$((nfiles - 2))
+            printf "  %s  code deploy    %s + %d more\n" "$hhmm" "$first2" "$extra"
+        fi
+    fi
+
+    if [ -n "$bin_" ]; then
+        paths="$(printf '%s\n' "$bin_" | paste -sd ',' - | sed 's/,/, /g')"
+        printf "  %s  binary update  %s\n" "$hhmm" "$paths"
+    fi
+done < "$tmp"
+
+printf "\n%d change%s today.\n" "$n" "$([ "$n" -eq 1 ] && echo "" || echo "s")"
