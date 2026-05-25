@@ -23,16 +23,15 @@ The gateway currently routes inbound requests on a small fixed set
 of recognized ops: query_balance and query_channels (known reads,
 dispatch directly), send_bitcoin and send_lightning (known writes,
 resolve recipient_token through the recipient address registry per
-§4.7 - miss = uniform refusal - then check the operator's
-[standing approvals](../GLOSSARY.md#standing-approvals) config and
-HITL-park anything that does not match a rule), and poll (the
-result-registry fast path). Unknown ops also HITL-park. Read-only
-query-balance / query-channels are validated end-to-end via the
-fake lncli installed by the runner; state-changing sends are
-validated on the registry-miss path (refused-unknown-token
-variants) and on the standing-approval miss path (parked-no-
-standing-approval variants - the default-pause case the operator
-sees before adding their first standing approval).
+§4.7 - miss = uniform refusal), and poll (the result-registry fast
+path). Unknown ops HITL-park. Read-only query-balance /
+query-channels are validated end-to-end via the fake lncli installed
+by the runner; state-changing sends are validated on the
+registry-miss path only (refused-unknown-token variants). The
+[standing approvals](../GLOSSARY.md#standing-approvals) gate
+described in §4.1 / §6 has not landed in the gateway yet, so no
+parked-no-standing-approval variants exist; they become reachable
+once the standing-approvals check is wired into the write-op path.
 
 [Scale cloaking](../GLOSSARY.md#scale-cloaking) is wired for the
 read-only balance path. Four cloaked variants exercise the cloak's
