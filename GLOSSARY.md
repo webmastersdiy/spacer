@@ -864,7 +864,7 @@ do not function as event signals.
 The world-facing side of this leak (chain observers correlating a
 funding tx with downstream payment activity) is a separate threat
 model, addressed in
-`design-docs/origin/04--2026-05-02-1700-node-privacy-from-the-world.md`.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ## Inherent leaks
 

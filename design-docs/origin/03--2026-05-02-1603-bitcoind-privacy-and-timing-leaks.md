@@ -5,7 +5,7 @@
 **Related:**
 - `2026-05-02-1601-privacy-and-timing-leaks.md` (LND AI-facing companion - read together)
 - `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` (Mutinynet testbed details)
-- `2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
 
 ---
 
@@ -22,7 +22,7 @@ The boundary under analysis is the AI ↔ proxy ↔ bitcoind interface.
 
 World-facing threats (Bitcoin P2P peers, block explorer operators, the single Mutinynet
 peer at 45.79.52.207, hosting providers) are out of scope here; see
-`2026-05-02-1700-node-privacy-from-the-world.md`.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 This document is the bitcoind-side counterpart to the LND AI-facing doc. The two
 documents are meant to be read together when designing the proxy's policy layer.
@@ -39,7 +39,7 @@ documents are meant to be read together when designing the proxy's policy layer.
 | **Network observer** (AI ↔ proxy channel) | Traffic metadata (timing, packet sizes, connection frequency) even if payload is TLS-encrypted | Timing analysis, connection-count patterns, size fingerprinting of RPC responses. |
 
 World-facing threats (Bitcoin P2P peers, single Mutinynet peer, counterparty/recipient
-observers) are out of scope here; see `2026-05-02-1700-node-privacy-from-the-world.md`.
+observers) are out of scope here; see `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ### AI-facing characteristics specific to bitcoind (vs. LND)
 
@@ -60,7 +60,7 @@ observers) are out of scope here; see `2026-05-02-1700-node-privacy-from-the-wor
 ### Out of scope
 
 - bitcoind host OS / disk operator - they see everything regardless of what the proxy does.
-- Bitcoin P2P peers - world-facing; covered in `2026-05-02-1700-node-privacy-from-the-world.md`.
+- Bitcoin P2P peers - world-facing; covered in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 - LND operator - covered in the LND AI-facing doc.
 - OS-level or hypervisor-level compromise.
 - Physical access to the node hardware.
@@ -166,7 +166,7 @@ or public chain data.
 This section covers timing leaks that are AI-facing: patterns the AI client can observe
 through the proxy's request/response interval. World-facing timing leaks (e.g., the first
 P2P peer inferring tx origination from broadcast timing) are covered in
-`2026-05-02-1700-node-privacy-from-the-world.md` §3.8 and §4.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.8 and §4.
 
 ### 4.1 Polling cadence on chain state calls
 
@@ -262,7 +262,7 @@ Each mitigation is listed with its target threats and a note on its own residual
 
 Note: Tor routing and self-hosted esplora (for IP-to-txid link avoidance) are world-facing
 infrastructure choices; they do not change what the AI observes through the proxy. Those
-mitigations belong in `2026-05-02-1700-node-privacy-from-the-world.md` §5.
+mitigations belong in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §5.
 
 ---
 
@@ -290,7 +290,7 @@ dangerous on the topology and payment-correlation side; channel graph data in
 
 Note: world-facing comparison aspects (on-chain broadcast vs. LN gossip permanence, IP
 exposure to peers vs. esplora operators) are covered in
-`2026-05-02-1700-node-privacy-from-the-world.md` §4.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §4.
 
 ---
 
@@ -333,7 +333,7 @@ exposure to peers vs. esplora operators) are covered in
 
 ## 8. See Also
 
-- `2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
   peers, single Mutinynet peer at 45.79.52.207, block explorers, hosting operators).
   World-facing mitigations (Tor, multi-peer, self-hosted esplora) belong there.
 - `2026-05-02-1601-privacy-and-timing-leaks.md` - LND AI-facing privacy, same proxy

@@ -474,3 +474,9 @@ world-facing mitigations are defense-in-depth.
    any single peer can distinguish origination from relay by timing alone.
    This sets the minimum peer count needed before Dandelion or Tor becomes
    strictly necessary for first-hop anonymity.
+
+---
+
+## 8. Implementation learnings
+
+- 2026-05-24: Moved from `design-docs/origin/04--2026-05-02-1700-node-privacy-from-the-world.md` to `archive/` per the GLOSSARY direction set in commit ad81cb6 ("world-facing privacy goes to archive/, not parallel design tree"). World-facing privacy is out of active design scope for spacer; existing world-facing material lives in `archive/`, and new world-facing design work does not land in `design-docs/` unless and until world-facing becomes part of the active scope. No content reconciliation against implementation was performed - this is a threat-model document, not code-bound, and the threat actors, leaks, and mitigation menu in §2-§5 still describe the world-facing surface as observed in the 2026-05-02 run. Cross-references in `GLOSSARY.md` (§"Scale cloaking") and in origin docs `01--`, `03--`, `05--` were updated to point at `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`. Filed under bl-iro9qi (shard 11 of bl-wisp-58c).

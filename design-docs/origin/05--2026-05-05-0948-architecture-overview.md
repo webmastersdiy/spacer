@@ -6,7 +6,7 @@
 - `../GLOSSARY.md` - vocabulary; this doc references glossary terms by link rather than redefining them.
 - `2026-05-02-1601-privacy-and-timing-leaks.md` - per-API leak surface for LND.
 - `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - per-API leak surface for bitcoind.
-- `2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (separate threat model).
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (separate threat model).
 
 ---
 
@@ -268,7 +268,7 @@ This is the logical architecture: the components, the boundary, the data flow, a
 - Data model schemas for the token-to-real mapping, policy tables, HITL queue, audit log records.
 - Wire formats (transport, framing, encoding).
 - Code structure inside the arbiter or petitioner beyond the auditability constraints in §2.1.
-- World-facing privacy mitigations (Tor, multi-peer broadcast, self-hosted esplora, channel announcement choices for world-facing reasons). Covered in `2026-05-02-1700-node-privacy-from-the-world.md`.
+- World-facing privacy mitigations (Tor, multi-peer broadcast, self-hosted esplora, channel announcement choices for world-facing reasons). Covered in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 - Per-API filter rules (which RPC fields get banded, tokenized, dropped). Covered in `2026-05-02-1601-privacy-and-timing-leaks.md` (LND) and `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (bitcoind).
 
 ---

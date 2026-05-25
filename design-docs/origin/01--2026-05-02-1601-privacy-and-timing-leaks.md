@@ -5,7 +5,7 @@
 **Related:**
 - `2026-05-02-1600-lnd-mutinynet-test-flow.md` (test setup and session ledger)
 - `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (bitcoind AI-facing companion)
-- `2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
 
 ---
 
@@ -21,7 +21,7 @@ The boundary under analysis is the AI ↔ proxy ↔ LND interface.
 
 World-facing threats (LN gossip, P2P peer observers, block explorer operators, hosting
 providers) are out of scope here; see
-`2026-05-02-1700-node-privacy-from-the-world.md`.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ---
 
@@ -36,7 +36,7 @@ providers) are out of scope here; see
 
 World-facing threats (LN gossip network, routing nodes on payment paths, counterparty
 observers, hosting operators) are out of scope here; see
-`2026-05-02-1700-node-privacy-from-the-world.md`.
+`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
 ### Out of scope
 
@@ -94,7 +94,7 @@ partial identifiers; **LOW** = status flags or booleans.
 
 Note: the faucet `POST /api/onchain` call exposes our address to the faucet operator and
 links it to our GitHub identity. That is a world-facing leak (faucet as adversary), not
-an AI-facing one. See `2026-05-02-1700-node-privacy-from-the-world.md` §3.6.
+an AI-facing one. See `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.6.
 
 ### 3.6 Channel Open / Close
 
@@ -106,7 +106,7 @@ an AI-facing one. See `2026-05-02-1700-node-privacy-from-the-world.md` §3.6.
 Note: the gossip consequence of `openchannel` (pubkey-pair + capacity + SCID broadcast to the
 LN graph) is a world-facing leak, not an AI-facing one. The AI-facing concern is the
 channel_point, funding txid, and counterparty pubkey the AI can learn via the API response.
-See `2026-05-02-1700-node-privacy-from-the-world.md` §3.4 for gossip details.
+See `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.4 for gossip details.
 
 ### 3.7 ldk-node additional surface (second-backend perspective)
 
@@ -198,7 +198,7 @@ alternative routes are being explored - the AI can infer liquidity constraints f
 the pattern of failures and successes.
 
 Note: timing as observed by routing nodes (onion latency at intermediate hops) is a
-world-facing concern; see `2026-05-02-1700-node-privacy-from-the-world.md` §2.6.
+world-facing concern; see `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §2.6.
 
 ---
 
@@ -222,7 +222,7 @@ Each mitigation is listed with its target threat and a note on its own residual 
 
 Note: Tor routing, multi-peer broadcast, and self-hosted esplora are world-facing
 infrastructure choices; they do not change what the AI can observe through the proxy.
-Those mitigations belong in `2026-05-02-1700-node-privacy-from-the-world.md` §5.
+Those mitigations belong in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §5.
 
 ---
 
@@ -264,7 +264,7 @@ Those mitigations belong in `2026-05-02-1700-node-privacy-from-the-world.md` §5
 
 ## 7. See Also
 
-- `2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
   peers, LN gossip, block explorers, hosting providers). This is the sibling doc for
   concerns that are out of scope here.
 - `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - bitcoind AI-facing privacy,
