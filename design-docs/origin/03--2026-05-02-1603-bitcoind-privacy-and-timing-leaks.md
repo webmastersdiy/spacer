@@ -339,3 +339,97 @@ exposure to peers vs. esplora operators) are covered in
 - `2026-05-02-1601-privacy-and-timing-leaks.md` - LND AI-facing privacy, same proxy
   model applied to the LND RPC surface. Read together with this doc when designing the
   proxy policy layer.
+
+---
+
+## 9. Reconciliation Notes (post-allowlist-deletion, post-standing-approvals)
+
+**Date:** 2026-05-24. Inputs walked: `arbiter/src/bitcoin.py`, `arbiter/src/gateway.py`,
+`arbiter/src/scale.py`; cross-referenced against
+`design-docs/origin/05--2026-05-05-0948-architecture-overview.md` and the GLOSSARY
+entries for `Recipient address registry`, `Standing approvals`, `Scale cloaking`, and
+`Hide secrets`. Triggering commits: a12b1c8 (allowlist deleted, registry IS the
+destination gate) and 99bcc49 (Standing approvals added as the WHAT gate alongside the
+registry's WHO gate).
+
+None of the findings below invalidate the threat model in §2-§4 or the mitigation
+catalogue in §5; they note where the per-API doc and the implementation have drifted.
+
+1. **Allowlist→registry cleanup is complete in this doc.** No "allowlist" string
+   remains in §1-§8. The four per-call cells that previously named the allowlist
+   (§3.2 `gettxspendingprevout`, §3.5 `createrawtransaction`, §3.6 send-broadcast row,
+   §4.3 mempool-probing paragraph) and the §5 mitigation-menu row already point at the
+   registry or use the "internal set" replacement framing. No additional
+   registry-vs-allowlist edits are needed here.
+
+2. **§5 is missing the WHAT gate.** 99bcc49 introduced Standing approvals as a second
+   gate that sits between the registry resolve and dispatch: the registry decides
+   *who* can be a destination; standing approvals decides *which*
+   `(op, destination, amount)` tuples may dispatch without a HITL pause. §5 currently
+   presents the registry row as if it is the only gate for state-changing calls.
+   Doc 05 §4.1 and §6 both list Standing approvals as a sibling mechanism; a
+   corresponding row in this doc's §5 (with its own target threats and own-leak
+   caveat) would keep the per-API view aligned with the architecture-level view.
+
+3. **Banding vs scale cloaking on wallet-level totals.** §3.4 `getbalances` says
+   "Return banded values (e.g., `<10k / 10k-100k / 100k-1M / >1M sats`)." The
+   arbiter's live read ops (`query_balance`, `query_channels`) instead route
+   wallet/channel totals through `scale.present()`, a per-tier cloak with a
+   multi-day randomized tier-shift delay, per doc 05 §4.1 and §6 (scale cloaking
+   replaces straight banding for wallet-level totals; per-call fee fields stay on
+   banding). §5 does not list scale cloaking at all; it should appear alongside
+   "Numeric value banding" with its own target / own-leak entry, and the §3.4 cell
+   should be updated to say "scale-cloaked to a fixed presentation window" for the
+   wallet-total fields.
+
+4. **§3.5 PSBT cells vs the hide-secrets discipline.** §3.5 frames the proxy as
+   constructing PSBTs and signing through `walletprocesspsbt` /
+   `signrawtransactionwithwallet`, and §5's "Default to PSBT-style flows" row
+   presents this as the recommended mitigation. The current arbiter
+   (`arbiter/src/bitcoin.py` + doc 05 §4.2 + GLOSSARY 'Hide secrets') uses
+   `sendtoaddress` as a single black-box call: bitcoind performs coin selection,
+   change-address derivation, signing, and broadcast and returns only a txid. The
+   PSBT bitcoind constructs internally during signing never reaches the arbiter's
+   caller, so it cannot leak through the gateway. This is a stronger position than
+   the PSBT-roundtrip mitigation (no PSBT contents ever leave bitcoind), and the doc
+   should reflect it rather than recommend a flow the implementation deliberately
+   does not take.
+
+5. **§3.6 `sendtoaddress` cell mentions a change address the arbiter never sees.**
+   The cell says the proxy "validates destination, amount, and change address before
+   calling." `sendtoaddress` does not surface the change address to its caller
+   (bitcoind derives it internally), so the change-address validation step does not
+   and cannot happen in `bitcoin.py`. The validated inputs are destination (resolved
+   via the recipient address registry) and amount (passed through from the
+   petitioner). Trim accordingly.
+
+6. **§3 per-RPC table is forward-looking, not surface-active.** The gateway's
+   current `_KNOWN_READ_OPS` is `{query_balance, query_channels}` and
+   `_KNOWN_WRITE_OPS` is `{send_bitcoin, send_lightning}`; both writes route through
+   `sendtoaddress` (or its LND analogue). Zero bitcoind RPCs from §3 are directly
+   petitioner-reachable; every other inbound op parks in HITL via `_hitl_park` and
+   returns the uniform refusal. §3's per-RPC cells therefore describe what *would*
+   apply if an RPC were exposed, not what does apply today. A note at the top of §3
+   ("the cells below define policy for any future expansion of the AI-reachable op
+   set; the current arbiter exposes only `query_balance`, `query_channels`,
+   `send_bitcoin`, `send_lightning`") would prevent a reader from assuming a wider
+   live surface than exists.
+
+7. **§4.1 polling cadence is subsumed by the result registry's 10-min floor.** §4.1
+   warns about the AI inferring polling cadence from metronomic `getblockchaininfo`
+   / `getbalances` polling. In the implemented arbiter the AI does not poll chain
+   state at all; it submits an action and polls the result registry, whose 10-min
+   poll floor (doc 05 §4.8) is fixed by design and decoupled from any
+   arbiter-internal polling. The threat in §4.1 is real for a passthrough proxy
+   model but is moot for the async-result model; either reframe §4.1 to talk about
+   result-poll cadence (already neutralized by the 10-min floor) or note that the
+   threat applies only to a future passthrough mode.
+
+8. **Arbiter ↔ bitcoind link is intentionally un-mitigated locally.** `bitcoin.py`
+   is now explicit that no anti-cadence or anti-timing mitigation is applied between
+   the arbiter and its local bitcoind: Action delay, Result delay, and the privacy
+   gateway's latency normalization cover that link in aggregate from the petitioner
+   side. This is consistent with §1's scope statement (the boundary under analysis
+   is the AI ↔ proxy ↔ bitcoind interface, and the bitcoind-side link is on the
+   trusted side of the proxy) but is worth surfacing in §1 or §2 so a reader does
+   not look for arbiter-internal mitigations that, by design, do not exist.
