@@ -1,0 +1,31 @@
+# Linux systemd reference unit for arbiter/ops/snapshot.sh.
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md.
+#
+# Install (alongside snapshot.timer):
+#   1. Replace /opt/arbiter with the deployed arbiter root and the
+#      User= line with the operator account that owns the arbiter
+#      tree.
+#   2. Copy snapshot.service and snapshot.timer to
+#      /etc/systemd/system/ (system units) or
+#      ~/.config/systemd/user/ (user units, omit User= and use
+#      systemctl --user below).
+#   3. systemctl daemon-reload
+#      systemctl enable --now spacer-arbiter-snapshot.timer
+#   4. Verify with arbiter/ops/audit/arb-status that a commit lands
+#      within ~1 minute.
+#
+# Type=oneshot because snapshot.sh exits immediately; the timer
+# (snapshot.timer) is what drives the per-minute cadence.
+
+[Unit]
+Description=Spacer arbiter continuous git snapshot
+Documentation=file:///opt/arbiter/../design-docs/origin/06--2026-05-24-0623-arb-auditability.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/arbiter
+ExecStart=/opt/arbiter/ops/snapshot.sh
+User=arbiter
+# StandardOutput/Error land in the journal by default; if a file is
+# preferred, send them under arbiter/state/ (gitignored) so they do
+# not appear in the snapshot history they produce.

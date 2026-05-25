@@ -1,0 +1,22 @@
+# Linux systemd timer for arbiter/ops/snapshot.sh.
+# Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §4.
+#
+# Pairs with snapshot.service. Per-minute cadence (§4: lower than
+# this risks an outage between save and snapshot; higher than this
+# grows the history without telling us anything new).
+#
+# Persistent=true catches up after a missed firing if the machine
+# was off; the snapshot loop body is idempotent (nothing to commit
+# produces no commit) so running once after a long downtime is safe.
+
+[Unit]
+Description=Spacer arbiter continuous git snapshot (per-minute)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+Unit=spacer-arbiter-snapshot.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

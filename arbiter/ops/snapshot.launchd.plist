@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd reference unit for arbiter/ops/snapshot.sh.
+  Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md.
+
+  Install:
+    1. Replace /Users/operator/arbiter with the deployed arbiter root.
+    2. Copy to ~/Library/LaunchAgents/spacer.arbiter.snapshot.plist
+       (user agent) or /Library/LaunchDaemons/ (system daemon -
+       requires root and changes the snapshot's git committer).
+    3. launchctl load ~/Library/LaunchAgents/spacer.arbiter.snapshot.plist
+    4. Verify with arbiter/ops/audit/arb-status that a commit lands
+       within ~1 minute.
+
+  StartInterval=60 fires the loop once per minute; the snapshot.sh
+  body short-circuits when there is nothing staged so quiescent
+  minutes produce no commit (see §4).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>spacer.arbiter.snapshot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/operator/arbiter/ops/snapshot.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Stdout / stderr land under arbiter/state/ (gitignored) so the
+         snapshot loop's own logs do not appear in the snapshot
+         history they are producing. -->
+    <key>StandardOutPath</key>
+    <string>/Users/operator/arbiter/state/snapshot.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/operator/arbiter/state/snapshot.err</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/operator/arbiter</string>
+</dict>
+</plist>
