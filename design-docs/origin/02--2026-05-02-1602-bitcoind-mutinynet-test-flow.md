@@ -3,8 +3,9 @@
 **Date:** 2026-05-02  
 **Status:** partial - syncing; on-chain send/receive pending full sync  
 **Companion docs:**  
-- `2026-05-02-1600-lnd-mutinynet-test-flow.md` (LND side)  
-- `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (RPC leak map)
+- `00--2026-05-02-1600-lnd-mutinynet-test-flow.md` (LND side)  
+- `03--2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (RPC leak map)  
+- `05--2026-05-05-0948-architecture-overview.md` §4.2 (arbiter's bitcoind client) and §9 (current physical layout)
 
 ---
 
@@ -50,37 +51,54 @@ boundary to a third party and defeat the point.
 
 ## 4. Layout under `~/spacer/`
 
+The bitcoind install lives under the `arbiter/` and `test-harness/` homes
+described in `05--2026-05-05-0948-architecture-overview.md` §9. The tree
+below shows only the bitcoind-relevant paths; LND artifacts and unrelated
+state files are omitted (see the companion LND doc for the LND side, and
+§9 of the architecture overview for the full root tree).
+
 ```
 ~/spacer/
-├── bin/
-│   ├── bitcoind          # Mutinynet-patched Bitcoin Core v25.99.0-gf036909dbe28
-│   ├── bitcoin-cli       # RPC client
-│   ├── bitcoin-tx        # offline tx construction (no daemon needed)
-│   ├── bitcoin-wallet    # offline wallet ops (no daemon needed)
-│   ├── lncli             # (LND flow - see companion doc)
-│   ├── uv
-│   └── uvx
-├── bitcoin/              # bitcoind datadir
-│   ├── bitcoin.conf      # chmod 600
-│   ├── rpcauth.txt       # password copy, chmod 600
-│   └── signet/           # all chain data lives here (signet-only tree)
-│       ├── bitcoind.pid
-│       ├── blocks/
-│       ├── chainstate/
-│       ├── debug.log
-│       ├── peers.dat
-│       └── wallets/
-│           └── spacer-smoke/   # test wallet (created during smoke-test)
-├── downloads/
-│   └── mutinynet/
-│       ├── bitcoin-f036909dbe28-arm64-apple-darwin.tar.gz   # source tarball
-│       ├── bitcoin-f036909dbe28/                            # extracted tree
-│       ├── SHA256SUMS-covtools                              # checksum file
-│       └── SHA256SUMS.asc                                   # GPG sig
-└── scripts/
-    ├── btccli            # bitcoin-cli wrapper (pre-fills --datadir)
-    └── lncliA            # (LND flow - see companion doc)
+├── arbiter/
+│   ├── bin/
+│   │   ├── bitcoind        # Mutinynet-patched Bitcoin Core v25.99.0-gf036909dbe28
+│   │   ├── bitcoin-cli     # RPC client
+│   │   ├── bitcoin-tx      # offline tx construction (no daemon needed)
+│   │   ├── bitcoin-wallet  # offline wallet ops (no daemon needed)
+│   │   └── lncli           # (LND flow - see companion doc)
+│   ├── bitcoin/            # bitcoind datadir
+│   │   ├── bitcoin.conf    # chmod 600
+│   │   ├── rpcauth.txt     # password copy, chmod 600
+│   │   └── signet/         # all chain data lives here (signet-only tree)
+│   │       ├── bitcoind.pid
+│   │       ├── blocks/
+│   │       ├── chainstate/
+│   │       ├── debug.log
+│   │       ├── peers.dat
+│   │       └── wallets/
+│   │           └── spacer-smoke/   # test wallet (created during smoke-test)
+│   └── src/
+│       └── bitcoin.py      # production arbiter wrapper around bitcoin-cli (subprocess, no shell). See §8.
+└── test-harness/
+    ├── bin/
+    │   ├── uv
+    │   └── uvx
+    ├── downloads/
+    │   └── mutinynet/
+    │       ├── bitcoin-f036909dbe28-arm64-apple-darwin.tar.gz   # source tarball
+    │       ├── bitcoin-f036909dbe28/                            # extracted tree
+    │       ├── SHA256SUMS-covtools                              # checksum file
+    │       └── SHA256SUMS.asc                                   # GPG sig
+    └── scripts/
+        ├── btccli          # bitcoin-cli wrapper (pre-fills -datadir) - operator console only
+        └── lncliA          # (LND flow - see companion doc)
 ```
+
+The split between `arbiter/` (everything the AI must not reach) and
+`test-harness/` (testbed scaffolding) is load-bearing for the privacy
+boundary; the path each artifact lives under encodes whose side it
+belongs to. See `05--2026-05-05-0948-architecture-overview.md` §2 for
+the trust boundary and §9 for the full layout.
 
 ---
 
@@ -274,9 +292,14 @@ All subsequent examples use `btccli` for brevity. Wallet-scoped calls add
 ## 6. RPCs exercised during smoke-test
 
 The following were called against the live node during initial bring-up and
-smoke-testing. Privacy implications are in the sibling doc
-(`2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md`); this section just
-confirms each call worked and what it returned.
+smoke-testing via the `btccli` operator wrapper. Privacy implications are in
+the sibling doc (`03--2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md`);
+this section just confirms each call worked and what it returned.
+
+The production arbiter (`arbiter/src/bitcoin.py`, see §8) uses a deliberately
+narrower subset - currently `getblockchaininfo`, `getbalance`,
+`sendtoaddress`, and `gettransaction`. The full inventory below is what the
+operator runs at the console during bring-up, not the AI-reachable surface.
 
 **Chain info**
 
@@ -382,6 +405,45 @@ The `mutinynet-covtools` tarball includes two binaries beyond `bitcoind` and
 Neither binary requires a running `bitcoind` or any RPC connection, which makes
 them straightforward to allow through the privacy proxy without special handling.
 
+### 8.1 Arbiter wrapper: `arbiter/src/bitcoin.py`
+
+The production arbiter does not call `btccli`. The operator-facing `btccli`
+wrapper (§5.8) is a shell convenience that prepends `-datadir` and execs
+`bitcoin-cli`; it is for human use at the arbiter console.
+
+The arbiter itself reaches bitcoind through `arbiter/src/bitcoin.py`, a
+stdlib-only subprocess wrapper that:
+
+- builds an explicit argv list (`[bitcoin-cli, -datadir=..., rpc, ...args]`)
+  and invokes it via `subprocess.run` with **no shell**, so AI-reachable
+  string arguments cannot trigger shell metacharacter expansion;
+- resolves the binary path and datadir from env (`BITCOIN_CLI_BIN`,
+  `BITCOIN_DATADIR`) with defaults that match the §4 layout;
+- caps every call at `BITCOIN_CLI_TIMEOUT_S` (default 30s) so a wedged
+  bitcoind or IBD stall becomes a clean refusal rather than an indefinite
+  block;
+- exposes exactly four RPCs to the dispatch layer: `getblockchaininfo`,
+  `getbalance` (returns `Decimal` to preserve satoshi precision),
+  `sendtoaddress` (returns the txid; coin selection / signing / change /
+  PSBT all stay inside bitcoind per the "hide secrets" discipline), and
+  `gettransaction` (with a txid shape check before exec);
+- raises a single `BitcoinError` on any failure (non-zero exit, timeout,
+  binary missing, malformed JSON, unexpected output shape); the dispatch
+  layer audit-logs the cause and returns the uniform refusal to the
+  petitioner, so the error string never crosses the privacy gateway.
+
+The arbiter <-> bitcoind link is on the trusted side of the privacy
+boundary, so this wrapper applies no anti-cadence or anti-timing
+mitigation. Petitioner-facing mitigations (action delay, result delay,
+the privacy gateway's latency normalization) cover that link in aggregate.
+See `05--2026-05-05-0948-architecture-overview.md` §4.2.
+
+The module's `if __name__ == "__main__"` block exercises the full wrapper
+stack against a fake `bitcoin-cli` shell script (writes a tempdir, builds
+the fake, asserts argv propagation and every error path). Live bitcoind
+coverage is deferred to the end-to-end validation referenced from §10 of
+the architecture overview.
+
 ---
 
 ## 9. Limitations and gotchas
@@ -436,11 +498,41 @@ funding.
 ## 11. Pointers
 
 - **LND test flow** (the companion run that completed the full Lightning
-  lifecycle): `2026-05-02-1600-lnd-mutinynet-test-flow.md`
+  lifecycle): `00--2026-05-02-1600-lnd-mutinynet-test-flow.md`
 - **LND privacy + timing leaks** (per-API leak map for `lncli` calls):
-  `2026-05-02-1601-privacy-and-timing-leaks.md`
+  `01--2026-05-02-1601-privacy-and-timing-leaks.md`
 - **bitcoind privacy + timing leaks** (RPC leak map for `bitcoin-cli` calls):
-  `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md`
+  `03--2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md`
+- **Architecture overview** (arbiter / petitioner split, gateway, layout):
+  `05--2026-05-05-0948-architecture-overview.md`
+- **Arbiter bitcoind client:** `arbiter/src/bitcoin.py` (see §8.1)
+- **GLOSSARY entries:** `btccli`, `spacer-smoke`, `local bitcoind`, `hide secrets`
 - **benthecarman/bitcoin releases:** `https://github.com/benthecarman/bitcoin/releases`
 - **Mutinynet faucet + esplora:** `https://faucet.mutinynet.com` / `https://mutinynet.com`
 - **Bitcoin Core RPC reference:** `https://developer.bitcoin.org/reference/rpc/`
+
+---
+
+## 12. Implementation learnings
+
+- 2026-05-24: §4 layout diagram rewritten to match the `arbiter/` +
+  `test-harness/` split that §5 setup steps and the architecture-overview
+  §9 already use. The old flat `~/spacer/{bin,bitcoin,scripts,downloads}/`
+  tree never matched the actual install paths; the diagram had drifted
+  while the procedural steps stayed correct.
+- 2026-05-24: §8.1 added documenting `arbiter/src/bitcoin.py` as the
+  production arbiter wrapper. The previously implicit relationship
+  (`btccli` for operator console, `bitcoin.py` for the arbiter) is now
+  written down: `bitcoin.py` deliberately bypasses the shell wrapper so a
+  non-AI reviewer can audit exactly what executes, and exposes only 4 of
+  the ~30 RPCs the operator exercises during smoke-test (§6).
+- 2026-05-24: §6 clarified that the smoke-test RPC inventory is operator-
+  console scope, not the AI-reachable surface - the gap between the two
+  was previously left implicit.
+- 2026-05-24: Companion-doc references at the top of the file, and §11
+  pointers, updated to use the `NN--YYYY-MM-DD-HHMM-slug.md` filename
+  format (matching the actual on-disk filenames and the 00-- doc's style).
+- 2026-05-24: Confirmed the wrapper contract `btccli` -> `bitcoin-cli
+  -datadir=$HOME/spacer/arbiter/bitcoin` matches both §5.8 of this doc
+  and the `DEFAULT_BIN`/`DEFAULT_DATADIR` constants in `arbiter/src/
+  bitcoin.py`. No drift on the path contract itself.
