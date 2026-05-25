@@ -214,6 +214,8 @@ The only first-class function of the [petitioner](../../GLOSSARY.md#petitioner) 
 
 The petitioner is exposed to the AI as a single CLI tool named **`petcli`**. The implementer is asked to organize `petcli` as a nested tree of commands and subcommands with informative `--help` at every node, so the AI can discover available operations by walking the help output rather than relying on external documentation. The specific command shape - which commands, what subcommand structure, what flags - is deliberately not enumerated in this doc; that is an implementation decision.
 
+**Transport-error envelope.** The shim distinguishes two failure classes on the AI-visible surface. Arbiter refusals come back in the gateway's uniform `{"status": "refused"}` body (§4.1, §4.7), which carries privacy-model meaning. Petitioner-side transport failures - connection refused, timeout, non-JSON body - come back as `{"_petcli_transport_error": "<reason>"}` instead. The leading underscore is the convention: any top-level key the petitioner adds to a response (transport errors, the §5.2 estimate stamp on submit responses) is prefixed with `_petcli_` so the AI can tell at a glance which fields the arbiter emitted and which the shim annotated. Surfacing transport errors as a structured petitioner-side response - rather than masking them as refusals or letting an exception escape - keeps the boundary between "the arbiter said no under the privacy model" and "the petitioner could not reach the arbiter" load-bearing on the AI side.
+
 ### 5.2 Estimate display
 
 Because [result delay](../../GLOSSARY.md#result-delay) makes results asynchronous, the petitioner needs an estimate of total elapsed time (action delay + result delay) so the AI can reason about the decision tree:
@@ -223,6 +225,8 @@ Because [result delay](../../GLOSSARY.md#result-delay) makes results asynchronou
 - Result arrived -> success / failure.
 
 The petitioner computes this estimate locally. It estimates the anonymity set size from its own view of similar global activity and derives an upper bound on the window from that. No estimate information comes from the arbiter, and the arbiter offers no guarantee on the bound. The exact local-estimation method is open (see §7).
+
+**Current implementation.** A placeholder hardcoded upper bound, accepted for early scaffolding: **24 hours** in default deployments (comfortably above the 2 * ~12h floor of §4.6) and **30 seconds** when the petitioner is told the arbiter runs in test-mode timing (`PETCLI_TEST_TIMING=1`, mirroring the per-environment opt-in pattern of the arbiter's `SPACER_TIMING_MODE=test`; §10). The placeholder does not yet observe similar global activity - the petitioner-side observation infrastructure is gated on the same sp-77lxs.3 dynamic-window calculation that gates the arbiter's window (§7 "Dynamic window calculation"). The "still within window vs assume lost" decision tolerates a loose upper bound (extra waiting) far better than a tight one (false "assume lost" before the result actually arrives), so the placeholder errs high. The shim stamps this estimate onto every state-changing submit response under the `_petcli_estimate_window_s` annotation (per the §5.1 underscore convention) so the AI sees the handle and the window in the same envelope.
 
 ---
 
@@ -345,3 +349,11 @@ exit-loop/
 ```
 
 The tree is scaffolded empty initially. A populated `<variant-name>/` directory signals that variant has been validated; an empty one signals not-yet-validated.
+
+---
+
+## 11. Implementation learnings
+
+- 2026-05-24: reconciled §5 (petitioner) against `petitioner/src/petcli.py`, `protocol.py`, `estimate.py`, and `petcli_smoke.py`. §5.1 gained a "Transport-error envelope" paragraph documenting the `_petcli_transport_error` / `_petcli_*` underscore convention that distinguishes petitioner-side annotations from arbiter-emitted fields; the convention was already load-bearing in the shim (`protocol.submit` returns `{"_petcli_transport_error": ...}` on URLError / non-JSON; `petcli` stamps `_petcli_estimate_window_s` on every state-changing submit response) but was nowhere on paper. §5.2 gained a "Current implementation" paragraph naming the placeholder bound concretely (24h default, 30s under `PETCLI_TEST_TIMING=1`) and the sp-77lxs.3 gating chain - sp-77lxs.9 explicitly accepted the placeholder, sp-77lxs.3 (dynamic-window calculation) is the dep that would let either side stop hardcoding.
+- 2026-05-24: command tree (`submit/{send-bitcoin,send-lightning}`, `query/{balance,channels}`, `result/poll`, `estimate/window`) verified consistent with the arbiter's `_KNOWN_READ_OPS = {query_balance, query_channels}`, `_KNOWN_WRITE_OPS = {send_bitcoin, send_lightning}`, plus the `op == "poll"` fast-path (gateway.py:176, 263, 271). The wire op for `result poll` is `"poll"` (single-token gateway routing key), not `"result_poll"` - the petcli command path is descriptive but the wire stays terse. Doc kept §5.1's "command shape deliberately not enumerated" guidance: the alignment is now stable across both sides but enumeration in the architecture doc still buys nothing over the live `--help` walk.
+- 2026-05-24: confirmed the petitioner-side field rename `--to-token` CLI flag -> `recipient_token` wire field happens at `petcli._do_submit_send_{bitcoin,lightning}`. The arbiter looks up `request.get("recipient_token")` (gateway.py:311) and §4.7 names the wire field `recipient_token`. The CLI flag stays `--to-token` for operator brevity; the rename is an explicit one-line transform at the wire boundary with an inline comment. Fixed a stale assertion in `petcli_smoke.py` that still expected `to_token` on the wire (left over from before the rename); the smoke test was failing on that assertion. No doc change for this - §5.1 does not enumerate flags by design, and §4.7 already names the wire field.
