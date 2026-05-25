@@ -16,7 +16,11 @@ import time
 from pathlib import Path
 from threading import Lock
 
-DEFAULT_PATH = Path.home() / "spacer" / "arbiter" / "data" / "audit.log"
+# Default lives under arbiter/state/ (gitignored per 06-- §3): the log
+# is append-only but it changes constantly, so it belongs outside the
+# snapshot history. Its own integrity rests on the §4.5 mechanism, not
+# on the snapshot. Resolved relative to install location: src/ -> ../state/.
+DEFAULT_PATH = Path(__file__).resolve().parent.parent / "state" / "audit.log"
 
 _lock = Lock()
 _fd = None

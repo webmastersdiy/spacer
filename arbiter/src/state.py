@@ -21,7 +21,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
-DEFAULT_PATH = Path.home() / "spacer" / "arbiter" / "data" / "state.db"
+# Default lives under arbiter/state/ (gitignored per 06-- §3) so the
+# continuous git snapshot does not churn on every SQLite WAL tick.
+# Resolved relative to this module's install location: src/ -> ../state/.
+DEFAULT_PATH = Path(__file__).resolve().parent.parent / "state" / "state.db"
 
 _lock = Lock()
 _path = None
