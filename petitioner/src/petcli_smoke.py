@@ -161,14 +161,16 @@ def main():
         decoded = json.loads(out)
         # petcli stamps the local estimate annotation on submit
         # responses; the rest is whatever the (echo) arbiter
-        # returned.
+        # returned. The CLI flag is --to-token for operator brevity,
+        # but the wire field is `recipient_token` per §4.7 / gateway
+        # (petcli renames at the wire boundary in _do_submit_*).
         assert decoded["op"] == "send_bitcoin", decoded
-        assert decoded["to_token"] == "tok_X", decoded
+        assert decoded["recipient_token"] == "tok_X", decoded
         assert decoded["amount_sats"] == 1000, decoded
         assert "_petcli_estimate_window_s" in decoded, decoded
         assert captured_requests[-1] == {
             "op": "send_bitcoin",
-            "to_token": "tok_X",
+            "recipient_token": "tok_X",
             "amount_sats": 1000,
         }, captured_requests[-1]
 
