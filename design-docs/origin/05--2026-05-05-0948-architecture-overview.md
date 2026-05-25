@@ -29,10 +29,11 @@ The spacer protocol is the boundary between them. The asymmetric naming is inten
 
 ### 2.1 Arbiter implementation discipline
 
-The arbiter implementation lives at `spacer/arbiter/`, with all runnable code under `spacer/arbiter/src/`. Two hard constraints on what goes there:
+The arbiter implementation lives at `spacer/arbiter/`, with all runnable code under `spacer/arbiter/src/`. Three hard constraints on what goes there:
 
 - **Minimal**: small line count, small dependency footprint. The entire codebase must fit in a human's head during a single review pass.
 - **Inline-documented only**: documentation lives in code comments. No separate Markdown or other doc files inside `src/`. Anything that needs explaining is explained where the code is.
+- **No transient files outside the gitignored subtrees**: every module that writes to disk writes under `state/`, `data/`, `bitcoin/`, or `lnd/` (all gitignored per `06--2026-05-24-0623-arb-auditability.md` §3). Nothing inside `src/`, `config/`, or `bin/` is allowed to churn at runtime - those subtrees are the input to the [continuous git snapshot](06--2026-05-24-0623-arb-auditability.md), and any churn there pollutes the snapshot history that the manual audit primitive depends on.
 
 The arbiter must be **manually auditable**: a human can copy, install, and read the entire codebase without any AI assistance. The arbiter never runs AI itself, so any AI-generated implementation reaching it has to survive a non-AI human review pass first. This trades implementation ergonomics for a hard auditability floor and is the central design constraint on the arbiter.
 
@@ -131,6 +132,8 @@ All of it stays on the arbiter. The petitioner cannot reach any of it.
 ### 4.5 Audit log
 
 The immutable, append-only [audit log](../../GLOSSARY.md#audit-log) records every AI request and every arbiter decision (allow, deny, redact, band, defer-to-human). The log lives in the arbiter's environment, which the petitioner does not own and cannot reach, so tampering from the AI side is structurally impossible.
+
+The runtime audit log is one of two complementary audit primitives on the arbiter. The companion primitive is the [continuous git snapshot](06--2026-05-24-0623-arb-auditability.md), which commits the arbiter's deployed code and configuration (`src/`, `config/`, `bin/`) to a local git repository every minute. The runtime log captures *what was decided*; the snapshot history captures *what was deployed*. An attacker who edits gateway source to weaken a check leaves a fingerprint in the snapshot history; the runtime log alone would only show that future requests started being decided differently. Neither primitive subsumes the other - see 06-- §2 for the side-by-side table and 06-- §8 for the operator-facing scripts that translate snapshot history into plain English.
 
 ### 4.6 Timing layer
 
