@@ -67,9 +67,9 @@ partial identifiers; **LOW** = status flags or booleans.
 
 | Call | What it returns | Severity | Proxy mitigation |
 |---|---|---|---|
-| `walletbalance` | Total / confirmed / unconfirmed / locked / reserved / per-account | HIGH | Return banded values ("≥50k", "100k-1M") or boolean capability predicates. |
+| `walletbalance` | Total / confirmed / unconfirmed / locked / reserved / per-account | HIGH | Project real total through scale cloaking before egress; the petitioner sees a number in a fixed presentation window regardless of the wallet's true order of magnitude. Banding is deliberately NOT layered on top (the per-tier scale already provides ~10x compression). See §5 "Scale cloaking" and GLOSSARY 'Scale cloaking'. |
 | `listunspent` | Per-UTXO address, amount, pk_script, outpoint, confirmations | HIGH | Never surface to AI. Proxy answers higher-level questions ("≥X confirmed UTXO available: yes"). |
-| `channelbalance` | Aggregate channel balance + buckets | HIGH | Same banding as `walletbalance`. |
+| `channelbalance` | Aggregate channel balance + buckets | HIGH | Same treatment as `walletbalance`: aggregate (local + remote) is routed through scale cloaking; banding is dropped for this read for the same reason. See §5 "Scale cloaking". |
 
 ### 3.3 Peer / Channel State
 
@@ -209,7 +209,8 @@ Each mitigation is listed with its target threat and a note on its own residual 
 | Mitigation | Targets | Own leak / caveat |
 |---|---|---|
 | **Identifier tokenization** - addresses, pubkeys, channel_ids, payment_hashes replaced with opaque proxy-scoped tokens | AI exfiltration, prompt injection probing node identity | Token vocabulary size can itself be a leak (number of unique tokens ≈ number of channels/addresses the operator has). |
-| **Numeric value banding** - balances, fees, amounts surfaced as buckets (e.g., <10k / 10k-100k / 100k-1M / >1M sats) | Precision balance leakage to AI | Band boundaries are themselves a policy fingerprint; an attacker who can probe "can fund X?" across many X values can binary-search the exact balance. |
+| **Numeric value banding** - fees and per-call amounts surfaced as buckets (e.g., <10k / 10k-100k / 100k-1M / >1M sats) | Precision leakage on fields that are not cloak-eligible (e.g., per-call fee amounts on send paths) | Band boundaries are themselves a policy fingerprint; an attacker who can probe "can fund X?" across many X values can binary-search the exact balance. For wallet / channel balance reads the stronger **Scale cloaking** mitigation below is used instead - layering both would muddy the math without adding privacy. |
+| **Scale cloaking** - wallet's order of magnitude (not just the precise figure) is hidden by projecting the real total through a per-tier scale into a fixed presentation window (~0-100k sats). Tier shifts are deferred by a multi-day randomized delay so the petitioner-visible drift is decoupled from the moment of the underlying send / receive. Applied to `walletbalance` and `channelbalance` reads in the gateway. | Order-of-magnitude leakage that survives banding (e.g., a balance that grows from "100k band" to "10M band" leaks that the wallet is now an order of magnitude larger) | A petitioner that polls fast enough to observe the *exact* moment of a tier shift can flag it as suspicious if the magnitude is implausibly large; mitigation lives in within-tier scale randomization plus the randomized delay. See GLOSSARY 'Scale cloaking' for the full caveat list. |
 | **Recipient address registry as destination gate** - every `connect`, `sendcoins`, `openchannel`, `payinvoice` resolves its destination through the registry's operator-curated set; misses refuse uniformly | Prompt-injection-induced fund movement; generic TCP-connect abuse | Probing-infeasibility argument lives in the registry entry (GLOSSARY 'Recipient address registry'). The static-set staleness concern (a static set of destinations could itself be a fingerprint) is a world-facing chain-analysis observation, not an AI-facing one - it does not reach the AI through this proxy. |
 | **Aggregate-by-default** - list-style calls return counts/summaries; per-item detail requires per-call justification logged | History dump via `listpayments`, `listchannels`, `listpeers` | Counts themselves can leak: "37 payments this session" is more information than "some payments." |
 | **Withhold proofs** - preimages, signatures, macaroons stay inside proxy and are never returned to AI | Proof-of-payment exfiltration; macaroon reuse for unauthorized calls | Proxy becomes a single point of failure for proof custody. |
@@ -269,3 +270,17 @@ Those mitigations belong in `2026-05-02-1700-node-privacy-from-the-world.md` §5
 - `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - bitcoind AI-facing privacy,
   same proxy model applied to the bitcoind RPC surface. Read together with this doc
   when designing the proxy policy layer.
+
+---
+
+## 8. Implementation learnings
+
+- 2026-05-24: reconciled doc against `arbiter/src/lnd.py` and cloak/banding decisions
+  in `arbiter/src/gateway.py`. Walletbalance / channelbalance mitigation cells in
+  §3.2 swapped from "banded values" to scale cloaking; new "Scale cloaking" row added
+  to §5 alongside the narrowed "Numeric value banding" row, reflecting the gateway's
+  deliberate choice (gateway.py `_dispatch`) to route balance reads through
+  `scale.present()` rather than layer banding on top of an already-compressed value.
+  Per-call mitigation cells for registry-gated ops (`sendcoins`, `openchannel`,
+  `payinvoice`) verified consistent with a12b1c8's "registry IS the destination
+  gate" framing - no edits required there.
