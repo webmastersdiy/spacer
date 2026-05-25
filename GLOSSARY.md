@@ -104,11 +104,19 @@ and nowhere else: putting any of its logic on the petitioner
 side places it in reach of the AI and defeats the point.
 
 The privacy gateway is the primary AI-facing defense; world-facing
-mitigations like Tor are defense-in-depth on top of it. Not yet
-implemented; the design docs in `design-docs/` are the current
-artifact. Position in the data flow, the limited-and-airtight
-constraints, and the per-request mechanism list are documented in
-the architecture doc.
+mitigations like Tor are defense-in-depth on top of it. Implemented
+as a skeleton at `arbiter/src/gateway.py`: HTTP server with a uniform
+refusal body, per-response [latency normalization](#latency-normalization),
+audit logging at every decision point, recipient-token resolution on
+known write ops (via the [recipient address registry](#recipient-address-registry)),
+[HITL](#human-in-the-loop-hitl-approval) park on unknown ops, and a
+binary-state result-poll endpoint (see [result delay](#result-delay)).
+Outbound filters ([hide secrets](#hide-secrets),
+[banding](#banding-numeric-value-banding),
+[aggregate-by-default](#aggregate-by-default)) are wired in structure
+but currently pass-through pending their own beads. Position in the
+data flow, the limited-and-airtight constraints, and the per-request
+mechanism list are documented in the architecture doc.
 
 See also: [Architecture overview, §3](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#3-end-to-end-data-flow) and [§4.1](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#41-privacy-gateway).
 
@@ -515,8 +523,8 @@ universe by submitting candidate tokens in a tight loop. Four
 mechanisms compose to make the probing strategy prohibitively
 expensive in any realistic threat model:
 
-- [Action delay](#action-delay-and-result-delay) imposes a ~12h
-  floor on every state-changing call. 100 probes is ~50 days.
+- [Action delay](#action-delay) imposes a ~12h floor on every
+  state-changing call. 100 probes is ~50 days.
 - [HITL approval](#human-in-the-loop-hitl-approval) fires on every
   inbound call that is not a recognized op, so the operator sees
   unusual submission patterns on the directly-attached console.
@@ -531,12 +539,14 @@ expensive in any realistic threat model:
 
 **Refusal behavior.** Every refusal path collapses to one bit on
 the petitioner side: ok (the call proceeds) or refused. The
-production deployment defers refusals through the
-[result registry](#result-registry) on a 1-hour ± 30-minute
+production deployment defers refusals through the result registry
+(see [Result delay](#result-delay)) on a 1-hour ± 30-minute
 randomized delay so the petitioner cannot correlate submission time
 with response time. (Test mode collapses this delay; see the
 test-mode timing rules in the architecture overview's exit
-criteria.)
+criteria.) The current `arbiter/src/gateway.py` skeleton refuses
+synchronously; the deferred-rejection path lands with the result-
+registry bead.
 
 ### Standing approvals
 
@@ -769,6 +779,34 @@ with operational reliability, not just a knob to turn up.
 
 See also: [Architecture overview, §4.6](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#46-timing-layer) and [§7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions).
 
+### Latency normalization
+
+Mandatory minimum wall-clock floor on every petitioner-visible
+response, held inside the privacy gateway from request receipt
+until response send. Defeats the per-response timing channel: a
+request that completes early is delayed to the floor before the
+wire send, so the response itself carries no signal about which
+pipeline branch ran (successful dispatch, registry miss, HITL park
+on unknown op, protocol-error refusal, etc.) or how far the
+pipeline progressed. Implemented in `arbiter/src/gateway.py`
+(`_wait_until`); the skeleton ships with a 250ms default, and the
+deployment is expected to set the floor at or above observed
+worst-case backend latency.
+
+Distinct from [Action delay](#action-delay) and
+[Result delay](#result-delay), which absorb the much larger hop-
+count / IBD / mempool-lookup variation by deferring the actual
+execution and result delivery. Latency normalization handles the
+synchronous response shape (the sub-second signal); the timing
+layer handles the execution shape (the hours-scale signal). Both
+coexist in spacer.
+
+Caveat: a floor only normalizes responses that COULD have been
+faster. If the backend genuinely takes longer than the floor, the
+actual elapsed time leaks through. The floor must therefore be set
+above the slowest legitimate synchronous path the gateway can
+dispatch, or the mitigation collapses on the slow side.
+
 ### Audit log
 
 Every AI request and every arbiter decision (allow, deny, redact,
@@ -796,13 +834,18 @@ and with IBD state. An AI issuing many calls and observing latency
 distributions could in principle derive properties the gateway
 intended to hide.
 
-In Spacer this leak is closed by the timing layer rather than by
-per-response normalization. All hop-count, indexing, mempool-lookup,
-and IBD-state variation is internal to the arbiter; **Action delay**
-and **Result delay** absorb that variation by completing the work
-before the delay window expires and surfacing only the result. The
-petitioner sees an acknowledgment immediately, then a single result
-event after the delay, with no per-call latency channel exposed.
+Spacer closes this leak at two layers:
+
+- [Latency normalization](#latency-normalization) inside the
+  privacy gateway holds every synchronous response back to a
+  uniform floor, so individual responses carry no per-call timing
+  signal regardless of which pipeline branch ran.
+- [Action delay](#action-delay) and [Result delay](#result-delay)
+  in the timing layer absorb the much larger hop-count / indexing /
+  mempool-lookup / IBD variation by completing state-changing work
+  before the delay window expires and surfacing only the result.
+  The petitioner sees an acknowledgment immediately, then a single
+  result event after the delay.
 
 If bitcoind / LND are down or a request legitimately cannot
 complete within the delay window, the petitioner receives a
@@ -926,6 +969,37 @@ parent folders live under `arbiter/`, `petitioner/`, or
 itself part of the vocabulary.
 
 See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#9-current-physical-layout).
+
+## Implementation learnings
+
+- 2026-05-24: [Privacy gateway](#privacy-gateway) - dropped the
+  "not yet implemented" claim; the skeleton now exists in
+  `arbiter/src/gateway.py` (HTTP server, uniform refusal,
+  latency normalization, audit at every decision point, registry-
+  gated write ops, HITL park on unknown ops, result-poll endpoint).
+- 2026-05-24: Added [Latency normalization](#latency-normalization)
+  as its own mitigation entry. Spacer uses it (gateway.py's 250ms
+  default floor) for the synchronous response shape in addition to
+  the timing layer for execution shape. Rewrote
+  [Latency fingerprinting](#latency-fingerprinting) to reference
+  both mitigations rather than denying per-response normalization.
+- 2026-05-24: Fixed broken intra-doc anchors in
+  [Recipient address registry](#recipient-address-registry):
+  `#action-delay-and-result-delay` -> `#action-delay`,
+  `#result-registry` -> `#result-delay`, and added the missing
+  [Latency normalization](#latency-normalization) target.
+- 2026-05-24: Reviewed [Scale cloaking](#scale-cloaking) against
+  `arbiter/src/scale.py`; tier function, scheduled-then-applied
+  transition flow, drift-over-range exception, and audit events
+  (`scale_tier_init`, `scale_tier_shift_scheduled`,
+  `scale_tier_shift_applied`) all match. Test mode is
+  deterministic (`0.1^tier`); production randomization and multi-
+  day delays remain stubbed with `NotImplementedError` per the
+  GLOSSARY description. No body change.
+- 2026-05-24: Noted [Standing approvals](#standing-approvals)
+  describes a gateway-side hook (between registry resolution and
+  dispatch) that is NOT yet wired in `gateway.py`; that lands with
+  bl-wisp-a78. Entry left intact as design intent.
 
 ## See also
 
