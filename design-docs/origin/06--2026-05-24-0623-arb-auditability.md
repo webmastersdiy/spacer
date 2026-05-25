@@ -42,20 +42,23 @@ Neither subsumes the other. A request that the gateway refuses appears in the ru
 
 The continuous snapshot only works if the arbiter's directory structure separates the things that *should* be in the snapshot from the things that should not. Without that separation the snapshot is noise: a runtime SQLite WAL ticking over every few seconds would produce a meaningless commit every minute and bury the signal under thrash.
 
-The arbiter tree splits into four kinds of content:
+The arbiter tree splits into two kinds of content - tracked subtrees that participate in the snapshot, and gitignored subtrees that do not:
 
 ```
 arbiter/
   src/          # Python source - changes only on a deploy
   config/       # operator-editable config (YAML) - changes on edits
   bin/          # built binaries / wrappers - changes only on a deploy
-  state/        # runtime SQLite, WAL files, scratch - GITIGNORED
+  ops/          # cron loop + operator-facing audit scripts (§4, §8) - changes only on a deploy
+  state/        # runtime SQLite, WAL files, audit log, scratch - GITIGNORED
   bitcoin/      # bitcoind datadir - GITIGNORED
   lnd/          # LND datadir - GITIGNORED
   data/         # any other transient runtime - GITIGNORED
 ```
 
-The first three are part of the snapshot; the rest are excluded by `.gitignore` and never appear in commit diffs.
+The first four (`src/`, `config/`, `bin/`, `ops/`) are part of the snapshot; the rest are excluded by `.gitignore` and never appear in commit diffs. `ops/` is tracked because the cron loop body, deployment units, and audit scripts are themselves part of the deployed surface a reviewer audits.
+
+Alongside the named subtrees, `arbiter/.gitignore` also catches file-pattern noise that would otherwise leak into a tracked subtree: `__pycache__/`, `*.pyc`, `*.pyo` (Python bytecode), `*.db`, `*.db-wal`, `*.db-shm` (any stray SQLite anywhere in the tree), and `.DS_Store`. These are belt-and-suspenders on top of the subtree split: even if a module misroutes a file into `src/`, the file-pattern rule keeps it out of the snapshot.
 
 The arbiter implementation invariant this requires: **no module writes transient files outside the gitignored subtrees**. A module that drops a scratch file into `src/` or `config/` would generate a snapshot commit every minute it exists, polluting the history. Concretely:
 
@@ -86,7 +89,7 @@ Cadence: every minute. Lower than that and a fast-fingered operator edit can be 
 
 Cadence is the only tunable; everything else (paths, commit message, ignore set) is fixed.
 
-The cron substrate (launchd on macOS, systemd timer on Linux, plain crontab) is a deployment detail, not a design choice. The job is small enough that any of them is fine.
+The cron substrate (launchd on macOS, systemd timer on Linux, plain crontab) is a deployment detail, not a design choice. The job is small enough that any of them is fine. Reference units for both supported substrates ship under `arbiter/ops/` alongside the loop body (`snapshot.sh`, `snapshot.launchd.plist`, `snapshot.service`, `snapshot.timer`) plus an operator-facing install / bootstrap README; the loop body itself derives `ARBITER_ROOT` from its own path so the operator does not edit `snapshot.sh` to deploy it.
 
 ---
 
@@ -289,3 +292,53 @@ A flag is not by itself an incident; it is a question the operator owes themselv
 ### Escalation
 
 Spacer does not ship its own incident channel; escalation lands wherever the operator runs their normal security response (mail, phone, in-person to someone they trust). The arbiter console produces evidence in the form of `arb-show` output that pastes cleanly into a message; that is the entire interface between the audit primitive and whatever response process the operator has.
+
+---
+
+## 10. Implementation status
+
+The design above landed in five commits on `webmastersdiy/spacer` main (bead `bl-hu56z9`, merged at `c80ebe7`):
+
+| Commit | What landed |
+|--------|-------------|
+| `17d2a5a` | §3 tree split: `src/` + `config/` + `bin/` tracked; `state/` + `data/` + `bitcoin/` + `lnd/` gitignored. Adds `arbiter/.gitignore`, `arbiter/bin/arbiter` launcher, `arbiter/config/README.md`. |
+| `75da243` | §3 invariant: `src/state.py` and `src/audit.py` defaults moved under `arbiter/state/` (was `~/spacer/arbiter/data/`). `STATE_DB_PATH` / `AUDIT_LOG_PATH` env overrides preserved. |
+| `83764cd` | §4 cron: `arbiter/ops/snapshot.sh` + launchd plist + systemd service + systemd timer + `ops/README.md` (install + bootstrap). |
+| `52f148c` | §8 scripts + §9 hygiene: `arbiter/ops/audit/` with seven operator-facing wrappers (`arb-today`, `arb-since`, `arb-config-only`, `arb-deploys-only`, `arb-show`, `arb-status`, `arb-anomalies`) and an `audit/README.md` that points back at §9. |
+| `c80ebe7` | 05-- cross-references: §2.1 third invariant (no transient files outside the gitignored subtrees) and §4.5 paragraph framing the snapshot history as the companion primitive to the runtime audit log. |
+
+A subsequent reconciliation pass against this doc (bead `bl-cctvcg`) corrected §3 (now pictures `ops/` as a fourth tracked subtree, mentions the file-pattern gitignores) and §4 (now references the shipped deployment units and the auto-derived `ARBITER_ROOT`).
+
+### §7 acceptance: status
+
+All four items from §7 landed in `bl-hu56z9`. Two practical addenda:
+
+- **Item 1 (tree restructure)** also added `ops/` as a fourth tracked subtree. §3 originally listed three; the audit scripts (§8) and the cron loop body (§4) are themselves part of the deployed surface, so they share the same tracked / snapshotted treatment as `src/` and `bin/`.
+- **Items 2 acceptance smoke-test**: confirmed an empty arbiter tree + a representative request leaves the resulting `state.db`, `audit.log`, and WAL/SHM sidecars under `arbiter/state/` (gitignored), with `git status --porcelain` clean outside that set. 17/17 exit-loop variants still pass.
+
+§7 promised cron units (item 3) and the §2.1 / §4.5 cross-references (item 4); the same work also delivered the §8 operator scripts and §9 hygiene framing, even though those were not strictly required by §7. The split between "primitive" (§3, §4) and "operator interface" (§8, §9) is real but the implementation cost of shipping them together was small, so they landed in one bead.
+
+### §8 audit scripts: implementation choices
+
+The scripts implement the design with a handful of deliberate divergences from the §8 example output and the §9 anomaly signature list:
+
+- **Anomaly window uses UTC, not local.** §8's `arb-anomalies` example output reads "No commits at unusual hours (00:00-06:00 local)." The implementation uses UTC because the snapshot commit timestamps are themselves UTC (the `snapshot.sh` commit message is `date -u +...`); comparing a UTC commit against a local-time window would create a one-time-zone-offset bug across DST transitions and operator relocations. Operators who want the local-time framing can map the UTC window in their head. Tunable via `ARB_NIGHT_START` / `ARB_NIGHT_END` (hours, UTC).
+- **"Untracked files outside the four allowed subtrees" landed in `arb-status`, not `arb-anomalies`.** §9 lists this as an anomaly signature. It is naturally a current-state check (the next snapshot will absorb whatever is pending) rather than a historical-pattern check, so it surfaces in the green-or-red status script. `arb-anomalies` deliberately walks history only.
+- **Two §9 anomaly signatures are not implemented as heuristics.** "Config changes when the console was likely unattended" requires an operator-schedule model the system does not have; surfacing every config change in `arb-config-only` and letting the operator's daily routine (§9) catch the unattended-window ones is the substitute. "Burst of commits in a single minute" is structurally prevented by the cron design (the loop fires once per minute and short-circuits on no-change), so a burst would imply the cron is being driven manually or something is committing outside the cron - the gap heuristic catches the inverse symptom.
+- **A new heuristic was added: "mixed config + code change."** Flags any commit that touches both `config/` and `src/`/`bin/`. The §9 routine asserts deploys should not edit operator config (and vice versa); a mixed commit means the boundary §3 relies on is leaking. This is not in §9's signature list but follows directly from §9's daily and post-deploy / post-config routines.
+- **Env-var knobs.** `ARB_AUDIT_LIMIT` (default 50) caps `arb-config-only` and `arb-deploys-only` output; `ARB_ANOMALIES_DAYS` (default 7) sets the `arb-anomalies` window; `ARB_NIGHT_START` / `ARB_NIGHT_END` set the night-hours window. `ARBITER_ROOT` lets the scripts run from a non-canonical install path. All defaults match the §8 / §9 narrative; the env vars exist so the scripts are reusable across deployments without forking.
+
+### §9 anomaly signature -> script mapping
+
+For the operator (and for a §2.1 reviewer auditing the audit primitive itself):
+
+| §9 signature | Caught by |
+|--------------|-----------|
+| Code changes outside a deploy window | `arb-deploys-only` (operator compares against their own deploy log) |
+| Config changes when the console was unattended | `arb-config-only` (operator applies their schedule knowledge) |
+| Binary swap without source | `arb-anomalies` heuristic 3 |
+| Burst of commits in a single minute | structurally prevented by cron design; would surface inversely via `arb-anomalies` heuristic 2 (gaps) |
+| Snapshot gap | `arb-anomalies` heuristic 2; `arb-status` for the live-cron variant |
+| Untracked files outside the four allowed subtrees | `arb-status` (current-state check) |
+
+The mixed-config-and-code heuristic added by the implementation maps onto §9's daily / post-deploy / post-config routines: any deploy that also touches `config/` (or any config edit that also touches `src/` / `bin/`) is what those routines tell the operator to flag.
