@@ -1,0 +1,5 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":63505},"ts":"2026-05-25T01:23:27Z"}
+{"event":"request_received","payload":{"op":"send_lightning"},"ts":"2026-05-25T01:23:27Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"6HW4VV"},"ts":"2026-05-25T01:23:27Z"}
+{"event":"standing_approval_match","payload":{"op":"send_lightning","rationale":"exit-loop test rule"},"ts":"2026-05-25T01:23:27Z"}
+{"event":"decision_allow","payload":{"op":"send_lightning"},"ts":"2026-05-25T01:23:27Z"}

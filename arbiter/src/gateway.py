@@ -45,6 +45,7 @@ import lnd
 import registry
 import results
 import scale
+import standing_approvals
 import state
 
 # Loopback by default. The gateway binds the loopback interface because
@@ -189,16 +190,34 @@ def process_request(handler):
         _respond_ok(handler, response, deadline)
         return
 
-    # Known write ops resolve recipient_token through the recipient
-    # address registry (§4.7). The registry IS the destination gate:
-    # a non-`ok` lookup collapses to the uniform "destination
-    # unavailable" refusal here, audit-logged as
-    # decision_refuse_registry so the operator can see *which* token
-    # failed and why. There is no separate outbound-policy step.
+    # Known write ops are gated twice. First the registry (§4.7) -
+    # the WHO gate - resolves the recipient_token; a non-`ok` lookup
+    # collapses to the uniform "destination unavailable" refusal,
+    # audit-logged as decision_refuse_registry so the operator can
+    # see *which* token failed and why. Then standing approvals
+    # (GLOSSARY 'Standing approvals', §6) - the WHAT gate - check
+    # whether the operator has pre-approved this (op, destination,
+    # amount) tuple; no match parks in HITL and refuses uniformly,
+    # audit-logged as decision_defer_hitl with reason
+    # no_standing_approval so the operator can distinguish the
+    # default-pause from the registry miss and from an unknown op.
+    # Both gates must pass for dispatch to fire.
     if op in _KNOWN_WRITE_OPS:
         resolved = _pseudonymize_inbound(request)
         if resolved is None:
             audit.record("decision_refuse_registry", {"op": op})
+            _respond_refused(handler, deadline)
+            return
+        if not standing_approvals.matches(
+            op,
+            request.get("recipient_token"),
+            _request_amount_sats(request),
+        ):
+            audit.record(
+                "decision_defer_hitl",
+                {"op": op, "reason": "no_standing_approval"},
+            )
+            _hitl_park(request)
             _respond_refused(handler, deadline)
             return
         response = _dispatch(resolved)
@@ -284,6 +303,27 @@ def _hitl_park(request):
     wire-up point explicit for review.
     """
     pass
+
+
+def _request_amount_sats(request):
+    """Pull the request's amount in satoshis for the standing-
+    approvals gate.
+
+    send_bitcoin carries `amount_sats` directly. send_lightning
+    carries `amount_msats`; we round UP to sats so a max_amount_sats
+    bound rejects a borderline request rather than slipping through
+    on a sub-sat fraction. Returns None if neither field is present
+    (or carries an unusable shape); standing_approvals.matches()
+    treats None as failing any rule with a bound.
+    """
+    sats = request.get("amount_sats")
+    if isinstance(sats, int):
+        return sats
+    msats = request.get("amount_msats")
+    if isinstance(msats, int):
+        # Ceiling division: 1500 msats -> 2 sats, 1000 msats -> 1 sat.
+        return -(-msats // 1000)
+    return None
 
 
 def _pseudonymize_inbound(request):

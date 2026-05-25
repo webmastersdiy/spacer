@@ -73,8 +73,9 @@ import state  # noqa: E402
 # arbiter boot path imports them for that side effect; mirror it here
 # so the in-thread arbiter sees the full schema, not just
 # gateway+results.
-import registry  # noqa: E402, F401
+import registry  # noqa: E402
 import scale  # noqa: E402
+import standing_approvals  # noqa: E402
 import timing  # noqa: E402, F401
 
 # Test-mode timing on the arbiter side: SPACER_TIMING_MODE=test
@@ -97,6 +98,28 @@ os.environ["SPACER_SCALE_MODE"] = "test"
 # estimate on submit responses, so submit-* variants see the 30s bound
 # rather than the 24h production-placeholder default.
 os.environ["PETCLI_TEST_TIMING"] = "1"
+
+# Standing-approvals config path (GLOSSARY 'Standing approvals' / §6).
+# One temp file per runner process; each variant clears it before
+# preconditions run, so a variant without seed_standing_approvals
+# starts with the default-pause empty config (= HITL every write).
+# The seed_standing_approvals precondition writes the file before
+# the petcli call so the gateway's matches() call sees the rules.
+_STANDING_APPROVALS_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-standing-"))
+_STANDING_APPROVALS_PATH = _STANDING_APPROVALS_DIR / "standing_approvals.yaml"
+os.environ["SPACER_STANDING_APPROVALS_PATH"] = str(_STANDING_APPROVALS_PATH)
+
+# Pre-computed valid recipient token + a real testnet address. Used
+# by the seed_registry precondition so the new send-bitcoin /
+# send-lightning variants can exercise the post-registry path
+# (registry resolves -> standing-approvals gate fires). Generated
+# once at module load so the petcli_args and the precondition agree
+# on the same token string. The address is BIP-173's testnet P2WPKH
+# reference example; format detection in registry.py classifies it
+# as bech32 testnet.
+_VALID_TOKEN = registry.generate_token()
+_VALID_REAL = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+_VALID_FMT = "bech32"
 
 
 # === Fake lncli for the read-only query variants ====================
@@ -233,6 +256,21 @@ def _apply_precondition(precondition):
         timestamp before handing to scale. Lets cloaked-tier variants
         exercise the pending-transition and applied-transition paths
         without driving a real wall-clock delay.
+      ("seed_registry", token, real, fmt)
+        Direct INSERT of a (token, real, format) row into the
+        recipient_addresses table. Bypasses registry.add()'s
+        operator-side validation so a variant can stage a known-good
+        token without going through generate_token/checksum/insert.
+        Used by the send-bitcoin / send-lightning variants that
+        exercise the post-registry path (the registry resolves; the
+        standing-approvals gate decides). created_at = now,
+        expires_at = now + 7d, used = 0.
+      ("seed_standing_approvals", [rule_dicts])
+        Renders the rule list as YAML and writes it to the standing-
+        approvals config path. Lets a variant pre-stage a matching
+        rule so the gateway's standing_approvals.matches() returns
+        True and dispatch fires (or omit and rely on the runner's
+        per-variant clear for the default-pause path).
     """
     op = precondition[0]
     if op == "deposit":
@@ -264,6 +302,22 @@ def _apply_precondition(precondition):
         )
         scale.seed_for_test(
             active_tier, active_scale, target_tier, target_scale, due_at,
+        )
+    elif op == "seed_registry":
+        _, token, real, fmt = precondition
+        now = time.time()
+        expires = now + 7 * 86400.0
+        with state.connect() as conn:
+            conn.execute(
+                "INSERT INTO recipient_addresses "
+                "(token, real, format, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token, real, fmt, now, expires),
+            )
+    elif op == "seed_standing_approvals":
+        _, rules = precondition
+        _STANDING_APPROVALS_PATH.write_text(
+            standing_approvals.render_yaml(rules)
         )
     else:
         raise ValueError(f"unknown precondition op {op!r}")
@@ -470,6 +524,130 @@ VARIANTS = [
             "Same registry-miss path as send-bitcoin/refused-unknown-"
             "token, but for the Lightning send op. Audit logs "
             "decision_refuse_registry."
+        ),
+    },
+    # --- submit: post-registry, standing-approvals gate. The token
+    # resolves through the registry; whether dispatch fires depends
+    # on the operator's standing-approvals config (GLOSSARY 'Standing
+    # approvals', §6). The parked-* variants exercise the default-
+    # pause path (empty config = HITL every write); the allowed-by-*
+    # variants stage a matching rule and let the call through to
+    # dispatch (which currently returns the not_implemented marker
+    # because the write executor is still a stub). These two
+    # variants together prove the standing-approvals gate fires
+    # AFTER the registry and is distinct from the unknown-op HITL.
+    {
+        "path": ("submit", "send-bitcoin", "parked-no-standing-approval"),
+        "petcli_args": [
+            "submit", "send-bitcoin",
+            "--to-token", _VALID_TOKEN,
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            # No seed_standing_approvals: default-pause path.
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "description": (
+            "send_bitcoin with a valid (registry-resolved) recipient "
+            "token but NO matching standing-approval rule. The "
+            "registry resolves; the standing-approvals check fails "
+            "(default-pause = empty config); the gateway HITL-parks "
+            "and refuses uniformly. arbiter-events.log must contain "
+            "decision_defer_hitl with reason no_standing_approval, "
+            "distinct from the refused-unknown-token variants' "
+            "decision_refuse_registry."
+        ),
+    },
+    {
+        "path": ("submit", "send-bitcoin", "allowed-by-standing-approval"),
+        "petcli_args": [
+            "submit", "send-bitcoin",
+            "--to-token", _VALID_TOKEN,
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_standing_approvals", [
+                {"op": "send_bitcoin",
+                 "destination": _VALID_TOKEN,
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: r == {
+            "status": "not_implemented",
+            "op": "send_bitcoin",
+            "_petcli_estimate_window_s": 30.0,
+        },
+        "description": (
+            "send_bitcoin where the registry token resolves AND a "
+            "standing-approval rule matches (op + destination + "
+            "amount under max). The gate passes; dispatch fires; "
+            "the write executor is still a stub so dispatch returns "
+            "the not_implemented marker. The variant proves the gate "
+            "let the call through. arbiter-events.log must contain "
+            "standing_approval_match and decision_allow."
+        ),
+    },
+    {
+        "path": ("submit", "send-lightning", "parked-no-standing-approval"),
+        "petcli_args": [
+            "submit", "send-lightning",
+            "--to-token", _VALID_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "description": (
+            "Same default-pause path as send-bitcoin/parked-no-"
+            "standing-approval but for the Lightning send op. "
+            "amount_msats=1_000_000 (= 1000 sats post-ceiling) is "
+            "irrelevant here because no rule exists; arbiter-events."
+            "log records decision_defer_hitl with reason "
+            "no_standing_approval."
+        ),
+    },
+    {
+        "path": ("submit", "send-lightning", "allowed-by-standing-approval"),
+        "petcli_args": [
+            "submit", "send-lightning",
+            "--to-token", _VALID_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_standing_approvals", [
+                {"op": "send_lightning",
+                 "destination": _VALID_TOKEN,
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: r == {
+            "status": "not_implemented",
+            "op": "send_lightning",
+            "_petcli_estimate_window_s": 30.0,
+        },
+        "description": (
+            "send_lightning analogue of send-bitcoin/allowed-by-"
+            "standing-approval. amount_msats=1_000_000 rounds up to "
+            "1000 sats; max_amount_sats=50000 admits it. The gate "
+            "passes; dispatch returns the not_implemented stub. "
+            "arbiter-events.log contains standing_approval_match "
+            "and decision_allow."
         ),
     },
     {
@@ -682,6 +860,15 @@ def _run_variant(variant):
     # env is not contaminated.
     saved_lncli_scenario = os.environ.get("LNCLI_SCENARIO")
     os.environ["LNCLI_SCENARIO"] = variant.get("lncli_scenario", "funded")
+
+    # Standing-approvals config is process-global state shared across
+    # variants via the env var; clear it here so a variant without a
+    # seed_standing_approvals precondition sees the empty-default
+    # (HITL every write), not whatever the previous variant wrote.
+    try:
+        _STANDING_APPROVALS_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
     server = thread = port = None
     try:
