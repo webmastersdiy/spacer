@@ -114,9 +114,11 @@ Wrapped access to the [local bitcoind](../../GLOSSARY.md#local-bitcoind). The ar
 
 ### 4.3 LND client access
 
-Wrapped access to LND over `lncli` plus gRPC/REST. The current testbed wrapper [lncliA](../../GLOSSARY.md#lnclia) is testbed-scoped (Voltage-hosted Node A); the arbiter's production access will follow the same pattern but against the deployment's LND instance.
+Wrapped access to LND via `lncli`, invoked through a subprocess argv list (no shell). The arbiter has its own wrapper at `arbiter/src/lnd.py` and deliberately does **not** reuse the test-harness's [lncliA](../../GLOSSARY.md#lnclia) shell script; a reviewer auditing arbiter code (§2.1) reads one `_run` helper and sees the entire connection surface - binary path, TLS cert, macaroon, RPC server, network - without a second wrapper between them. `lncli` already speaks gRPC under the hood, so the original "lncli plus gRPC/REST" option collapses to "lncli only" in practice; a direct gRPC client remains a possible future swap if the binary footprint ever becomes a constraint.
 
-Read-only balance and channel-capacity responses (`walletbalance`, `channelbalance`) are subject to [scale cloaking](../../GLOSSARY.md#scale-cloaking) before they cross the privacy gateway: the petitioner sees a sat figure projected into a fixed 0-100k presentation window regardless of whether the underlying wallet holds 50k, 5M, or 500M. Aggregate-by-default (§4.1) still applies on top of cloaking for channel-list responses, so per-channel detail is suppressed even when the aggregate is cloak-presented.
+Read-only balance and channel-capacity responses (`walletbalance`, `channelbalance`) are subject to [scale cloaking](../../GLOSSARY.md#scale-cloaking) before they cross the privacy gateway: the gateway projects the real total into a fixed presentation window (nominally 0 - 100k sats) regardless of whether the underlying wallet holds 50k, 5M, or 500M. Cloak **replaces** straight [banding](../../GLOSSARY.md#banding-numeric-value-banding) for these fields - the per-tier scale already gives 10x+ compression, and layering a fixed-resolution band on top would muddy the math without adding meaningful privacy. Banding remains the design for non-cloak fields (per-call fee / amount on send paths). For the channel pool the wrapper uses `channelbalance` (aggregate `local + remote`) rather than `listchannels`, so [aggregate-by-default](../../GLOSSARY.md#aggregate-by-default) for channel capacity is enforced at the RPC-selection level rather than as a filter on top of per-channel detail. The cloak's production mode (multi-day randomized transition delays, within-tier scale randomization) is open work; the implementation gates production behind `NotImplementedError` and runs only under `SPACER_SCALE_MODE=test` (5-15s deterministic transitions) for exit-loop validation (§10).
+
+State-changing LND calls (`sendcoins`, `payinvoice`, `openchannel`) reach this layer only after the gateway has resolved the petitioner's `recipient_token` through the [recipient address registry](#47-recipient-address-registry); the destination argument is therefore the real address by construction. `openchannel` defaults `private=True`, passing `--private` to `lncli` so the channel does not appear in `listchannels` to the petitioner and is not announced on the LN gossip graph (the [default `--private` channels](../../GLOSSARY.md#default---private-channels) mitigation from §6, fired at this call site). `payinvoice` is always invoked with `-f` because there is no operator at `lncli` stdin - the operator-facing channel is the directly-attached console. HTLC-level secrets (preimages, full route, per-hop fee detail) stay inside `lnd`; the wrapper returns the raw JSON dict for arbiter-internal use and the gateway redacts before responses cross the AI-facing boundary ([hide secrets](../../GLOSSARY.md#hide-secrets)).
 
 ### 4.4 Local state
 
@@ -345,3 +347,13 @@ exit-loop/
 ```
 
 The tree is scaffolded empty initially. A populated `<variant-name>/` directory signals that variant has been validated; an empty one signals not-yet-validated.
+
+---
+
+## 11. Implementation learnings
+
+- 2026-05-24: [§4.3](#43-lnd-client-access) reconciled with `arbiter/src/lnd.py` and `arbiter/src/scale.py`. Arbiter's `lncli` wrapper is its own subprocess module rather than the test-harness `lncliA` shell script (§2.1 auditability); "lncli plus gRPC/REST" collapsed to "lncli only" because `lncli` already speaks gRPC.
+- 2026-05-24: [§4.3](#43-lnd-client-access) cloak-vs-band split clarified: scale cloaking **replaces** banding on cloak-eligible reads (`walletbalance`, `channelbalance` totals); banding stays for per-call fee / amount fields on send paths.
+- 2026-05-24: [§4.3](#43-lnd-client-access) channel-pool aggregation is structural (use `channelbalance`, not `listchannels`), not filter-on-top.
+- 2026-05-24: [§4.3](#43-lnd-client-access) picked up `openchannel --private` and `payinvoice -f` defaults at the LND-access layer (previously implicit; the `--private` mitigation was only documented in [§6](#6-mitigation-map)).
+- 2026-05-24: Scale cloak production mode is `NotImplementedError`-gated; only `SPACER_SCALE_MODE=test` (5-15s deterministic transitions) is wired ([§4.3](#43-lnd-client-access), consistent with the "Status: open" callout in [§6](#6-mitigation-map)).
