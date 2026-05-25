@@ -141,6 +141,10 @@ The arbiter component that enforces both anonymity-set delays:
 
 The dynamic window calculation observes global activity for actions or results of the same shape and stretches or compresses the window to keep the anonymity set above a target. Constant or naive parameters defeat the mechanism (the distribution itself becomes a fingerprint), so the calculation is part of the security surface, not just a tuning knob.
 
+The same module also enforces the §4.7 rejection-delivery delay. The three delays share one defer-then-pop substrate: state-changing actions park in `pending_actions` with a `ready_at`; outcomes (results or rejections) park in `pending_results` with the same shape plus a kind tag; a future executor drains due entries by elapsed `ready_at` in arrival order.
+
+**Status: partial.** Test-mode windows are wired end-to-end (5-15s action, 5-15s result, 1-5s rejection-delivery; see §10). Production mode is blocked behind the dynamic-window calculation (§7) and raises `NotImplementedError` on every enqueue path until that lands - the safe failure mode for a misconfigured environment is "does not run," not "runs with the wrong window." Mode selection is conservative: only an exact `SPACER_TIMING_MODE=test` enables test mode, so a typo, miscased value, or unset variable lands in production and refuses. The `enqueue` / `due` / `pending` APIs and both pending-deferral tables exist; the action executor that drains due actions against bitcoind/LND and the result-registry consumer that drains due results for petitioner pickup are not yet implemented.
+
 ### 4.7 Recipient address registry
 
 Manages the pseudonymized handles the petitioner uses to refer to Bitcoin and Lightning destinations the operator has approved as send targets. Concrete implementation of [pseudonymize](../../GLOSSARY.md#pseudonymize-identifier-pseudonymization) for outbound destinations, combined with one-time-use enforcement and an explicit human-driven creation flow.
@@ -239,7 +243,7 @@ Where each glossary mitigation fires in the data flow.
 - [Hide secrets](../../GLOSSARY.md#hide-secrets): arbitrarily wide rule applied across the arbiter. The privacy gateway enforces it on every outbound response; longer-lived secrets (preimages, signatures, macaroons, descriptors, xpubs, PSBTs, raw values behind any pseudonym) live only in arbiter local state.
 - [Default --private channels](../../GLOSSARY.md#default---private-channels): policy on the LND client access path. The arbiter passes `--private` (LND) or `open_channel` (ldk-node) by default when calling channel-open. AI-facing this hides the channel from `listchannels`; world-facing it suppresses the gossip entry.
 - [Latency normalization](../../GLOSSARY.md#latency-normalization): privacy gateway, on every outbound response. Defeats per-response timing fingerprints (hop count, IBD state, wallet vs. non-wallet).
-- [Action delay](../../GLOSSARY.md#action-delay) and [result delay](../../GLOSSARY.md#result-delay): the timing layer (§4.6). These operate on a different timescale from latency normalization (per-response, ms): action and result delay are per-action, hours-to-days. They subsume per-poll cadence concerns - the arbiter <-> bitcoind / LND link is inside the trust boundary, and result delay decorrelates any internal poll pattern from what the petitioner can observe.
+- [Action delay](../../GLOSSARY.md#action-delay) and [result delay](../../GLOSSARY.md#result-delay): the timing layer (§4.6). These operate on a different timescale from latency normalization (per-response, ms): action and result delay are per-action, hours-to-days. They subsume per-poll cadence concerns - the arbiter <-> bitcoind / LND link is inside the trust boundary, and result delay decorrelates any internal poll pattern from what the petitioner can observe. **Status: partial.** Test-mode 5-15s windows are wired (and 1-5s for the §4.7 rejection-delivery delay enforced in the same module); production needs §7's dynamic window calculation and is gated behind a NotImplementedError until that lands.
 
 The privacy gateway is the primary AI-facing defense; world-facing mitigations (Tor, multi-peer broadcast, self-hosted esplora) sit underneath as defense-in-depth and are out of scope here.
 
@@ -345,3 +349,9 @@ exit-loop/
 ```
 
 The tree is scaffolded empty initially. A populated `<variant-name>/` directory signals that variant has been validated; an empty one signals not-yet-validated.
+
+---
+
+## 11. Implementation learnings
+
+- 2026-05-24: reconciled §4.6 (and §6's action/result timing entry) against `arbiter/src/timing.py`. Added a partial-status block to §4.6 noting test-mode 5-15s windows wired end-to-end, production blocked behind §7's dynamic window calculation with NotImplementedError gating on every enqueue path, conservative `SPACER_TIMING_MODE=test`-only mode selection (typo / miscased / unset all land in production), and that the same module also enforces the §4.7 rejection-delivery delay (test-mode 1-5s; production 1h ± 30 min) over a shared `pending_actions` / `pending_results` defer-then-pop substrate. §7's "Dynamic window calculation" open Q is the exact gating issue for production and needs no edit; the action executor (drains due actions) and result-registry consumer (drains due results) are not yet implemented.
