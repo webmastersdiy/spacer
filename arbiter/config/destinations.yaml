@@ -1,0 +1,36 @@
+# arbiter/config/destinations.yaml
+#
+# Recipient address registry (§4.7 of design-docs/origin/05--).
+# The arbiter never reveals the real address to the petitioner; this
+# file is the only place that maps the public token to the real
+# destination. See GLOSSARY.md "Recipient address registry" for
+# the threat model.
+#
+# Edit this file directly with any text editor. Saved changes take
+# effect on the next registry lookup (mtime-based reload, no arbiter
+# restart needed). The arbiter rewrites this file on registry_add
+# and registry_consume; any operator comments above individual
+# entries are NOT preserved across rewrites.
+#
+# Schema (per-entry mapping):
+#   id:          int       monotonic local sequence (1, 2, 3, ...)
+#   token:       str       6-char Crockford-base32 (5 random + 1 Damm32)
+#   real:        str       real address (bech32* stored lowercased)
+#   format:      str       bech32 | bech32m | base58check |
+#                          bolt11 | bolt12 | lightning_address
+#   created_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   expires_at:  str       ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ')
+#   used:        bool      true once consumed
+#   consumed_by: str|~     txid (Bitcoin) or payment hash (Lightning);
+#                          ~ if not used
+#
+# To add an entry from the directly-attached arbiter console, run:
+#   arbiter/bin/registry add <real-address>
+# which validates the checksum, generates a token, and appends here.
+# Direct YAML edits are equally supported.
+#
+# The arbiter ships with this file empty - every operator adds their
+# own destinations. The [] below is the YAML representation of an
+# empty entry list; it is replaced wholesale on the first add.
+
+[]

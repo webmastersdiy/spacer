@@ -1,3 +1,3 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":63487},"ts":"2026-05-25T01:23:23Z"}
-{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-25T01:23:23Z"}
-{"event":"decision_poll_bad_input","payload":{"op":"poll"},"ts":"2026-05-25T01:23:23Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":57673},"ts":"2026-05-25T02:46:19Z"}
+{"event":"request_received","payload":{"op":"poll"},"ts":"2026-05-25T02:46:19Z"}
+{"event":"decision_poll_bad_input","payload":{"op":"poll"},"ts":"2026-05-25T02:46:19Z"}

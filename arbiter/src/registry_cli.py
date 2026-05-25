@@ -13,6 +13,14 @@ and types the real address. ... On a successful add the arbiter
 prints the entry's local-only numeric ID and the public-facing
 token back to the console."
 
+The registry's storage substrate is a YAML file at arbiter/config/
+destinations.yaml (bead bl-2lbqu4). This CLI is a convenience for
+the add path - it validates the checksum, generates a token,
+appends an entry, and prints the issued (id, token). Operators
+who prefer can edit destinations.yaml directly in any text editor;
+the running arbiter picks up the change on the next lookup
+(mtime-based reload).
+
 Two subcommands:
 - add:  issue a fresh (id, token) for an operator-typed address.
 - list: enumerate every registry entry, with the namespace-
@@ -26,7 +34,6 @@ import time
 
 import audit
 import registry
-import state
 
 
 def cmd_add(args):
@@ -77,15 +84,16 @@ def cmd_list(args):
 
 
 def main(argv=None):
-    """argparse-based dispatcher. Configures audit/state from the
-    process environment (or defaults under ~/spacer/arbiter/data/)
-    and applies any registered schema fragments. The arbiter daemon
-    and this CLI share the same SQLite database (WAL mode handles
-    concurrent access) and the same audit log (O_APPEND + fsync per
-    line is concurrency-safe within PIPE_BUF)."""
+    """argparse-based dispatcher. Configures the audit log and the
+    recipient registry YAML path from the process environment (or
+    defaults). The arbiter daemon and this CLI share the same audit
+    log (O_APPEND + fsync per line is concurrency-safe within
+    PIPE_BUF) and the same destinations.yaml (the rewrite path is
+    atomic via tempfile + rename, and the in-process consume path
+    serializes via a module lock; the residual operator-vs-CLI race
+    on hand-edits is human-slow and accepted)."""
     audit.configure()
-    state.configure()
-    state.migrate()
+    registry.configure()
     p = argparse.ArgumentParser(
         prog="registry",
         description="Operator console for the recipient address registry.",
@@ -116,19 +124,20 @@ def main(argv=None):
 
 if __name__ == "__main__":
     # Smoke test: invoke add via argv (non-prompt mode) and list via
-    # the same in-process state, verify both paths against a temp DB.
+    # the same in-process registry, verify both paths against a temp
+    # YAML file.
     import json
     import os
     import tempfile
     from pathlib import Path
 
     tmp_audit = Path(tempfile.gettempdir()) / "arbiter-registry-cli-smoke.log"
-    tmp_state = Path(tempfile.gettempdir()) / "arbiter-registry-cli-smoke.db"
-    for p in (tmp_audit, tmp_state):
+    tmp_yaml = Path(tempfile.gettempdir()) / "arbiter-registry-cli-smoke.yaml"
+    for p in (tmp_audit, tmp_yaml):
         if p.exists():
             p.unlink()
     os.environ["AUDIT_LOG_PATH"] = str(tmp_audit)
-    os.environ["STATE_DB_PATH"] = str(tmp_state)
+    os.environ["DESTINATIONS_PATH"] = str(tmp_yaml)
 
     import io
 
@@ -186,5 +195,5 @@ if __name__ == "__main__":
     assert "registry_add" in events, events
     assert "registry_add_invalid" in events, events
 
-    print(f"OK: registry CLI round-trips at state={tmp_state}")
+    print(f"OK: registry CLI round-trips at yaml={tmp_yaml}")
     sys.exit(0)

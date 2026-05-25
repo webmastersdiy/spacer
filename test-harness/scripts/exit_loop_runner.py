@@ -68,11 +68,16 @@ import gateway  # noqa: E402
 import results  # noqa: E402
 import state  # noqa: E402
 
-# registry, timing, and scale register their own SQLite schemas at
-# import time (their _SCHEMA fragments call state.register_schema). The
-# arbiter boot path imports them for that side effect; mirror it here
-# so the in-thread arbiter sees the full schema, not just
-# gateway+results.
+# timing and scale register their own SQLite schemas at import time
+# (their _SCHEMA fragments call state.register_schema). The arbiter
+# boot path imports them for that side effect; mirror it here so the
+# in-thread arbiter sees the full schema, not just gateway+results.
+# registry is also imported here, but its storage substrate is the
+# YAML file at arbiter/config/destinations.yaml (bead bl-2lbqu4) not
+# SQLite, so it is wired via registry.configure() in _start_arbiter()
+# rather than via state.migrate(). standing_approvals is imported
+# for its render_yaml helper used by the seed_standing_approvals
+# precondition (the gateway picks the path up via the env var).
 import registry  # noqa: E402
 import scale  # noqa: E402
 import standing_approvals  # noqa: E402
@@ -204,14 +209,23 @@ os.environ["LNCLI_TIMEOUT_S"] = "5.0"
 
 # === Arbiter lifecycle ==============================================
 
-def _start_arbiter(audit_path, state_path):
-    """Configure audit + state to fresh isolated paths and start the
-    privacy gateway in a daemon thread on an ephemeral port. Returns
-    (server, port, thread). The caller is responsible for tearing the
-    server down via _stop_arbiter()."""
+def _start_arbiter(audit_path, state_path, registry_yaml_path):
+    """Configure audit, state, and the recipient registry to fresh
+    isolated paths and start the privacy gateway in a daemon thread
+    on an ephemeral port. Returns (server, port, thread). The caller
+    is responsible for tearing the server down via _stop_arbiter().
+
+    The registry's storage substrate is the YAML file at
+    arbiter/config/destinations.yaml in production (bead bl-2lbqu4);
+    isolating it per variant via configure() keeps each variant from
+    seeing entries from any other variant. The runner does not seed
+    registry entries (the only registry-touching variants are the
+    refused-unknown-token sends, which use a token absent from the
+    registry by construction)."""
     audit.configure(audit_path)
     state.configure(state_path)
     state.migrate()
+    registry.configure(registry_yaml_path)
     server = gateway.make_server(host="127.0.0.1", port=0, latency_target=0.05)
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -257,14 +271,17 @@ def _apply_precondition(precondition):
         exercise the pending-transition and applied-transition paths
         without driving a real wall-clock delay.
       ("seed_registry", token, real, fmt)
-        Direct INSERT of a (token, real, format) row into the
-        recipient_addresses table. Bypasses registry.add()'s
-        operator-side validation so a variant can stage a known-good
-        token without going through generate_token/checksum/insert.
-        Used by the send-bitcoin / send-lightning variants that
-        exercise the post-registry path (the registry resolves; the
-        standing-approvals gate decides). created_at = now,
-        expires_at = now + 7d, used = 0.
+        Direct injection of a (token, real, format) entry into the
+        per-variant destinations.yaml. Bypasses registry.add()'s
+        operator-side validation and token generation so a variant
+        can stage a known-good token (the petcli_args reference it
+        verbatim). Used by the send-bitcoin / send-lightning
+        variants that exercise the post-registry path (the registry
+        resolves; the standing-approvals gate decides). created_at
+        = now, expires_at = now + 7d, used = False. Reaches into
+        registry._persist() under registry._lock for the write -
+        the public registry.add() API would mint its own random
+        token rather than honor the one the test wants.
       ("seed_standing_approvals", [rule_dicts])
         Renders the rule list as YAML and writes it to the standing-
         approvals config path. Lets a variant pre-stage a matching
@@ -307,13 +324,20 @@ def _apply_precondition(precondition):
         _, token, real, fmt = precondition
         now = time.time()
         expires = now + 7 * 86400.0
-        with state.connect() as conn:
-            conn.execute(
-                "INSERT INTO recipient_addresses "
-                "(token, real, format, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token, real, fmt, now, expires),
-            )
+        with registry._lock:
+            existing = list(registry._entries)
+            next_id = (max((e["id"] for e in existing), default=0)) + 1
+            new_entry = {
+                "id": next_id,
+                "token": token,
+                "real": real,
+                "format": fmt,
+                "created_at": now,
+                "expires_at": expires,
+                "used": False,
+                "consumed_by": None,
+            }
+            registry._persist(existing + [new_entry])
     elif op == "seed_standing_approvals":
         _, rules = precondition
         _STANDING_APPROVALS_PATH.write_text(
@@ -849,8 +873,10 @@ def _run_variant(variant):
 
     audit_dir = Path(tempfile.mkdtemp(prefix="exit-loop-audit-"))
     state_dir = Path(tempfile.mkdtemp(prefix="exit-loop-state-"))
+    registry_dir = Path(tempfile.mkdtemp(prefix="exit-loop-registry-"))
     audit_path = audit_dir / "audit.log"
     state_path = state_dir / "state.db"
+    registry_yaml_path = registry_dir / "destinations.yaml"
 
     # Per-variant fake-lncli scenario. The fake binary reads
     # $LNCLI_SCENARIO to pick which canned reply to print; the runner
@@ -873,7 +899,9 @@ def _run_variant(variant):
     server = thread = port = None
     try:
         if variant.get("uses_arbiter", True):
-            server, port, thread = _start_arbiter(audit_path, state_path)
+            server, port, thread = _start_arbiter(
+                audit_path, state_path, registry_yaml_path
+            )
             for pc in variant.get("preconditions", []):
                 _apply_precondition(pc)
 
@@ -990,7 +1018,7 @@ def _run_variant(variant):
         else:
             os.environ["LNCLI_SCENARIO"] = saved_lncli_scenario
         # Best-effort cleanup of the per-variant tempdirs.
-        for d in (audit_dir, state_dir):
+        for d in (audit_dir, state_dir, registry_dir):
             try:
                 shutil.rmtree(d)
             except OSError:
