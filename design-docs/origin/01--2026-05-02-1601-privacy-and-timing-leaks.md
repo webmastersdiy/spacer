@@ -1,286 +1,108 @@
 # Privacy and Timing Leaks in the LND API Surface (AI-Facing)
 
 **Date:** 2026-05-02
-**Context:** AI ↔ privacy-proxy ↔ LND threat model and mitigation menu. AI-facing only.
+**Context:** AI-facing leak map for the LND surface - what each `lncli` call exposes and which arbiter mitigation covers it. Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-call inventory.
 **Related:**
-- `2026-05-02-1600-lnd-mutinynet-test-flow.md` (test setup and session ledger)
-- `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (bitcoind AI-facing companion)
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
+- `2026-05-02-1600-lnd-mutinynet-test-flow.md` - the run these calls came from.
+- `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - bitcoind companion (read together for the gateway policy layer).
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (archived; separate concern).
 
 ---
 
-## 1. Purpose and Scope
+## 1. Scope
 
-This document defines the **AI-facing** privacy threat model for a proxy that mediates
-between an AI client and a Voltage-hosted LND node (Mutinynet/signet). The adversary
-modeled here is the AI client itself - potentially malicious by design, compromised at
-runtime, or prompt-injected by a fetched URL. The proxy's job is to prevent the AI from
-learning more about the operator's node than it needs to fulfill a given task.
+The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy) for the threat axes. The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> LND ([Node A](../../GLOSSARY.md#node-a), Voltage-hosted, Mutinynet/signet). World-facing threats (LN gossip, peers, explorers, hosting) are out of scope - see the archived world-facing doc.
 
-The boundary under analysis is the AI ↔ proxy ↔ LND interface.
+## 2. Threat model
 
-World-facing threats (LN gossip, P2P peer observers, block explorer operators, hosting
-providers) are out of scope here; see
-`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
-
----
-
-## 2. Threat Model
-
-### Adversary capabilities in scope
-
-| Adversary | What they can observe | Key concern |
+| Adversary | Observes | Concern |
 |---|---|---|
-| **The AI client** | Every response the proxy returns; request/response timing; any identifier or amount the proxy surfaces | May be malicious by design, compromised at runtime, or prompt-injected by a fetched URL. Could attempt to exfiltrate data to its operator, probe for info via crafted queries, or induce unauthorized fund movement. |
-| **Network observer** (AI ↔ proxy channel) | Traffic metadata (timing, packet sizes, connection frequency) even if payload is TLS-encrypted | Timing analysis, connection-count patterns, size fingerprinting. |
+| **The AI client** | every response; request/response timing; any identifier or amount surfaced | malicious by design, compromised, or prompt-injected; may exfiltrate, probe via crafted queries, or induce fund movement |
+| **Network observer** (AI <-> gateway link) | traffic metadata even under TLS | timing, connection-count, size fingerprinting |
 
-World-facing threats (LN gossip network, routing nodes on payment paths, counterparty
-observers, hosting operators) are out of scope here; see
-`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
+Out of scope: the LND host operator ([Voltage](../../GLOSSARY.md#voltage) sees everything at OS level); LN gossip / routing / faucet / counterparty observers (world-facing); the bitcoind operator (doc 03); OS or hypervisor compromise; physical access.
 
-### Out of scope
+## 3. Per-call leak surface
 
-- LND host operator (Voltage or self-hosted equivalent) - they see everything at the
-  process and OS level regardless of what the proxy does.
-- LN gossip network and routing node observers - world-facing; covered in the world-facing doc.
-- Counterparty / faucet observers - world-facing.
-- bitcoind operator - covered in `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md`.
-- OS-level or hypervisor-level compromise.
-- Physical access to the node hardware.
-
----
-
-## 3. Per-API Leak Surface
-
-Severity: **HIGH** = full identifier or balance reveal; **MEDIUM** = counts, patterns, or
-partial identifiers; **LOW** = status flags or booleans.
+Severity: **HIGH** = full identifier or balance reveal; **MED** = counts / patterns / partial; **LOW** = flags. The mitigation column tags the glossary mechanism that applies; mechanics and caveats are defined there.
 
 ### 3.1 Identity
 
-| Call | What it returns | Severity | Proxy mitigation |
+| Call | Returns | Sev | Mitigation |
 |---|---|---|---|
-| `newaddress` | Fresh bech32 address | HIGH | Return opaque funding-pool token; proxy holds address↔pool mapping. |
-| `connect` | Exposes our pubkey + outbound IP to peer | HIGH | Gate every connect target against an operator-approved peer set; log all attempts. |
-| `decodepayreq` | Destination pubkey, payment_hash, amount, route hints | MEDIUM | Run internally; surface only policy predicates ("amount ≤ ceiling: yes"). |
+| `newaddress` | fresh bech32 address | HIGH | [pseudonymize](../../GLOSSARY.md#pseudonymize-identifier-pseudonymization) to an opaque funding-pool token |
+| `connect` | exposes our pubkey + outbound IP to the peer | HIGH | gate the target through the [recipient address registry](../../GLOSSARY.md#recipient-address-registry); log every attempt |
+| `decodepayreq` | destination pubkey, payment_hash, amount, route hints | MED | decode internally; surface only policy predicates ("amount <= ceiling: yes") |
 
 ### 3.2 Balance
 
-| Call | What it returns | Severity | Proxy mitigation |
+| Call | Returns | Sev | Mitigation |
 |---|---|---|---|
-| `walletbalance` | Total / confirmed / unconfirmed / locked / reserved / per-account | HIGH | Project real total through scale cloaking before egress; the petitioner sees a number in a fixed presentation window regardless of the wallet's true order of magnitude. Banding is deliberately NOT layered on top (the per-tier scale already provides ~10x compression). See §5 "Scale cloaking" and GLOSSARY 'Scale cloaking'. |
-| `listunspent` | Per-UTXO address, amount, pk_script, outpoint, confirmations | HIGH | Never surface to AI. Proxy answers higher-level questions ("≥X confirmed UTXO available: yes"). |
-| `channelbalance` | Aggregate channel balance + buckets | HIGH | Same treatment as `walletbalance`: aggregate (local + remote) is routed through scale cloaking; banding is dropped for this read for the same reason. See §5 "Scale cloaking". |
+| `walletbalance` | total / confirmed / unconfirmed / locked / reserved / per-account | HIGH | [scale cloaking](../../GLOSSARY.md#scale-cloaking) before egress; banding is deliberately *not* layered on top (§5) |
+| `listunspent` | per-[UTXO](../../GLOSSARY.md#utxo) address, amount, pk_script, outpoint, confirmations | HIGH | never surface; [aggregate](../../GLOSSARY.md#aggregate-by-default) ("≥X confirmed UTXO available: yes") |
+| `channelbalance` | aggregate local + remote channel balance | HIGH | as `walletbalance`: scale cloaking, not banding |
 
-### 3.3 Peer / Channel State
+### 3.3 Peer / channel state
 
-| Call | What it returns | Severity | Proxy mitigation |
+| Call | Returns | Sev | Mitigation |
 |---|---|---|---|
-| `listpeers` | Per-peer: pubkey, address, feature bitmask, traffic counters | HIGH | Default to count only; per-peer detail requires explicit justification per call. |
-| `pendingchannels` | Per-pending: remote pubkey, capacity, confirmation height | MEDIUM | AI gets "pending: yes/no" unless detail is explicitly needed. |
-| `listchannels` | Per-channel: remote pubkey, channel_point, SCID, capacity, local/remote balance, commit fee, total_sats_sent, total_sats_received, num_updates, peer_alias, constraints, flags, commitment_type | HIGH | Default = counts + aggregate balances. Strip `total_satoshis_*` and `num_updates` (activity history). Per-channel detail requires explicit per-call justification. |
+| `listpeers` | per-peer pubkey, address, feature bitmask, traffic counters | HIGH | [aggregate](../../GLOSSARY.md#aggregate-by-default) to a count; per-peer detail needs per-call justification |
+| `pendingchannels` | per-pending remote pubkey, capacity, confirmation height | MED | "pending: yes/no" unless detail is justified |
+| `listchannels` | per-channel remote pubkey, [channel_point](../../GLOSSARY.md#channel-point), [SCID](../../GLOSSARY.md#scid), capacity, local/remote balance, commit fee, total_sats_sent/received, num_updates, alias, flags | HIGH | [aggregate](../../GLOSSARY.md#aggregate-by-default); strip `total_satoshis_*` and `num_updates` (activity history) |
 
 ### 3.4 Payments
 
-| Call | What it returns | Severity | Proxy mitigation |
+| Call | Returns | Sev | Mitigation |
 |---|---|---|---|
-| `payinvoice` | Per-attempt HTLC table: state, attempt_time, resolve_time, receiver_amt, fee, timelock, chan_out, route alias chain; final preimage on success | HIGH | Surface only `{succeeded: bool, paid_amount: banded, fee: banded}`. Hold route, chan_out, preimage inside proxy. |
-| `listpayments` | Full history: amounts, payment hashes, preimages, statuses, timestamps | HIGH | Never dump full history to AI. Proxy answers aggregate queries ("total paid this session: ~1k sats"). |
+| `payinvoice` | per-attempt [HTLC](../../GLOSSARY.md#htlc) table (state, timings, fee, chan_out, route); [preimage](../../GLOSSARY.md#payment-hash-and-preimage) on success | HIGH | surface only `{succeeded, paid_amount: banded, fee: banded}`; [hide](../../GLOSSARY.md#hide-secrets) route / chan_out / preimage |
+| `listpayments` | full history: amounts, payment hashes, preimages, statuses, timestamps | HIGH | never dump; [aggregate](../../GLOSSARY.md#aggregate-by-default) ("total paid this session: ~1k sats") |
 
-### 3.5 On-Chain Operations
+### 3.5 On-chain and channel open / close
 
-| Call | What it returns | Severity | Proxy mitigation |
+| Call | Returns | Sev | Mitigation |
 |---|---|---|---|
-| `sendcoins` | txid; tx itself is a permanent on-chain publication of our UTXOs and change address | HIGH | Validate destination against the recipient address registry before broadcast; coin selection stays inside proxy. |
+| `sendcoins` | txid; publishes our UTXOs + change address on-chain | HIGH | gate destination through the [recipient address registry](../../GLOSSARY.md#recipient-address-registry); coin-select inside the arbiter |
+| `openchannel` | funding txid; channel_point + counterparty pubkey via follow-ups | HIGH | [default --private](../../GLOSSARY.md#default---private-channels); band channel sizes; resolve counterparty via the registry; hold funding txid internally |
+| `closechannel` | closing txid; channel_point identifies the channel | HIGH | channel-to-close is a policy decision, not AI choice; [force-close](../../GLOSSARY.md#cooperative-close-vs-force-close) needs elevated authorization |
 
-Note: the faucet `POST /api/onchain` call exposes our address to the faucet operator and
-links it to our GitHub identity. That is a world-facing leak (faucet as adversary), not
-an AI-facing one. See `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.6.
+World-facing carve-outs (handled in the archived world-facing doc): the faucet `POST /api/onchain` binds our address to our GitHub identity; `openchannel`'s gossip publication of pubkey-pair / capacity / SCID. The AI-facing concern is only what each response reveals.
 
-### 3.6 Channel Open / Close
+### 3.6 ldk-node extra surface (second backend)
 
-| Call | What it returns | Severity | Proxy mitigation |
-|---|---|---|---|
-| `openchannel` | Funding txid returned to AI; channel_point and counterparty pubkey available via follow-up calls | HIGH | Policy-driven: default `--private`; band channel sizes (10k/50k/200k tiers); resolve counterparty through the recipient address registry (operator-approved set). Proxy holds funding txid internally; surfaces only success/fail status. |
-| `closechannel` | Closing txid returned to AI; channel_point identifies which channel was closed | HIGH | Channel-to-close = policy decision, not AI choice. Force-close requires explicit elevated authorization (irreversible signal of distrust). |
+The [ldk-node](../../GLOSSARY.md#ldk-node) API (v0.7.0) mirrors LND, with four additions to block or gate: `export_pathfinding_scores()` reveals which paths were used (strongly fingerprintable, no LND equivalent - block); `sign_message(bytes)` is a challenge-response deanon (operator approval only); [bolt12](../../GLOSSARY.md#bolt12) offers are linkable across payers (withhold the offer string); the event stream (`next_event`) carries amount + payment_hash and counterparty + channel_id, so filter at event level, not just API level.
 
-Note: the gossip consequence of `openchannel` (pubkey-pair + capacity + SCID broadcast to the
-LN graph) is a world-facing leak, not an AI-facing one. The AI-facing concern is the
-channel_point, funding txid, and counterparty pubkey the AI can learn via the API response.
-See `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.4 for gossip details.
+## 4. Timing as a leak channel
 
-### 3.7 ldk-node additional surface (second-backend perspective)
+These surface to the AI as variation in gateway response timing. The [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) timing layer closes them inside the trust boundary (see §5); the measured values below are what an unmitigated proxy would expose.
 
-The ldk-node Python API (v0.7.0) broadly mirrors LND's surface. A few items add nuance:
+| # | Channel | What it leaks / how the AI sees it |
+|---|---------|-------------------------------------|
+| 4.1 | Payment-path latency | LN round-trip time scales ~linearly with hop count, so correlating "invoice at T0, settled at T1" estimates graph distance to the destination. Baseline: **0.22 s** for a 1-hop direct payment (Mutinynet clearnet, Voltage); a 3-hop mainnet-Tor path might be 2-5 s. Many test payments let the AI map who is peered with whom. |
+| 4.2 | Polling cadence | Fixed-schedule polling of `walletbalance` / `listchannels` / `pendingchannels` publishes the schedule; a 30 s heartbeat fingerprints software + version, and zero jitter marks automation vs. human. |
+| 4.3 | Time-of-day | Operations tracking business hours leak the operator's timezone; 24/7 vs. 09:00-18:00 vs. an exact 02:00 UTC batch are each distinct fingerprints. |
+| 4.4 | Inter-event timing | Request-to-broadcast gap: sub-second = bot, 30 s+ with read/click variance = human. The proxy can run the channel in reverse to spoof human-like timing. |
+| 4.5 | Proxy-introduced latency | Any mitigation (rate-limit, batch, jitter) is itself visible: real local LND latency was ~50-100 ms, so a systematic +300 ms is conspicuous. |
+| 4.6 | Channel open/close vs. payments | A [JIT-liquidity](../../GLOSSARY.md#jit-liquidity) pattern - a channel absent from the previous `listchannels` and present just before `payinvoice` - is visible from the API-state sequence. |
+| 4.7 | Payment retry timing | A failed `payinvoice` then a retweaked retry leaks route discovery; the retry gap reveals fixed backoff (bot) vs. human input, and decreasing-timeout retries expose liquidity constraints. |
 
-- `export_pathfinding_scores()` - reveals which channels/paths have been successfully or
-  unsuccessfully used. Strongly fingerprintable; no LND equivalent exposes this as a
-  discrete call. Should be blocked at proxy.
-- `sign_message(bytes)` - proves control of node_id pubkey to anyone with the result.
-  Classic "prove who you are" vector; gate with explicit operator approval only.
-- `bolt12_payment()` offers - long-lived offer identifiers share the same pubkey as the
-  node; repeated use of the same offer is linkable across payers. The AI learning the
-  offer identifier can cross-reference it against on-chain data if it also knows the
-  node pubkey; therefore withhold the offer string at the proxy layer.
-- Event stream (`next_event` / `wait_next_event`) - each event carries full details
-  (`PAYMENT_RECEIVED` includes amount + payment_hash; `CHANNEL_READY` carries
-  counterparty + channel id). Proxy must filter at event level, not just API level.
+Routing-node timing (onion latency at intermediate hops) is world-facing (archived doc).
 
----
+## 5. Mitigations
 
-## 4. Timing as a Leak Channel
+Every per-call mitigation in §3 is one of the standard arbiter mechanisms, defined with its residual-leak caveat in the [glossary Mitigations section](../../GLOSSARY.md#mitigations): [pseudonymize](../../GLOSSARY.md#pseudonymize-identifier-pseudonymization), [banding](../../GLOSSARY.md#banding-numeric-value-banding), [scale cloaking](../../GLOSSARY.md#scale-cloaking), the [recipient address registry](../../GLOSSARY.md#recipient-address-registry), [aggregate-by-default](../../GLOSSARY.md#aggregate-by-default), [hide secrets](../../GLOSSARY.md#hide-secrets), [default --private channels](../../GLOSSARY.md#default---private-channels), and the [audit log](../../GLOSSARY.md#audit-log).
 
-Timing attacks are largely absent from the existing per-call notes. This section treats
-them as a first-class leak channel.
+One reconciled choice worth stating inline: **balance reads (`walletbalance`, `channelbalance`) use scale cloaking, not banding.** The gateway routes them through `scale.present()` rather than layering banding on an already order-of-magnitude-compressed value - the two together would muddy the math without adding privacy (see §6).
 
-### 4.1 Latency fingerprinting of payment paths
+The §4 timing channels are **not** addressed by per-response padding. Earlier drafts listed constant-time padding, jittered polling, and batched broadcast as separate proxy mitigations; the current design subsumes all three into the [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) layer (see [latency fingerprinting](../../GLOSSARY.md#latency-fingerprinting), [polling cadence](../../GLOSSARY.md#polling-cadence)). Tor, multi-peer broadcast, and self-hosted esplora are world-facing.
 
-LN payment round-trip time scales roughly linearly with hop count. Each additional hop
-adds propagation delay plus HTLC processing latency at intermediate nodes. An observer
-who can correlate "invoice presented at time T₀, payment settled at time T₁" can
-estimate the payer's graph distance from the destination.
+## 6. Open questions
 
-Measured in this session: **0.22 s** for a 1-hop direct payment (LND node → faucet node,
-Mutinynet clearnet, Voltage-hosted). This is the baseline. A 3-hop payment on mainnet
-Tor might be 2-5 s; the gap is attributable to hop count + Tor latency. An AI that can
-issue many test payments and observe their latencies can build a partial map of who is
-directly peered with whom.
+1. **Hop-count latency through the proxy.** Run `payinvoice` over known 1/2/3-hop Mutinynet routes; confirm whether the 0.22 s baseline is visible before the timing layer absorbs it.
+2. **`listpayments` vs. event stream.** Quantify the privacy cost of a full-history call versus the forward-only `next_event` window (which never exposes settled-payment preimages).
+3. **Private-channel close behavior.** When a `--private` channel closes, can the AI infer the final balance split from the pending-channel-disappears / balance-rises sequence alone, without the closing txid?
+4. **Binary-search balance probing.** Test [scale cloaking](../../GLOSSARY.md#scale-cloaking) and banding against a sequence of "can fund X?" capability queries; design the rate-limit + noise policy that makes it infeasible per session.
+5. **`export_pathfinding_scores` fingerprint.** Measure how distinguishable two nodes' score exports are after an identical payment sequence.
 
-### 4.2 Polling cadence as side-channel
+## 7. Implementation learnings
 
-Tools that poll `walletbalance`, `listchannels`, or `pendingchannels` on a fixed schedule
-publish the schedule itself to anyone watching the LND host's network or process
-activity. If the poll interval is 30 s, that 30 s heartbeat is a fingerprint of what is
-running on top of LND. Two nodes with identical 30 s polling intervals are likely running
-the same software version. A jitter-free schedule also reveals whether the caller is
-human (irregular) or automated (metronomic).
-
-### 4.3 Time-of-day patterns
-
-Sequences of operations correlated to business hours leak the operator's timezone and
-daily routine. An AI-driven flow that runs continuously 24/7 is a different fingerprint
-from a human-driven flow that operates 09:00-18:00. Conversely, an AI batch job that
-runs at exactly 02:00 UTC is trivially identifiable as scheduled automation.
-
-### 4.4 Inter-event timing: automation vs. human
-
-The gap between a request arriving at the proxy and the resulting transaction broadcast
-is a strong automation signal visible to the AI. Sub-second gap = bot. A 30 s+ gap with
-variance consistent with reading + clicking = human. The AI can observe this signal in
-the response latency it receives from the proxy and can use it to fingerprint the
-operator's workflow. Conversely, the proxy can use this channel to spoof human-like
-timing.
-
-### 4.5 Proxy-introduced latency as its own signal
-
-Any mitigation the proxy applies - rate-limiting, batching, response jitter - is itself
-observable by the AI through the latency of responses. A proxy that always adds 200-500 ms
-of artificial latency has a distinct signature: real LND latency at this setup was
-~50-100 ms for local calls, so a systematic 300 ms extra is conspicuous. Variable-jitter
-proxies may signal "AI automation present" if the variance distribution differs from
-organic human usage - leaking the proxy's presence to a sophisticated AI.
-
-### 4.6 Channel open/close timing relative to payments
-
-Opening a channel immediately before a payment is a "just-in-time liquidity" fingerprint
-that the AI can observe via the sequence of API calls it makes and their success/failure
-states. A channel that did not exist in the previous `listchannels` result and now
-exists just before a `payinvoice` call is visible to the AI. The AI cannot observe
-on-chain block timing directly (unless the proxy surfaces block heights), but it can
-observe the sequence of API states.
-
-### 4.7 Payment retry timing
-
-A failed payment followed by a retry with slightly different parameters leaks the route
-discovery process to the AI via the sequence of `payinvoice` call results. The gap
-between first attempt and retry reveals whether the proxy is using a fixed backoff (bot)
-or waiting for human input. Multiple retries with decreasing timeouts reveal that
-alternative routes are being explored - the AI can infer liquidity constraints from
-the pattern of failures and successes.
-
-Note: timing as observed by routing nodes (onion latency at intermediate hops) is a
-world-facing concern; see `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §2.6.
-
----
-
-## 5. Mitigation Menu
-
-Each mitigation is listed with its target threat and a note on its own residual leak.
-
-| Mitigation | Targets | Own leak / caveat |
-|---|---|---|
-| **Identifier tokenization** - addresses, pubkeys, channel_ids, payment_hashes replaced with opaque proxy-scoped tokens | AI exfiltration, prompt injection probing node identity | Token vocabulary size can itself be a leak (number of unique tokens ≈ number of channels/addresses the operator has). |
-| **Numeric value banding** - fees and per-call amounts surfaced as buckets (e.g., <10k / 10k-100k / 100k-1M / >1M sats) | Precision leakage on fields that are not cloak-eligible (e.g., per-call fee amounts on send paths) | Band boundaries are themselves a policy fingerprint; an attacker who can probe "can fund X?" across many X values can binary-search the exact balance. For wallet / channel balance reads the stronger **Scale cloaking** mitigation below is used instead - layering both would muddy the math without adding privacy. |
-| **Scale cloaking** - wallet's order of magnitude (not just the precise figure) is hidden by projecting the real total through a per-tier scale into a fixed presentation window (~0-100k sats). Tier shifts are deferred by a multi-day randomized delay so the petitioner-visible drift is decoupled from the moment of the underlying send / receive. Applied to `walletbalance` and `channelbalance` reads in the gateway. | Order-of-magnitude leakage that survives banding (e.g., a balance that grows from "100k band" to "10M band" leaks that the wallet is now an order of magnitude larger) | A petitioner that polls fast enough to observe the *exact* moment of a tier shift can flag it as suspicious if the magnitude is implausibly large; mitigation lives in within-tier scale randomization plus the randomized delay. See GLOSSARY 'Scale cloaking' for the full caveat list. |
-| **Recipient address registry as destination gate** - every `connect`, `sendcoins`, `openchannel`, `payinvoice` resolves its destination through the registry's operator-curated set; misses refuse uniformly | Prompt-injection-induced fund movement; generic TCP-connect abuse | Probing-infeasibility argument lives in the registry entry (GLOSSARY 'Recipient address registry'). The static-set staleness concern (a static set of destinations could itself be a fingerprint) is a world-facing chain-analysis observation, not an AI-facing one - it does not reach the AI through this proxy. |
-| **Aggregate-by-default** - list-style calls return counts/summaries; per-item detail requires per-call justification logged | History dump via `listpayments`, `listchannels`, `listpeers` | Counts themselves can leak: "37 payments this session" is more information than "some payments." |
-| **Withhold proofs** - preimages, signatures, macaroons stay inside proxy and are never returned to AI | Proof-of-payment exfiltration; macaroon reuse for unauthorized calls | Proxy becomes a single point of failure for proof custody. |
-| **Default `--private` channels** - unless announcement is explicitly required by use case | AI learning channel_point + counterparty pubkey via `openchannel` / `listchannels` responses; also prevents gossip layer publication (world-facing benefit, see world-facing doc) | Private channels still appear on-chain; channel funding tx is public. HTLC amounts on private channels are still visible to routing peers on those channels. |
-| **Constant-time response padding** - proxy returns response after a fixed wall-clock delay (e.g., always 500 ms) regardless of actual LND completion time | Latency fingerprinting of hop count (§4.1); automation vs. human timing (§4.4) | The constant itself is a fingerprint: an observer who measures exactly 500 ms responses every time knows this is padded, and knows the padding value. |
-| **Jittered polling** - proxy queries LND on a randomized interval (base ± uniform or Gaussian jitter) instead of a fixed schedule | Polling cadence side-channel visible to AI (§4.2) | Jitter distribution is itself fingerprintable if the same PRNG seed or the same distribution parameters are always used. |
-| **Batch tx broadcasts to fixed time windows** - on-chain transactions broadcast only at the next fixed slot (e.g., once per 10-minute window aligned to expected block time) | Inter-event automation fingerprint visible to AI (§4.4); JIT liquidity fingerprint (§4.6) | Fixed windows are themselves a fingerprint; if only one operator uses this proxy, the window alignment is identifying. |
-| **Audit log of every AI request + proxy decision** | Forensics for prompt injection and unauthorized exfiltration attempts | Audit log itself is a high-value target; must be stored outside the AI's read access. |
-
-Note: Tor routing, multi-peer broadcast, and self-hosted esplora are world-facing
-infrastructure choices; they do not change what the AI can observe through the proxy.
-Those mitigations belong in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §5.
-
----
-
-## 6. Open Questions / Things to Test Next
-
-1. **Hop-count latency visible to AI** - run `payinvoice` across a set of known 1-hop,
-   2-hop, and 3-hop routes on Mutinynet. Measure what latency the AI observes (proxy
-   response time) at each depth. Determine whether the 0.22 s 1-hop baseline is visible
-   through the proxy before padding, and whether constant-time padding successfully flattens
-   the distribution.
-
-2. **`listpayments` history dump vs. streaming events** - quantify the incremental
-   privacy cost of allowing `listpayments` (full history in one call) versus only allowing
-   the event stream (`next_event` in ldk-node). The event stream limits the AI to a
-   forward-only sliding window; `listpayments` gives a complete retrospective view
-   including preimages for settled payments.
-
-3. **Private channel AI-visible behavior at close** - when a `--private` channel closes,
-   verify what the AI can observe through the proxy: does the closing sequence (pending
-   channel disappears, wallet balance increases) allow the AI to infer the final balance
-   split, even without the AI ever seeing the closing txid?
-
-4. **Binary-search balance probing** - test whether the banded-value mitigation is
-   actually robust against an AI issuing a sequence of capability queries
-   ("can fund 75k: yes/no?", "can fund 80k: yes/no?") to resolve the exact balance.
-   Design a rate-limit + noise policy that makes this infeasible within a session.
-
-5. **`export_pathfinding_scores` fingerprint** - measure how distinguishable two nodes'
-   pathfinding score exports are after an identical payment sequence. If scores converge
-   quickly, the export is a reliable fingerprint of payment history even without
-   payment-hash data - and is therefore a high-value thing the AI could exfiltrate.
-
-6. **Constant-time padding detectability by AI** - run the proxy with 500 ms padding and
-   measure whether an AI issuing many queries can distinguish the padded distribution from
-   a natural one via standard statistical tests (KS test or similar). Determine the minimum
-   jitter envelope needed to defeat the test at p < 0.05.
-
----
-
-## 7. See Also
-
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
-  peers, LN gossip, block explorers, hosting providers). This is the sibling doc for
-  concerns that are out of scope here.
-- `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - bitcoind AI-facing privacy,
-  same proxy model applied to the bitcoind RPC surface. Read together with this doc
-  when designing the proxy policy layer.
-
----
-
-## 8. Implementation learnings
-
-- 2026-05-24: reconciled doc against `arbiter/src/lnd.py` and cloak/banding decisions
-  in `arbiter/src/gateway.py`. Walletbalance / channelbalance mitigation cells in
-  §3.2 swapped from "banded values" to scale cloaking; new "Scale cloaking" row added
-  to §5 alongside the narrowed "Numeric value banding" row, reflecting the gateway's
-  deliberate choice (gateway.py `_dispatch`) to route balance reads through
-  `scale.present()` rather than layer banding on top of an already-compressed value.
-  Per-call mitigation cells for registry-gated ops (`sendcoins`, `openchannel`,
-  `payinvoice`) verified consistent with a12b1c8's "registry IS the destination
-  gate" framing - no edits required there.
+- **2026-05-24:** reconciled against `arbiter/src/lnd.py` and the cloak/banding decisions in `arbiter/src/gateway.py`. The §3.2 `walletbalance` / `channelbalance` cells and the §5 scale-cloaking note reflect the gateway's deliberate choice (`_dispatch`) to route balance reads through `scale.present()` rather than layering banding on an already-compressed value. Registry-gated ops (`sendcoins`, `openchannel`, `payinvoice`) verified consistent with the "registry IS the destination gate" framing - no edits needed there.
