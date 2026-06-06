@@ -1,79 +1,53 @@
 # Arb-auditability via continuous git snapshot
 
 **Date:** 2026-05-24
-**Context:** A second audit primitive on the arbiter, complementing the in-process [audit log](../../GLOSSARY.md#audit-log). This one captures *what was deployed and configured* over time, not *what was requested at runtime*.
+**Context:** A second audit primitive on the arbiter, complementing the runtime [audit log](../../GLOSSARY.md#audit-log): it captures *what was deployed and configured* over time, not *what was requested at runtime*.
 **Related:**
-- `../../GLOSSARY.md#audit-log` - the existing runtime audit log (per-request decisions, append-only).
-- `05--2026-05-05-0948-architecture-overview.md#21-arbiter-implementation-discipline` - the manual-auditability discipline this doc operationalizes.
-- `05--2026-05-05-0948-architecture-overview.md#45-audit-log` - runtime audit log section.
+- `05--2026-05-05-0948-architecture-overview.md#21-arbiter-implementation-discipline` - the manual-auditability discipline this operationalizes.
+- `05--2026-05-05-0948-architecture-overview.md#45-audit-log` - the runtime audit log (companion primitive).
 
 ---
 
 ## 1. Purpose and scope
 
-The [arbiter](../../GLOSSARY.md#arbiter) is the trust anchor. Per §2.1 of the architecture overview, it must be small enough that a non-AI human can read every line and convince themselves the gateway is the only path through. That discipline only holds if *what is actually running* matches *what was reviewed*, and stays matched over time.
+The [arbiter](../../GLOSSARY.md#arbiter) is the trust anchor: per architecture overview §2.1 it must be small enough that a non-AI human can read every line and confirm the gateway is the only path through. That holds only if *what is running* matches *what was reviewed*, and stays matched. The runtime audit log covers behavior but not provenance - it does not show that today's code on disk equals yesterday's, or that a config file was edited by the operator rather than by a process that should not have write access.
 
-Today the runtime audit log records every request and every decision the running gateway made. That covers behavior but not provenance: it does not show that the code on disk yesterday is the code on disk today, nor that a config file the operator edited at noon was edited by the operator (not by a process that should not have write access).
+This doc adds a **continuous git snapshot**: a cron job commits the arbiter's tree to a local git repo every minute, so for any point in time the history answers what code was deployed, what the config was, and what changed since the last snapshot.
 
-This doc defines a second audit primitive: a **continuous git snapshot** of the arbiter's deployed code and configuration. A cron-driven job commits the arbiter's tree to a local git repository every minute. The resulting history answers, for any point in time:
-
-- What code was deployed?
-- What was the config?
-- Did anything change since the last snapshot? If so, what diff?
-
-Out of scope: the runtime audit log (already covered by §4.5 of the architecture overview); intrusion detection alarms or alerting (this primitive produces the evidence, not the notification path); shipping snapshots off-host (open question, §6).
-
----
+Out of scope: the runtime audit log (overview §4.5); alerting (this primitive produces evidence, not notifications); off-host shipping (§6).
 
 ## 2. The two audit primitives
 
-The arbiter now has two complementary audit primitives:
+| Primitive | Captures | Granularity | Lifecycle |
+|-----------|----------|-------------|-----------|
+| Runtime audit log (overview §4.5) | every request and gateway decision | per-request | append-only |
+| Git snapshot (this doc) | deployed code + config on disk | per-minute | periodic commits |
 
-| Primitive | What it captures | Granularity | Lifecycle |
-|-----------|------------------|-------------|-----------|
-| Runtime audit log (§4.5) | Every request and every gateway decision | Per-request | Append-only, never edited |
-| Git snapshot (this doc) | The arbiter's deployed code + config on disk | Per-minute | Periodic commits to a local repo |
-
-Neither subsumes the other. A request that the gateway refuses appears in the runtime log; a config edit that *would have* changed how the gateway refuses appears in the snapshot history. An attacker who edits gateway source to weaken a check leaves a fingerprint in the snapshot history; the runtime log alone would only show that future requests started being decided differently.
-
----
+Neither subsumes the other: a refused request appears in the runtime log; a config edit that *would have* changed how the gateway refuses appears in the snapshot history. An attacker who edits gateway source to weaken a check leaves a fingerprint in the snapshot; the runtime log alone would only show that decisions later changed.
 
 ## 3. Required arbiter layout
 
-The continuous snapshot only works if the arbiter's directory structure separates the things that *should* be in the snapshot from the things that should not. Without that separation the snapshot is noise: a runtime SQLite WAL ticking over every few seconds would produce a meaningless commit every minute and bury the signal under thrash.
-
-The arbiter tree splits into two kinds of content - tracked subtrees that participate in the snapshot, and gitignored subtrees that do not:
+The snapshot only works if the tree separates what *should* be tracked from what should not - otherwise a runtime SQLite WAL ticking over buries the signal under a commit every minute. The split:
 
 ```
 arbiter/
   src/          # Python source - changes only on a deploy
   config/       # operator-editable config (YAML) - changes on edits
   bin/          # built binaries / wrappers - changes only on a deploy
-  ops/          # cron loop + operator-facing audit scripts (§4, §8) - changes only on a deploy
-  state/        # runtime SQLite, WAL files, audit log, scratch - GITIGNORED
+  ops/          # cron loop + operator audit scripts (§4, §8) - changes on a deploy
+  state/        # runtime SQLite, WAL, audit log, scratch - GITIGNORED
   bitcoin/      # bitcoind datadir - GITIGNORED
   lnd/          # LND datadir - GITIGNORED
   data/         # any other transient runtime - GITIGNORED
 ```
 
-The first four (`src/`, `config/`, `bin/`, `ops/`) are part of the snapshot; the rest are excluded by `.gitignore` and never appear in commit diffs. `ops/` is tracked because the cron loop body, deployment units, and audit scripts are themselves part of the deployed surface a reviewer audits.
+The first four are snapshotted; the rest are gitignored. `ops/` is tracked because the cron body, deploy units, and audit scripts are themselves part of the deployed surface a reviewer audits. `arbiter/.gitignore` also catches file-pattern noise (`__pycache__/`, `*.pyc`, `*.db`, `*.db-wal`/`-shm`, `.DS_Store`) as belt-and-suspenders, so a misrouted file stays out of the snapshot even if it lands in a tracked subtree.
 
-Alongside the named subtrees, `arbiter/.gitignore` also catches file-pattern noise that would otherwise leak into a tracked subtree: `__pycache__/`, `*.pyc`, `*.pyo` (Python bytecode), `*.db`, `*.db-wal`, `*.db-shm` (any stray SQLite anywhere in the tree), and `.DS_Store`. These are belt-and-suspenders on top of the subtree split: even if a module misroutes a file into `src/`, the file-pattern rule keeps it out of the snapshot.
-
-The arbiter implementation invariant this requires: **no module writes transient files outside the gitignored subtrees**. A module that drops a scratch file into `src/` or `config/` would generate a snapshot commit every minute it exists, polluting the history. Concretely:
-
-- SQLite databases and their `-wal` / `-shm` sidecars live under `state/`.
-- The runtime audit log file lives under `state/` (the file is append-only but it changes constantly, so it does not belong in the snapshot history; its own integrity is covered by the §4.5 mechanism).
-- Per-process scratch and lock files live under `state/` or `data/`.
-- Build artifacts, if any, land under `bin/` only after the build completes (no intermediate `*.o` / `*.pyc` chatter in `src/`).
-
-The runner-style temp directories already used elsewhere in the codebase (e.g., `tempfile.mkdtemp` in the exit-loop runner) are unaffected: those land in the system temp directory, well outside the arbiter tree.
-
----
+This requires one implementation invariant: **no module writes transient files outside the gitignored subtrees** - SQLite and its sidecars, the runtime audit-log file, and scratch / lock files all live under `state/`; build artifacts land in `bin/` only when complete. (System-temp dirs like the exit-loop runner's `tempfile.mkdtemp` are outside the tree and unaffected.)
 
 ## 4. The snapshot cron
 
-The cron job is intentionally trivial. The whole design rests on the fact that there is *nothing clever* in the snapshot loop - a non-AI reviewer can read it in five seconds.
+Intentionally trivial - the design rests on a non-AI reviewer reading the loop in five seconds:
 
 ```sh
 cd /path/to/arbiter
@@ -81,65 +55,36 @@ git add -A
 git diff --cached --quiet || git commit -q -m "snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-- `git add -A` stages every change in the tree (respecting `.gitignore`).
-- `git diff --cached --quiet` returns non-zero when there is something staged. The `||` clause therefore commits only when there is real change; quiescent minutes produce no commit.
-- The commit message is a UTC timestamp so `git log` reads chronologically by message even without rewriting committer dates.
-
-Cadence: every minute. Lower than that and a fast-fingered operator edit can be missed by an outage between save and snapshot; higher than that and the history grows without telling us anything new.
-
-Cadence is the only tunable; everything else (paths, commit message, ignore set) is fixed.
-
-The cron substrate (launchd on macOS, systemd timer on Linux, plain crontab) is a deployment detail, not a design choice. The job is small enough that any of them is fine. Reference units for both supported substrates ship under `arbiter/ops/` alongside the loop body (`snapshot.sh`, `snapshot.launchd.plist`, `snapshot.service`, `snapshot.timer`) plus an operator-facing install / bootstrap README; the loop body itself derives `ARBITER_ROOT` from its own path so the operator does not edit `snapshot.sh` to deploy it.
-
----
+It commits only when something staged actually changed (quiescent minutes produce nothing), and the UTC-timestamp message makes `git log` read chronologically without rewriting committer dates. Cadence is every minute and is the only tunable: lower risks missing an edit to an outage between save and snapshot; higher grows history without saying anything new. Reference units for both substrates ship under `arbiter/ops/` (`snapshot.sh`, `snapshot.launchd.plist`, `snapshot.service`, `snapshot.timer`, plus an install README); `snapshot.sh` derives `ARBITER_ROOT` from its own path, so the operator never edits it to deploy.
 
 ## 5. What the operator gets
 
-The operator works at the directly-attached arbiter console (the same KVM used for [HITL](../../GLOSSARY.md#human-in-the-loop-approval) and the [recipient address registry](../../GLOSSARY.md#recipient-address-registry)). From that console, the snapshot history is queried with the standard git porcelain:
-
-- `git log --since=1.day` - everything that changed in the last day.
-- `git log -- config/` - only operator-facing config changes (answers "did anyone edit the config?").
-- `git log -- src/ bin/` - only deploys (answers "did a release land?").
-- `git diff HEAD~10 HEAD -- src/` - what changed in the source across the last ten snapshots.
-- `git blame config/destinations.yaml` - per-line provenance of a config file.
-- `git log --grep snapshot --since=2026-05-20` filtered by author / message for forensics.
-
-The split between `src/` + `bin/` (deploys) and `config/` (operator edits) is the load-bearing distinction. A typical week should produce many `config/` commits (operator activity) and few `src/` / `bin/` commits (deploys are rare events). A burst of `src/` commits outside a deploy window is by itself a flag.
-
----
+From the arbiter console (the same KVM used for [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and the [recipient address registry](../../GLOSSARY.md#recipient-address-registry)), standard git porcelain queries the history: `git log --since=1.day`, `git log -- config/` ("did anyone edit config?"), `git log -- src/ bin/` ("did a release land?"), `git blame config/destinations.yaml` for per-line provenance. The load-bearing distinction is `src/` + `bin/` (deploys, rare) vs. `config/` (operator edits, frequent); a burst of `src/` commits outside a deploy window is itself a flag. §8 wraps these in plain-English scripts for operators who do not know git.
 
 ## 6. Open design questions
 
-- **Repo location.** Same volume as the arbiter or a separate volume? Same-volume is simpler; separate-volume survives a disk failure or rootkit that targets the arbiter tree. Recommendation: separate, with a write-only path from the arbiter to the snapshot volume.
-- **Signing.** Should snapshot commits be signed with an operator-held GPG key? Signing makes tampering with history detectable; it also introduces key management on the arbiter. Defer until the deployment story has a clear answer on where the signing key lives.
-- **Off-host backup.** Pushing snapshots to a remote git host gives off-machine durability but introduces an egress network path on the arbiter (a privacy concern - currently the arbiter has no outbound network beyond bitcoind/LND). If we want it, the path is via the same out-of-band channel as HITL: the operator manually mirrors the repo from the console, not the arbiter itself.
-- **Pruning.** The arbiter is expected to run for years; the snapshot repo grows. Periodic `git gc --aggressive` is safe; full pruning of old commits would defeat the audit purpose. Likely answer: keep all history forever, accept the linear-in-time disk cost.
-- **Interaction with the runtime audit log.** The runtime log lives under `state/` (gitignored). It has its own integrity story (§4.5). Should the snapshot ever capture audit-log *metadata* (e.g., the file's size or hash at snapshot time) for cross-checking? Probably not - it would couple two primitives that are clearer when independent.
-
----
+- **Repo location.** Same volume (simpler) vs. separate (survives a disk failure or a rootkit targeting the arbiter tree). Recommendation: separate, with a write-only path from the arbiter.
+- **Signing.** GPG-signed commits make history-tampering detectable but add key management on the arbiter; defer until the deployment decides where the key lives.
+- **Off-host backup.** A remote git push gives durability but adds an arbiter egress path (currently none beyond bitcoind/LND); if wanted, mirror manually from the console rather than from the arbiter.
+- **Pruning.** The repo grows for years. `git gc --aggressive` is safe; dropping old commits defeats the purpose. Likely: keep all history, accept the linear disk cost.
+- **Runtime-log cross-check.** Should a snapshot capture audit-log metadata (size / hash)? Probably not - it couples two primitives that are clearer independent.
 
 ## 7. Acceptance for the implementation
 
-The implementation closed loop (§10 of the architecture overview) does not directly cover this primitive - it is operational, not request-path - but the implementer should land:
-
-1. The arbiter tree restructured so `src/` / `config/` / `bin/` are the only checked-in subtrees; `state/`, `bitcoin/`, `lnd/`, `data/` exist under a tracked `.gitignore`.
-2. Any module currently writing transient files outside `state/` (or equivalent) moved to do so under `state/`. A new exit-loop variant would catch regressions: spin up the arbiter against an empty `arbiter/` tree, run a representative request, then assert `git status --porcelain` shows no untracked files outside the gitignored set.
-3. A sample cron definition for the chosen platform shipped under `arbiter/ops/` (or similar) - reference only, not active until the deployment turns it on.
-4. The architecture overview's §4.5 (runtime audit log) updated to point at this doc as the companion primitive, and the §2.1 implementation discipline updated to require the no-transient-files-in-source invariant.
-
-Tests for the cron itself are deployment-time, not exit-loop-time: confirm the timer fires, confirm a touch-and-wait produces a commit, confirm a quiescent minute produces no commit.
-
----
+Not on the request-path closed loop (overview §10); it is operational. The implementer should land: (1) the arbiter tree restructured so `src/` / `config/` / `bin/` (and `ops/`) are the only tracked subtrees with `state/` / `bitcoin/` / `lnd/` / `data/` gitignored; (2) any module writing transient files outside `state/` moved under it, with a new exit-loop variant asserting `git status --porcelain` is clean outside the gitignored set after a representative request; (3) sample cron units under `arbiter/ops/` (reference only); (4) overview §4.5 pointing here as the companion primitive and §2.1 requiring the no-transient-files-in-source invariant. Cron tests are deployment-time (timer fires; touch-and-wait commits; a quiescent minute does not). Implementation status: §10.
 
 ## 8. Manual audit scripts
 
-`git log --since=1.day` is fine for someone who knows git, but the operator at the arbiter console may not. The auditability primitive is only as good as the operator's willingness to actually look, and that bar is set by the friction of looking. Ship a handful of single-purpose scripts that translate the git history into plain English. One command, one question answered, no flags to remember.
+The primitive is only as good as the operator's willingness to look, and that bar is set by friction. Ship single-purpose scripts under `arbiter/ops/audit/` - thin `git log` / `git show` wrappers a non-technical operator runs by name and reads unaided. One command, one question, no flags:
 
-The scripts live under `arbiter/ops/audit/` and are designed so a non-technical operator (the §2.1 "non-AI human" the whole discipline is for) can run them by name and read the output unaided. Each is a thin wrapper around `git log` / `git show` with output reshaped for readability.
+- **`arb-today`** - what changed today (the daily glance).
+- **`arb-since <when>`** - changes since a date/time (accepts `git log --since` forms: "2 days ago", "last sunday").
+- **`arb-config-only`** / **`arb-deploys-only`** - config edits only / code + binary deploys only.
+- **`arb-show <when>`** - the diff at the snapshot closest to a time.
+- **`arb-status`** - is the snapshot system healthy? Cron state (RUNNING / WARN), pending changes, last snapshot, repo size.
+- **`arb-anomalies`** - cheap heuristic checks flagging anything off; read-only, suggests follow-up `arb-show` commands.
 
-### `arb-today`
-
-What changed today? The daily-glance script.
+Two outputs show the plain-English style:
 
 ```
 $ arb-today
@@ -151,92 +96,11 @@ Today (2026-05-24):
 3 changes today.
 ```
 
-### `arb-since <when>`
-
-What changed since a given date or time?
-
-```
-$ arb-since 2026-05-20
-Since 2026-05-20 (4 days):
-  2026-05-24 14:32  config edit    config/destinations.yaml
-  2026-05-24 09:15  code deploy    src/gateway.py + 3 other source files
-  2026-05-23 11:08  config edit    config/policy.yaml
-  2026-05-22 08:00  code deploy    src/scale.py
-
-4 changes in this window.
-```
-
-Accepts the same loose date forms `git log --since` accepts ("2 days ago", "last sunday", "2026-05-20", etc.), so the operator does not have to learn a new date language.
-
-### `arb-config-only`
-
-Only operator-driven config edits. Hides every code deploy. Use this to answer "who has been editing my YAML?"
-
-```
-$ arb-config-only
-Config edits (most recent first):
-  2026-05-24 14:32  config/destinations.yaml  (+1 line)
-  2026-05-23 11:08  config/policy.yaml        (-2 lines, +3 lines)
-  2026-05-21 16:44  config/destinations.yaml  (+2 lines)
-```
-
-### `arb-deploys-only`
-
-Only code / binary deploys. Hides config edits. Use this to answer "when did the code actually change?"
-
-```
-$ arb-deploys-only
-Code deploys (most recent first):
-  2026-05-24 09:15  10 source files changed
-  2026-05-22 08:00  1 source file changed
-  2026-05-18 14:00  3 source files changed
-```
-
-### `arb-show <when>`
-
-What was the change at this moment? Accepts the same date forms as `arb-since`; resolves to the snapshot commit closest to that time and shows the diff in friendly form.
-
-```
-$ arb-show '2026-05-24 14:32'
-Snapshot at 2026-05-24 14:32 (UTC):
-  File:    config/destinations.yaml
-  Change:  +1 line
-
-  + tb1qexampleaddress...   # Coffee shop, added 2026-05-24
-```
-
-### `arb-status`
-
-Is the snapshot system itself healthy? A green-or-red one-shot.
-
-```
-$ arb-status
-Snapshot cron:       RUNNING (last commit 12 seconds ago)
-Pending changes:     NONE
-Last snapshot:       2026-05-24 14:32:00 UTC
-Quiet for:           18 seconds
-Repo size:           4.2 MB, 1287 commits
-Status:              OK
-```
-
-Failure modes show up as concrete states the operator can act on:
-
-```
-Snapshot cron:       NOT FIRING (last commit 47 minutes ago)
-Pending changes:     3 files
-Status:              WARN: cron may have stopped. Check the timer.
-```
-
-### `arb-anomalies`
-
-Run a fixed set of cheap heuristic checks across the recent history and flag anything that does not fit normal operation. Read-only; suggests follow-up commands but does not act on anything.
-
 ```
 $ arb-anomalies
 Checking for anomalies in the last 7 days...
 
-  OK    No commits at unusual hours (00:00-06:00 local).
-  OK    No config changes when the console was likely unattended.
+  OK    No commits at unusual hours (00:00-06:00 UTC).
   OK    Cron has fired every minute (no gaps over 2 minutes).
   FLAG  bin/arb hash changed at 2026-05-23 09:08 without any src/ change in the same window.
   FLAG  Three commits in the same minute at 2026-05-22 03:14 (UTC night hours).
@@ -246,99 +110,39 @@ Checking for anomalies in the last 7 days...
   arb-show '2026-05-22 03:14'
 ```
 
-The heuristics are intentionally simple and over-flag: the cost of a false positive is the operator running one extra `arb-show`; the cost of a false negative is missing real tampering. Tunable later, but never to suppress signals.
-
----
+The heuristics over-flag by design: a false positive costs one extra `arb-show`; a false negative misses tampering. Tunable, but never to suppress signals.
 
 ## 9. Audit hygiene
 
-The scripts in §8 produce evidence. Detecting anomalies still requires the operator to actually look at the evidence on a regular cadence. The point of this section is to make that cadence concrete enough that an operator with no security background can follow it.
+Evidence is only useful if reviewed on a cadence. The whole routine fits in 1-2 minutes a day plus a few touchpoints, all at the console:
 
-The whole routine should fit in 1-2 minutes a day, plus a few longer touchpoints. The arbiter console (the same KVM used for HITL approvals and the recipient address registry) is the single workplace.
+- **Daily (1 min).** `arb-today`; for each line ask "did I do that, at about that time?"; anything that does not match memory -> `arb-show <time>`.
+- **Weekly (5 min).** `arb-since 'last sunday'` for anything missed; `arb-anomalies`, investigating every FLAG to explanation or escalation; `arb-status` for snapshot-system health.
+- **After a deploy (30 s).** `arb-since <deploy time>`; confirm only `src/` + `bin/` changed - any `config/` change in that window is a flag.
+- **After a config edit (30 s).** `arb-since <edit time>`; confirm only `config/` changed - any `src/` / `bin/` change is a flag.
 
-### Daily (1 minute, every day at the console)
-
-1. Run `arb-today`.
-2. Read each line. For each one ask: *did I do that, and at roughly that time?*
-3. Anything that doesn't match memory: run `arb-show <time>` to see the diff. Either you forgot, or it's a flag.
-
-### Weekly (5 minutes, once a week)
-
-1. Run `arb-since 'last sunday'` (or the equivalent). Skim for anything you missed in the daily reviews.
-2. Run `arb-anomalies`. Investigate every FLAG with `arb-show` until you can explain it or it is escalated.
-3. Run `arb-status`. The repo should be healthy; if WARN, the snapshot system itself is at risk.
-
-### After every deploy (30 seconds, right after pushing new code)
-
-1. Run `arb-since <deploy time>` immediately after.
-2. Confirm the changes are only under `src/` and `bin/`. Any `config/` change in the same window is a flag - the deploy should not be editing operator config.
-
-### After every config edit (30 seconds, right after saving)
-
-1. Run `arb-since <edit time>`.
-2. Confirm the change is only under `config/`. Any `src/` or `bin/` change in the same window is a flag - config edits should never touch code.
-
-### Anomaly signatures - escalate if seen
-
-- **Code changes outside a deploy window.** `src/` or `bin/` commits at a time you weren't deploying. The arbiter's source is not supposed to drift between deploys.
-- **Config changes when the console was unattended.** A `config/` commit at 3am if you were asleep, or while the console was locked.
-- **Binary swap without source.** `bin/arb` hash changed but no `src/` change in the same window - the binary on disk no longer corresponds to the source you can read.
-- **Burst of commits in a single minute.** The cron commits at most once per minute by design. Multiple commits in the same minute means something is writing the tree faster than expected.
-- **Snapshot gap.** Quiet periods over a few minutes when the cron should be firing every minute. Either the cron died, or something killed it.
-- **Untracked files outside the four allowed subtrees.** `arb-status` reports pending changes you can't account for. A module is leaking transient state into a snapshotted path (a code bug at best, an intrusion artifact at worst).
-
-A flag is not by itself an incident; it is a question the operator owes themselves an answer to. The discipline is that every flag gets explained or escalated - never ignored, never deferred.
-
-### Escalation
-
-Spacer does not ship its own incident channel; escalation lands wherever the operator runs their normal security response (mail, phone, in-person to someone they trust). The arbiter console produces evidence in the form of `arb-show` output that pastes cleanly into a message; that is the entire interface between the audit primitive and whatever response process the operator has.
-
----
+**Escalate if seen:** code changes outside a deploy window; config changes while the console was unattended; a `bin/arb` hash change with no matching `src/` change (the binary no longer matches readable source); multiple commits in one minute (something writes faster than the cron); snapshot gaps over a few minutes (cron died); untracked files outside the tracked subtrees (a module leaking state - a bug at best, an intrusion artifact at worst). A flag is a question owed an answer, not an incident: every flag gets explained or escalated, never deferred. Escalation goes wherever the operator runs normal security response; `arb-show` output pastes cleanly into a message.
 
 ## 10. Implementation status
 
-The design above landed in five commits on `webmastersdiy/spacer` main (bead `bl-hu56z9`, merged at `c80ebe7`):
+The design landed in five commits on `webmastersdiy/spacer` main (bead `bl-hu56z9`, through `c80ebe7`), with a later reconciliation pass (`bl-cctvcg`):
 
 | Commit | What landed |
 |--------|-------------|
-| `17d2a5a` | §3 tree split: `src/` + `config/` + `bin/` tracked; `state/` + `data/` + `bitcoin/` + `lnd/` gitignored. Adds `arbiter/.gitignore`, `arbiter/bin/arbiter` launcher, `arbiter/config/README.md`. |
-| `75da243` | §3 invariant: `src/state.py` and `src/audit.py` defaults moved under `arbiter/state/` (was `~/spacer/arbiter/data/`). `STATE_DB_PATH` / `AUDIT_LOG_PATH` env overrides preserved. |
-| `83764cd` | §4 cron: `arbiter/ops/snapshot.sh` + launchd plist + systemd service + systemd timer + `ops/README.md` (install + bootstrap). |
-| `52f148c` | §8 scripts + §9 hygiene: `arbiter/ops/audit/` with seven operator-facing wrappers (`arb-today`, `arb-since`, `arb-config-only`, `arb-deploys-only`, `arb-show`, `arb-status`, `arb-anomalies`) and an `audit/README.md` that points back at §9. |
-| `c80ebe7` | 05-- cross-references: §2.1 third invariant (no transient files outside the gitignored subtrees) and §4.5 paragraph framing the snapshot history as the companion primitive to the runtime audit log. |
+| `17d2a5a` | §3 tree split (`src/`+`config/`+`bin/` tracked; `state/`+`data/`+`bitcoin/`+`lnd/` gitignored) + `arbiter/.gitignore`, launcher, `config/README.md` |
+| `75da243` | §3 invariant: `state.py` / `audit.py` defaults moved under `arbiter/state/` (env overrides preserved) |
+| `83764cd` | §4 cron: `ops/snapshot.sh` + launchd plist + systemd service/timer + `ops/README.md` |
+| `52f148c` | §8/§9: `ops/audit/` with the seven wrappers + `audit/README.md` |
+| `c80ebe7` | 05-- cross-refs: §2.1 third invariant + §4.5 companion-primitive framing |
 
-A subsequent reconciliation pass against this doc (bead `bl-cctvcg`) corrected §3 (now pictures `ops/` as a fourth tracked subtree, mentions the file-pattern gitignores) and §4 (now references the shipped deployment units and the auto-derived `ARBITER_ROOT`).
+The reconciliation pass corrected §3 (added `ops/` as a fourth tracked subtree + the file-pattern gitignores) and §4 (the shipped units + auto-derived `ARBITER_ROOT`). An empty-tree smoke test confirmed `state.db` / `audit.log` / WAL sidecars land under gitignored `arbiter/state/` with `git status` clean outside it (17/17 exit-loop variants pass).
 
-### §7 acceptance: status
+**Deliberate script divergences from the §8/§9 narrative:**
 
-All four items from §7 landed in `bl-hu56z9`. Two practical addenda:
+- **UTC, not local,** for the anomaly night-window (snapshot timestamps are UTC; comparing against local time would create a DST/relocation bug). Tunable via `ARB_NIGHT_START` / `ARB_NIGHT_END`.
+- **"Untracked files outside the tracked subtrees" lives in `arb-status`,** not `arb-anomalies` - it is a current-state check; `arb-anomalies` walks history only.
+- **Two §9 signatures are not heuristics:** "config change while unattended" needs an operator-schedule model the system lacks (substitute: `arb-config-only` + the daily routine); "burst of commits in a minute" is structurally prevented by the once-per-minute cron.
+- **A heuristic was added - mixed `config/` + `src/`/`bin/` change** - flagging any commit that crosses the boundary §3 relies on (follows from §9's post-deploy / post-config routines).
+- **Env knobs:** `ARB_AUDIT_LIMIT` (50), `ARB_ANOMALIES_DAYS` (7), the night-window vars, and `ARBITER_ROOT` for non-canonical install paths.
 
-- **Item 1 (tree restructure)** also added `ops/` as a fourth tracked subtree. §3 originally listed three; the audit scripts (§8) and the cron loop body (§4) are themselves part of the deployed surface, so they share the same tracked / snapshotted treatment as `src/` and `bin/`.
-- **Items 2 acceptance smoke-test**: confirmed an empty arbiter tree + a representative request leaves the resulting `state.db`, `audit.log`, and WAL/SHM sidecars under `arbiter/state/` (gitignored), with `git status --porcelain` clean outside that set. 17/17 exit-loop variants still pass.
-
-§7 promised cron units (item 3) and the §2.1 / §4.5 cross-references (item 4); the same work also delivered the §8 operator scripts and §9 hygiene framing, even though those were not strictly required by §7. The split between "primitive" (§3, §4) and "operator interface" (§8, §9) is real but the implementation cost of shipping them together was small, so they landed in one bead.
-
-### §8 audit scripts: implementation choices
-
-The scripts implement the design with a handful of deliberate divergences from the §8 example output and the §9 anomaly signature list:
-
-- **Anomaly window uses UTC, not local.** §8's `arb-anomalies` example output reads "No commits at unusual hours (00:00-06:00 local)." The implementation uses UTC because the snapshot commit timestamps are themselves UTC (the `snapshot.sh` commit message is `date -u +...`); comparing a UTC commit against a local-time window would create a one-time-zone-offset bug across DST transitions and operator relocations. Operators who want the local-time framing can map the UTC window in their head. Tunable via `ARB_NIGHT_START` / `ARB_NIGHT_END` (hours, UTC).
-- **"Untracked files outside the four allowed subtrees" landed in `arb-status`, not `arb-anomalies`.** §9 lists this as an anomaly signature. It is naturally a current-state check (the next snapshot will absorb whatever is pending) rather than a historical-pattern check, so it surfaces in the green-or-red status script. `arb-anomalies` deliberately walks history only.
-- **Two §9 anomaly signatures are not implemented as heuristics.** "Config changes when the console was likely unattended" requires an operator-schedule model the system does not have; surfacing every config change in `arb-config-only` and letting the operator's daily routine (§9) catch the unattended-window ones is the substitute. "Burst of commits in a single minute" is structurally prevented by the cron design (the loop fires once per minute and short-circuits on no-change), so a burst would imply the cron is being driven manually or something is committing outside the cron - the gap heuristic catches the inverse symptom.
-- **A new heuristic was added: "mixed config + code change."** Flags any commit that touches both `config/` and `src/`/`bin/`. The §9 routine asserts deploys should not edit operator config (and vice versa); a mixed commit means the boundary §3 relies on is leaking. This is not in §9's signature list but follows directly from §9's daily and post-deploy / post-config routines.
-- **Env-var knobs.** `ARB_AUDIT_LIMIT` (default 50) caps `arb-config-only` and `arb-deploys-only` output; `ARB_ANOMALIES_DAYS` (default 7) sets the `arb-anomalies` window; `ARB_NIGHT_START` / `ARB_NIGHT_END` set the night-hours window. `ARBITER_ROOT` lets the scripts run from a non-canonical install path. All defaults match the §8 / §9 narrative; the env vars exist so the scripts are reusable across deployments without forking.
-
-### §9 anomaly signature -> script mapping
-
-For the operator (and for a §2.1 reviewer auditing the audit primitive itself):
-
-| §9 signature | Caught by |
-|--------------|-----------|
-| Code changes outside a deploy window | `arb-deploys-only` (operator compares against their own deploy log) |
-| Config changes when the console was unattended | `arb-config-only` (operator applies their schedule knowledge) |
-| Binary swap without source | `arb-anomalies` heuristic 3 |
-| Burst of commits in a single minute | structurally prevented by cron design; would surface inversely via `arb-anomalies` heuristic 2 (gaps) |
-| Snapshot gap | `arb-anomalies` heuristic 2; `arb-status` for the live-cron variant |
-| Untracked files outside the four allowed subtrees | `arb-status` (current-state check) |
-
-The mixed-config-and-code heuristic added by the implementation maps onto §9's daily / post-deploy / post-config routines: any deploy that also touches `config/` (or any config edit that also touches `src/` / `bin/`) is what those routines tell the operator to flag.
+**§9 signature -> script:** code-outside-deploy -> `arb-deploys-only`; config-while-unattended -> `arb-config-only`; binary-swap-without-source -> `arb-anomalies`; commit-burst -> structurally prevented; snapshot-gap -> `arb-anomalies` / `arb-status`; untracked-files -> `arb-status`.

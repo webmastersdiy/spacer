@@ -1,435 +1,167 @@
 # Privacy and Timing Leaks in the bitcoind RPC Surface (AI-Facing)
 
-**Date:** 2026-05-02
-**Context:** AI ↔ privacy-proxy ↔ bitcoind threat model and mitigation menu. AI-facing only.
+**Date:** 2026-05-02 (reconciled 2026-05-24)
+**Context:** AI-facing leak map for the bitcoind RPC surface - what each `bitcoin-cli` call exposes and which arbiter mitigation covers it. Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-RPC inventory. bitcoind-side counterpart to the LND doc; read together for the gateway policy layer.
 **Related:**
-- `2026-05-02-1601-privacy-and-timing-leaks.md` (LND AI-facing companion - read together)
-- `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` (Mutinynet testbed details)
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` (world-facing privacy - separate concern)
+- `2026-05-02-1601-privacy-and-timing-leaks.md` - LND companion.
+- `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
+- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
 
 ---
 
-## 1. Purpose and Scope
+## 1. Scope
 
-This document defines the **AI-facing** privacy threat model for a proxy that mediates
-between an AI client and a locally-run Bitcoin Core node (v25.99.0 Mutinynet/covtools
-fork, signet). The adversary modeled here is the AI client itself - potentially malicious
-by design, compromised at runtime, or prompt-injected by a fetched URL. The proxy's job
-is to prevent the AI from learning more about the operator's wallet and node than it
-needs to fulfill a given task.
+The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy). The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> [local bitcoind](../../GLOSSARY.md#local-bitcoind) (v25.99.0 covtools fork, pruned signet). The arbiter <-> bitcoind link is on the *trusted* side of the gateway and carries no local anti-timing mitigation by design - [action delay](../../GLOSSARY.md#action-delay), [result delay](../../GLOSSARY.md#result-delay), and the gateway's latency normalization cover it in aggregate from the petitioner side. World-facing threats (P2P peers, the single Mutinynet peer, explorers, hosting) are out of scope - see the archived world-facing doc.
 
-The boundary under analysis is the AI ↔ proxy ↔ bitcoind interface.
+## 2. Threat model
 
-World-facing threats (Bitcoin P2P peers, block explorer operators, the single Mutinynet
-peer at 45.79.52.207, hosting providers) are out of scope here; see
-`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
-
-This document is the bitcoind-side counterpart to the LND AI-facing doc. The two
-documents are meant to be read together when designing the proxy's policy layer.
-
----
-
-## 2. Threat Model
-
-### Adversary capabilities in scope
-
-| Adversary | What they can observe | Key concern |
+| Adversary | Observes | Concern |
 |---|---|---|
-| **The AI client** | Every response the proxy returns; request/response timing; any identifier, amount, or address the proxy surfaces | May be malicious by design, compromised at runtime, or prompt-injected by a fetched URL. Could attempt to exfiltrate wallet data, probe for UTXOs or xpubs, or induce unauthorized fund movement. |
-| **Network observer** (AI ↔ proxy channel) | Traffic metadata (timing, packet sizes, connection frequency) even if payload is TLS-encrypted | Timing analysis, connection-count patterns, size fingerprinting of RPC responses. |
+| **The AI client** | every response; request/response timing; any identifier, amount, or address surfaced | malicious by design, compromised, or prompt-injected; may exfiltrate wallet data, probe for UTXOs or xpubs, or induce fund movement |
+| **Network observer** (AI <-> gateway link) | traffic metadata even under TLS | timing, connection-count, response-size fingerprinting |
 
-World-facing threats (Bitcoin P2P peers, single Mutinynet peer, counterparty/recipient
-observers) are out of scope here; see `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
+**What makes bitcoind distinct from LND (the non-obvious bits):**
 
-### AI-facing characteristics specific to bitcoind (vs. LND)
+- **Wallet metadata is uniquely toxic.** One leaked [xpub](../../GLOSSARY.md#xpub--descriptor) deanonymizes an account's entire receive + change chain, past and future, in one call. `listdescriptors` on a fresh wallet returned 8 of them. Highest-severity single-call leak in the surface.
+- **`getpeerinfo` leaks our public IP to the AI** - `addrlocal: "73.93.99.82"` in every peer row (LAN `addrbind: 192.168.50.12`). Deny or redact.
+- **`getnetworkinfo` leaks Tor state** - `onion: reachable=false, proxy=""` tells the AI we are on clearnet, so it can reason about which P2P-layer mitigations we lack.
 
-- **Wallet metadata is uniquely toxic.** A single leaked xpub deanonymizes every address
-  derived from that account - past and future - in one call. `listdescriptors` on a freshly
-  created wallet returned 8 descriptors, each with a distinct account-level tpub. Leaking
-  one tpub compromises the entire receive + change chain for that account, unboundedly.
-  This is the highest-severity single-call leak in the entire proxy surface.
-- **`getpeerinfo` leaks our public IP to the AI.** Every entry in `getpeerinfo` contains
-  `addrlocal: "73.93.99.82:<port>"`. If the proxy surfaces this call, the AI learns our
-  public IP. Proxy must deny or redact. The world-facing aspect (the peer also learns our
-  IP) is covered in the world-facing doc.
-- **`getnetworkinfo` leaks Tor configuration state to the AI.** The field
-  `onion: reachable=false, proxy=""` tells the AI that Tor is not configured. This is an
-  AI-facing concern because an AI that knows we are on clearnet can reason about what
-  P2P-layer mitigations we lack.
+Out of scope: the bitcoind host OS / disk operator; Bitcoin P2P peers (world-facing); the LND operator (doc 01); OS or hypervisor compromise; physical access.
 
-### Out of scope
+## 3. Per-RPC leak surface
 
-- bitcoind host OS / disk operator - they see everything regardless of what the proxy does.
-- Bitcoin P2P peers - world-facing; covered in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
-- LND operator - covered in the LND AI-facing doc.
-- OS-level or hypervisor-level compromise.
-- Physical access to the node hardware.
+> **Live surface vs. policy.** The arbiter currently exposes only four ops to the petitioner - `query_balance`, `query_channels` (reads) and `send_bitcoin`, `send_lightning` (writes, routed through `sendtoaddress` or the LND analogue). Every other inbound op parks in [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and returns the uniform refusal, so no raw RPC below is directly petitioner-reachable. The cells define policy for any future expansion of the AI-reachable set.
 
----
+Severity: **HIGH** = full identifier, key material, or balance reveal; **MED** = partial identifiers, counts, patterns, or confirmable state; **LOW** = flags, booleans, or public chain data. The mitigation column tags the glossary mechanism; mechanics and caveats are defined there.
 
-## 3. Per-RPC Leak Surface
+### 3.1 Chain / network info
 
-Severity: **HIGH** = full identifier, key material, or balance reveal; **MED** = partial
-identifiers, counts, patterns, or confirmable state; **LOW** = status flags, booleans,
-or public chain data.
-
-### 3.1 Chain / Network Info
-
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `getblockchaininfo` | chain, height, headers, `verificationprogress`, `initialblockdownload`, pruneheight, `size_on_disk`, best block hash | MED | Safe to surface height and confirmation count. Strip `size_on_disk` and `pruneheight` (reveals prune window). Redact `warnings` text (may contain internal path info). |
-| `getnetworkinfo` | `subversion`, local services bitmap, per-transport reachability, proxy settings, relay fee, `localaddresses` | MED | Strip `subversion` (version fingerprint), proxy settings (reveals whether Tor is configured), `localaddresses`. Surface only `relayfee` and connected-network booleans. |
-| `getpeerinfo` | Per peer: remote IP, `addrlocal` (our public IP), `addrbind` (our LAN IP), `subver`, bytes per message, permissions, connection time | **HIGH** | Never surface to AI in raw form. Proxy may return peer count only. `addrlocal` confirmed to expose `73.93.99.82`; `addrbind` exposes `192.168.50.12` (LAN). |
-| `getconnectioncount` | Integer peer count | LOW | Safe to surface. |
-| `uptime` | Seconds since start | LOW | Reveals daemon restart history; surface with care or strip. |
-| `getnodeaddresses N` | N entries from our address manager (IPs + ports of gossip-discovered peers) | MED | Exposes our peer-discovery state. Default deny; only useful for network diagnostics. |
-| `getindexinfo` | Which optional indexes are enabled (txindex, blockfilterindex, coinstatsindex) | MED | Reveals node configuration. Confirmed empty `{}` on this build (all indexes off). Strip or return fixed stub. |
+| `getblockchaininfo` | chain, height, headers, `verificationprogress`, `initialblockdownload`, pruneheight, `size_on_disk`, best hash | MED | surface height + confirmations; strip `size_on_disk` / `pruneheight` (prune window); redact `warnings` (may carry paths) |
+| `getnetworkinfo` | `subversion`, services bitmap, reachability, proxy settings, relay fee, `localaddresses` | MED | surface only `relayfee` + connected-network booleans; strip `subversion`, proxy settings (Tor state), `localaddresses` |
+| `getpeerinfo` | remote IP, `addrlocal` (our public IP), `addrbind` (LAN IP), `subver`, byte counts, permissions, conn time | **HIGH** | never surface raw; count only. Confirmed `addrlocal=73.93.99.82`, `addrbind=192.168.50.12` |
+| `getconnectioncount` | peer count | LOW | safe |
+| `uptime` | seconds since start | LOW | reveals restart history; surface with care or strip |
+| `getnodeaddresses N` | addrman entries (peer IPs/ports) | MED | default deny (peer-discovery state) |
+| `getindexinfo` | which optional indexes are enabled | MED | strip / fixed stub (empty `{}` on this build) |
 
 ### 3.2 Mempool
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `getmempoolinfo` | size, bytes, fee floor, unbroadcast count | LOW | Safe; no identity linkage. |
-| `getrawmempool [verbose]` | List of all txids in local mempool; verbose adds fee, size, ancestors, descendants, time | MED | The *set* of txids our node sees can fingerprint our peer topology (different nodes see slightly different mempools). Strip verbose details; return count only unless AI has explicit diagnostic need. |
-| `getmempoolentry <txid>` | Fee, size, ancestor/descendant info for one tx | MED | Exposes our node's first-seen time for the tx. Return sanitized fee/size if needed; withhold time. |
-| `gettxspendingprevout` | Whether a given outpoint is spent in our mempool | MED | Caller can probe "is my UTXO being spent?" - maps to UTXO ownership. Gate on the internal set of txids the proxy already knows about. |
+| `getmempoolinfo` | size, bytes, fee floor, unbroadcast count | LOW | safe; no identity linkage |
+| `getrawmempool [verbose]` | all local txids; verbose adds fee, size, ancestors, time | MED | return count only (the txid *set* fingerprints our peer topology); strip verbose unless justified |
+| `getmempoolentry <txid>` | fee, size, ancestor/descendant info | MED | return sanitized fee/size; withhold first-seen time |
+| `gettxspendingprevout` | whether an outpoint is spent in our mempool | MED | gate on the proxy's known-txid set (else maps [UTXO](../../GLOSSARY.md#utxo) ownership) |
 
-### 3.3 Wallet / Keys (Critical)
+### 3.3 Wallet / keys (critical)
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `listdescriptors` | All active descriptors with account-level xpubs (8 on fresh wallet: BIP44/49/84/86 × receive+change); `private=true` returns xprvs | **HIGH - CATASTROPHIC** | **Never expose to AI under any circumstance.** Each xpub unlocks entire address chain. Proxy must deny at the method level. |
-| `getaddressinfo <addr>` | For owned address: full derivation path, `parent_desc` with account-level xpub, `hdmasterfingerprint`, `pubkey`, `scriptPubKey`, labels | **HIGH - CATASTROPHIC** | **Never expose to AI.** One call on a known address returns the account xpub in `parent_desc`. Deny by default. |
-| `listwallets` | Names of loaded wallets | MED | Wallet names can be identifying ("kyc-account", "alice-cold"). Return count only or a fixed opaque alias. |
-| `getwalletinfo` | Wallet name, format, balance, unconfirmed, txcount, keypoolsize, `private_keys_enabled`, `lastprocessedblock` | **HIGH** | Never surface raw. If wallet health is needed, return boolean predicate only ("wallet loaded: yes"). |
-| `dumpprivkey` (legacy) | WIF private key | **HIGH - KEY MATERIAL** | Deny absolutely. Proxy never returns key material. |
-| `walletpassphrase` / `walletlock` | Wallet unlock state (timing-sensitive) | **HIGH** | Deny. Proxy controls unlock state; AI must not be able to trigger or observe it. |
-| `signmessage <addr> <msg>` | Signature proving control of `addr` | **HIGH** | Deny by default. Caller controls the message; this is a classic challenge-response deanon. |
-| `importdescriptors` / `importprivkey` / `importaddress` | Injects keys/scripts into wallet watch list | **HIGH** | Deny to AI absolutely. Only operator can modify the watch list. Arbitrary descriptor import is both a DoS vector and a privacy poisoning vector. |
-| `rescanblockchain` | Forces a wallet rescan (expensive) | MED | Deny to AI. Rescan duration leaks wallet depth and content to anyone monitoring host CPU. |
+| `listdescriptors` | account-level [xpubs](../../GLOSSARY.md#xpub--descriptor) (8 on fresh wallet); xprvs if `private=true` | **HIGH - CATASTROPHIC** | deny at the method level, always |
+| `getaddressinfo <addr>` | derivation path, `parent_desc` (account xpub), fingerprint, pubkey, scriptPubKey, labels | **HIGH - CATASTROPHIC** | deny by default - one call returns the account xpub |
+| `listwallets` | loaded wallet names | MED | wallet names are identifying ("kyc-account"); return count / fixed alias |
+| `getwalletinfo` | name, format, balance, txcount, keypoolsize, `lastprocessedblock` | **HIGH** | never raw; boolean predicate only ("wallet loaded: yes") |
+| `dumpprivkey` | WIF private key | **HIGH - KEY MATERIAL** | deny absolutely ([hide secrets](../../GLOSSARY.md#hide-secrets)) |
+| `walletpassphrase` / `walletlock` | unlock state (timing-sensitive) | **HIGH** | deny; the arbiter controls unlock state |
+| `signmessage <addr> <msg>` | signature proving control of `addr` | **HIGH** | deny by default - caller-controlled challenge-response deanon |
+| `importdescriptors` / `importprivkey` / `importaddress` | inject keys/scripts into the watch list | **HIGH** | deny to AI; operator-only (watch-list poisoning + rescan-DoS vector) |
+| `rescanblockchain` | forces an expensive wallet rescan | MED | deny; rescan duration leaks wallet depth (see §4.7) |
 
 ### 3.4 Balance / UTXO
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `getbalances` | `mine.trusted`, `mine.untrusted_pending`, `mine.immature`, `watchonly.*` | **HIGH** | Return banded values (e.g., `<10k / 10k-100k / 100k-1M / >1M sats`) or boolean capability predicates. |
-| `listunspent [min] [max] [addrs]` | Every UTXO: txid, vout, address, amount, scriptPubKey, descriptor, confirmations | **HIGH** | Never dump full UTXO set to AI. Proxy answers aggregate queries ("≥X sats confirmed: yes"). If specific UTXO is needed for tx construction, proxy selects it internally. |
-| `scantxoutset` | Scans the UTXO set for any descriptor/address the caller supplies | **HIGH** | Deny to AI. A caller can probe arbitrary addresses to learn balances - including addresses that are not the operator's. |
-| `scanblocks` | Scans block range for descriptor matches (pruned: range-limited) | HIGH | Deny to AI. Same as `scantxoutset` but also reveals how far back our block history goes. |
+| `getbalances` | `mine.trusted` / `untrusted_pending` / `immature` / `watchonly.*` | **HIGH** | wallet totals are [scale-cloaked](../../GLOSSARY.md#scale-cloaking) to a fixed presentation window (not banded); per-call fee fields stay on [banding](../../GLOSSARY.md#banding-numeric-value-banding) |
+| `listunspent` | every [UTXO](../../GLOSSARY.md#utxo): txid, vout, address, amount, scriptPubKey, descriptor, confirmations | **HIGH** | never dump; [aggregate](../../GLOSSARY.md#aggregate-by-default) ("≥X sats confirmed: yes"); proxy coin-selects internally |
+| `scantxoutset` | scans the UTXO set for any caller-supplied descriptor/address | **HIGH** | deny - lets the AI probe arbitrary (even non-operator) addresses |
+| `scanblocks` | scans a block range for descriptor matches | HIGH | deny - same as `scantxoutset`, also reveals block-history depth |
 
-### 3.5 Tx Construction
+### 3.5 Tx construction
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `createrawtransaction` | Raw tx hex (no wallet involvement) | LOW | Safe to expose. Input txids and output addresses in the request are controlled by the caller - but those came from the AI, so the proxy must validate inputs against its internal known-UTXO set before passing through. |
-| `decoderawtransaction` | Full decoded tx: inputs, outputs, amounts, addresses, sizes | LOW | Safe to expose; the AI supplied the hex. Proxy can use this internally to audit tx structure before signing. |
-| `decodescript` | Script type, address forms (p2sh, segwit), asm | LOW | Safe to expose. |
-| `getdescriptorinfo` | Checksum, `isrange`, `issolvable`, `hasprivatekeys` | LOW/MED | `hasprivatekeys: true` confirms key material is present on the node. Gate: proxy may expose for operator-supplied descriptors; deny for AI-supplied descriptors. |
-| `walletcreatefundedpsbt` | PSBT with proxy-selected inputs, change address, fee | **HIGH** | Never expose directly; proxy constructs PSBTs internally. The returned PSBT contains input descriptors and change address - both HIGH. |
-| `walletprocesspsbt` | Signs/finalizes a PSBT using wallet keys | **HIGH** | Proxy controls which PSBTs are presented for signing. AI should never submit arbitrary PSBTs; proxy must inspect inputs and outputs first. |
-| `signrawtransactionwithwallet` | Signed tx hex | **HIGH** | Proxy controls which inputs are signed. AI must not choose inputs; proxy performs coin selection. |
-| `estimatesmartfee <target>` | `feerate` (BTC/kvB) or error if no data | MED | Safe to return feerate value. Timing and error-vs-result path reveal IBD state (see §4.7). |
+| `createrawtransaction` | raw tx hex (no wallet) | LOW | safe, but validate AI-supplied inputs against the known-UTXO set first |
+| `decoderawtransaction` | decoded inputs/outputs/amounts/addresses | LOW | safe (AI supplied the hex); use internally to audit before signing |
+| `decodescript` | script type, address forms, asm | LOW | safe |
+| `getdescriptorinfo` | checksum, `isrange`, `issolvable`, `hasprivatekeys` | LOW/MED | expose for operator-supplied descriptors; deny for AI-supplied (`hasprivatekeys` confirms key material) |
+| `walletcreatefundedpsbt` / `walletprocesspsbt` / `signrawtransactionwithwallet` | [PSBT](../../GLOSSARY.md#psbt) / signed tx | **HIGH** | not on the live path - the arbiter sends via the `sendtoaddress` black box (§3.6), so no PSBT contents ever leave bitcoind |
+| `estimatesmartfee <target>` | feerate or error | MED | safe to return the feerate; the error-vs-result path reveals IBD state (§4.2) |
 
-### 3.6 Tx Broadcast
+### 3.6 Tx broadcast
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `sendrawtransaction` | txid (tx immediately hits P2P network) | **HIGH** | Gate every broadcast through the recipient address registry: proxy validates destination, amount, and change address before calling. Once called, the tx is globally visible and irreversible. |
-| `sendtoaddress` / `sendmany` / `send` / `sendall` | txid + coin selection + change address | **HIGH** | Same as `sendrawtransaction`. Proxy performs coin selection; AI supplies only a destination and an amount ceiling. Destinations resolved against the recipient address registry. |
-| `bumpfee` / `psbtbumpfee` | Replacement tx or PSBT; creates RBF-flagged replacement | **HIGH** | Operator-approval gate. Reveals that a prior tx exists and is stuck - confirming the UTXO being spent. |
+| `sendtoaddress` / `sendmany` / `send` / `sendall` | txid only (bitcoind does coin selection, change derivation, signing, broadcast internally) | **HIGH** | the live write path: a black box. The arbiter validates destination (via the [recipient address registry](../../GLOSSARY.md#recipient-address-registry)) and amount; it never sees the change address, and no PSBT leaves bitcoind. Irreversible once called |
+| `sendrawtransaction` | txid (immediately hits the P2P network) | **HIGH** | not on the live path; if exposed, gate through the registry as above |
+| `bumpfee` / `psbtbumpfee` | RBF replacement tx/PSBT | **HIGH** | operator-approval gate; reveals a prior stuck tx exists |
 
-### 3.7 Tx History
+### 3.7 Tx history
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `listtransactions` | Full per-wallet tx history: txids, amounts, addresses, fees, timestamps, confirmations, category | **HIGH** | Never dump to AI. Proxy answers aggregate queries ("sent this session: ~1k sats"). |
-| `listsinceblock` | All wallet txs since a given block hash | **HIGH** | Same as `listtransactions`. Deny. |
-| `gettransaction <txid>` | Full wallet tx detail including which addresses are *ours*, fee, blocktime, wallet annotations | **HIGH** | For the proxy's own txid, never return raw. Proxy may surface: `{confirmed: bool, block_height: N}` only. The `details[].category` field ("send"/"receive") and `details[].address` confirm wallet ownership. |
-| `listreceivedbyaddress` | Per-address receive totals + funding txids | **HIGH** | Deny. Directly maps our addresses to our tx graph. |
-| `listreceivedbylabel` / `listlabels` / `getaddressesbylabel` | Label-to-address mappings | **HIGH** | Deny. Label names are operator-chosen and may be identifying. |
-| `getnewaddress [label] [type]` | Fresh address derived from HD wallet | **HIGH** | Proxy holds address ↔ session-token mapping. Return opaque token to AI. Unrestricted access lets AI enumerate our HD chain. |
+| `listtransactions` | full wallet history: txids, amounts, addresses, fees, timestamps, category | **HIGH** | never dump; [aggregate](../../GLOSSARY.md#aggregate-by-default) ("sent this session: ~1k sats") |
+| `listsinceblock` | all wallet txs since a block | **HIGH** | deny (as `listtransactions`) |
+| `gettransaction <txid>` | wallet tx detail: which addresses are *ours*, fee, blocktime, annotations | **HIGH** | surface only `{confirmed, block_height}`; `category` + `address` confirm wallet ownership |
+| `listreceivedbyaddress` | per-address receive totals + funding txids | **HIGH** | deny - maps our addresses to our tx graph |
+| `listreceivedbylabel` / `listlabels` / `getaddressesbylabel` | label-to-address mappings | **HIGH** | deny - labels are operator-chosen and identifying |
+| `getnewaddress` | fresh HD address | **HIGH** | [pseudonymize](../../GLOSSARY.md#pseudonymize-identifier-pseudonymization) to a session token; unrestricted access enumerates our HD chain |
 
-### 3.8 Peer / Node Operations
+### 3.8 Peer / node operations
 
-| RPC | What it returns | Severity | Proxy mitigation |
+| RPC | What it returns | Sev | Mitigation |
 |---|---|---|---|
-| `addnode <addr>` | Adds a peer (state-changing) | **HIGH** | Deny to AI. An adversary can force a connection to a peer they control and observe our tx-relay timing to mount an eclipse/sybil attack. |
-| `disconnectnode` / `setnetworkactive` / `setban` / `clearbanned` | Peer manipulation | **HIGH** | Deny to AI. Network topology is operator-only. |
-| `submitblock` / `submitheader` | Injects blocks/headers | **HIGH** | Deny to AI. |
-| `getrpcinfo` | Active in-flight RPC calls + log path | **HIGH** | Deny to AI. In a multi-caller proxy, `getrpcinfo` leaks what other callers are currently doing. `logpath` also reveals the filesystem path to the debug log. |
-| `stop` | Graceful shutdown | **HIGH** | Deny to AI absolutely. |
+| `addnode` | adds a peer (state-changing) | **HIGH** | deny - an adversary can force a connection to a peer they control (eclipse/sybil setup) |
+| `disconnectnode` / `setnetworkactive` / `setban` / `clearbanned` | peer manipulation | **HIGH** | deny - network topology is operator-only |
+| `submitblock` / `submitheader` | inject blocks/headers | **HIGH** | deny |
+| `getrpcinfo` | in-flight RPC calls + log path | **HIGH** | deny - leaks other callers' activity and the debug-log path |
+| `stop` | graceful shutdown | **HIGH** | deny absolutely |
 
----
+## 4. Timing as a leak channel
 
-## 4. Timing as a Leak Channel
+In the implemented async-result model the AI never polls chain state - it submits an action and polls the [result registry](../../GLOSSARY.md#result-delay) at a fixed 10-min floor (doc 05 §4.8). So §4.1 (polling cadence) and §4.5 (request-gap) apply to a *passthrough-proxy* model, not the live arbiter; the rest are intrinsic to any model. Either way the [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) layer closes these inside the trust boundary; the values below are what an unmitigated proxy would expose.
 
-This section covers timing leaks that are AI-facing: patterns the AI client can observe
-through the proxy's request/response interval. World-facing timing leaks (e.g., the first
-P2P peer inferring tx origination from broadcast timing) are covered in
-`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §3.8 and §4.
+| # | Channel | What the AI can infer |
+|---|---------|------------------------|
+| 4.1 | Polling cadence | Fixed-schedule polling of `getblockchaininfo` / `getbalances` / `getrawmempool` shows as a latency pattern; a 30s cadence fingerprints software + version (moot under the async-result model). |
+| 4.2 | Sync-state-dependent timing | `gettxout` / `getrawtransaction` latency and the error-vs-success path reveal `txindex=0` without `getindexinfo`; `estimatesmartfee` erroring confirms IBD state. |
+| 4.3 | Mempool query patterns | `getrawmempool` then `gettxout <out>` is a recognizable "watching for this tx" fingerprint; gate queries on the known-txid set. |
+| 4.4 | Block-height / IBD inference | Repeated `getblockchaininfo` tracks IBD rate and timestamps the `initialblockdownload: true -> false` transition. The `blocks` vs. `headers` gap beats `verificationprogress` (reports `1` mid-IBD on this build). |
+| 4.5 | Request -> send gap | Sub-second = automated coin-selection/sign/broadcast; a 10-60s gap with variance suggests human review (moot under the async-result model). |
+| 4.6 | `estimatesmartfee` cache TTL | Latency variance (cache miss vs. hit) correlates fee-estimate calls to impending broadcasts. |
+| 4.7 | Wallet rescan timing | `importdescriptors` / `rescanblockchain` duration scales with blocks x addresses; an AI watching `getwalletinfo.lastprocessedblock` advance infers wallet depth and creation date. |
+| 4.8 | Pruned-mode latency | `getblock` fails instantly for pruned heights but reads from disk for in-window ones, so the AI can binary-search the prune horizon. Return a uniform stub error for all out-of-window requests. |
 
-### 4.1 Polling cadence on chain state calls
+## 5. Mitigations
 
-Regular polling of `getblockchaininfo`, `getbalances`, or `getrawmempool` on a fixed
-schedule is visible to the AI: the AI can observe the response latency pattern and
-infer the polling interval. A fixed 30-second cadence is a fingerprint of the specific
-software and version running on top of bitcoind. Metronomic polling (zero jitter) signals
-automation; irregular intervals suggest a human. Any automation running in a fixed cron
-pattern (e.g., every 10 minutes aligned to wall clock) is trivially identifiable as
-scheduled.
+Every per-RPC mitigation in §3 is a standard arbiter mechanism, defined with its residual-leak caveat in the [glossary Mitigations section](../../GLOSSARY.md#mitigations): [pseudonymize](../../GLOSSARY.md#pseudonymize-identifier-pseudonymization), [banding](../../GLOSSARY.md#banding-numeric-value-banding) / [scale cloaking](../../GLOSSARY.md#scale-cloaking), the [recipient address registry](../../GLOSSARY.md#recipient-address-registry) (the WHO gate), [standing approvals](../../GLOSSARY.md#standing-approvals) (the WHAT gate - which `(op, destination, amount)` tuples dispatch without a [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) pause), [aggregate-by-default](../../GLOSSARY.md#aggregate-by-default), [hide secrets](../../GLOSSARY.md#hide-secrets), and the [audit log](../../GLOSSARY.md#audit-log). Two bitcoind-specific applications: coin selection and signing stay inside bitcoind via the `sendtoaddress` black box (stronger than a PSBT round-trip - no PSBT ever leaves the daemon), and wallet/descriptor import is operator-only.
 
-### 4.2 Sync-state-dependent response timing
+The §4 timing channels are **not** addressed by per-response padding. The [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) layer absorbs the sync-state, rescan, and cache-TTL variation inside the trust boundary before any result surfaces (see [latency fingerprinting](../../GLOSSARY.md#latency-fingerprinting)). Tor and self-hosted esplora are world-facing.
 
-Response time for `gettxout <txid> <vout>` and `getrawtransaction <txid>` differs
-depending on whether `txindex` is enabled and whether the tx is in the mempool or a
-confirmed block. With `txindex=0` (our configuration), `getrawtransaction` succeeds
-instantly for mempool txs but fails for confirmed non-wallet txs. The error-vs-success
-path and the response latency directly reveal the node's index configuration to the AI
-without calling `getindexinfo`. Similarly, `estimatesmartfee` returns an error during IBD
-and a real feerate post-sync; the error path confirms IBD state to the AI.
+## 6. bitcoind vs. LND
 
-### 4.3 Mempool query patterns as intent fingerprints
-
-A sequence of `getrawmempool` followed by `gettxout <txid> <vout>` for a specific output
-is a recognizable fingerprint of "watching for this specific transaction" - visible to the
-AI through the sequence of calls and responses. The AI can also deliberately probe
-arbitrary txids to map our mempool state. The proxy should gate which txids can be queried
-based on its internal set of known txids.
-
-### 4.4 Block-height correlation and IBD-state inference
-
-The AI observing repeated `getblockchaininfo` responses can track the rate of IBD
-progress and estimate when on-chain operations will begin. The `blocks` vs. `headers`
-gap reveals IBD state more reliably than `verificationprogress` (which this build reports
-as `1` even mid-IBD). The transition from `initialblockdownload: true` to `false` is a
-meaningful event the AI can timestamp to anchor the node's operational history.
-
-### 4.5 Time gap between AI request and `sendrawtransaction` response
-
-The interval between a payment task arriving from the AI and the proxy returning a txid
-is observable by the AI as response latency. A sub-second gap signals fully automated
-coin selection, signing, and broadcast. A 10-60 second gap with natural variance suggests
-human review is in the loop. This signal is AI-facing: the AI measures it as response
-latency from the proxy. (The world-facing analogue - first P2P peer timing the broadcast
-- is covered in the world-facing doc.)
-
-### 4.6 `estimatesmartfee` cache TTL as a tell
-
-The AI can issue a sequence of `estimatesmartfee` calls and observe latency variance. A
-cache miss (higher latency) near the time of a broadcast signals that a tx is being
-constructed. A run of identical feerate responses with sub-millisecond latency confirms
-cache-hit behavior. An AI that instruments this pattern can correlate fee-estimate requests
-to impending broadcast events, narrowing the temporal window of the operator's tx workflow.
-
-### 4.7 Wallet rescan timing (AI-observable via getwalletinfo)
-
-`importdescriptors` and `rescanblockchain` trigger a wallet rescan whose duration scales
-with the number of blocks scanned and the number of wallet addresses. The AI can observe
-progress if permitted to call `getwalletinfo`: the `lastprocessedblock` height advances
-visibly during the scan. From the duration and starting height, the AI can infer wallet
-depth - how far back the key history goes and roughly when the wallet was created.
-
-### 4.8 Pruned-mode latency fingerprint
-
-With `prune=2200`, queries for pruned blocks via `getblock` fail instantly with an RPC
-error. Queries for in-window blocks return after a disk read. An AI that can issue
-`getblock` calls at varying heights and observe latency vs. error can binary-search the
-exact prune horizon, revealing both the `prune_target_size` setting and how much chain
-history the operator has retained. The proxy should return a uniform stub error for all
-out-of-window block requests rather than the raw bitcoind error.
-
----
-
-## 5. Mitigation Menu
-
-Each mitigation is listed with its target threats and a note on its own residual leak.
-
-| Mitigation | Targets | Own leak / caveat |
-|---|---|---|
-| **Identifier tokenization** - txids, addresses, descriptor strings, label names replaced with opaque proxy-scoped tokens | AI exfiltration of txids/addresses; prompt injection probing wallet identity | Token vocabulary size can leak: number of unique tokens ≈ number of UTXOs/addresses the proxy has tracked in this session. |
-| **Numeric value banding** - balances, UTXO amounts, fees surfaced as buckets (e.g., `<10k / 10k-100k / 100k-1M / >1M sats`) | Precision balance/amount leak via `getbalances`, `listunspent`, tx history | Band boundaries are themselves a policy fingerprint. An AI can binary-search the exact balance by probing "can fund X?" across many values. Must be paired with rate limiting. |
-| **Recipient address registry as destination gate** - every `sendtoaddress`, `sendrawtransaction`, `addnode`, and peer-manipulation call resolves its target through the registry's operator-curated set; misses refuse uniformly | Prompt-injection-induced fund movement; peer-manipulation abuse; eclipse attack setup | Probing-infeasibility argument lives in the registry entry (GLOSSARY 'Recipient address registry'). The static-set staleness concern (a static set of destinations could itself be a fingerprint) is a world-facing chain-analysis observation, not an AI-facing one - it does not reach the AI through this proxy. |
-| **Aggregate-by-default** - list-style calls (`listunspent`, `listtransactions`, `listsinceblock`) return counts/summaries; per-item detail requires per-call justification logged | History dump; UTXO enumeration | Counts themselves can leak: "14 UTXOs" is more information than "some UTXOs." |
-| **Withhold seed material absolutely** - xpubs, xprvs, descriptor private parts, `dumpprivkey` output: proxy never returns these under any circumstance | `listdescriptors`, `getaddressinfo`, `dumpprivkey` exfiltration | Proxy becomes the single custodian of key-derivation metadata; its own security is now the key-material boundary. |
-| **Deny wallet-import / descriptor-import to AI** - `importdescriptors`, `importprivkey`, `importaddress`, `importmulti` require operator-level auth only | Watch-list poisoning; DoS via expensive rescan; injection of adversarial descriptors | Operator must have an out-of-band channel to add keys. In-band import is unavailable even for legitimate AI use cases. |
-| **Default to PSBT-style flows** - proxy constructs and inspects PSBTs before presenting to `walletprocesspsbt`; AI never sees unsigned or signed tx directly | Arbitrary input selection by AI; `signrawtransactionwithwallet` abuse | PSBT round-trip adds at least one extra RPC call; latency increase is observable. |
-| **Coin selection inside proxy** - AI provides only destination and amount ceiling; proxy selects UTXOs internally | `listunspent` exposure; UTXO clustering by AI | Proxy coin selection policy becomes a fingerprint: if the proxy always picks the smallest UTXOs, that's a recognizable pattern on-chain. |
-| **Constant-time response padding** - proxy returns wallet-op responses after a fixed wall-clock delay regardless of actual bitcoind completion time | Sync-state-dependent timing (§4.2); rescan timing (§4.7); automation vs. human timing (§4.5) | The padding constant is itself a fingerprint. An observer who consistently measures the same delay knows this is padded and knows the delay budget. Use variable jitter instead of a fixed floor. |
-| **Jittered polling** - proxy queries `getblockchaininfo` / `getbalances` on a randomized interval (base ± uniform or Gaussian jitter) | Polling cadence side-channel (§4.1); IBD-state timing (§4.4) | Jitter distribution is fingerprintable if the same PRNG seed or fixed distribution parameters are always used. |
-| **Tx broadcast delay / time-window batching** - hold signed txs until the next fixed broadcast slot | Automation timing fingerprint visible to AI (§4.5) | Fixed windows are themselves a fingerprint if only one operator uses this proxy. Align windows to expected block arrival times to blend with organic traffic. |
-| **Audit log of every AI request + proxy decision** | Forensics for prompt injection and unauthorized exfiltration attempts | Audit log itself is a high-value target; must be stored outside the AI's read access and outside the bitcoind datadir. |
-| **`getrpcinfo` denied to AI** | Cross-caller side-channel in multi-user proxy; log path leak | No residual leak from the denial itself. |
-
-Note: Tor routing and self-hosted esplora (for IP-to-txid link avoidance) are world-facing
-infrastructure choices; they do not change what the AI observes through the proxy. Those
-mitigations belong in `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §5.
-
----
-
-## 6. bitcoind vs. LND - Comparison Callout
-
-The two API surfaces have different risk profiles. Both require a proxy with active
-filtering, but the policies differ in kind rather than just degree.
+Both need active filtering, but the policies differ in kind, not just degree.
 
 | Dimension | bitcoind | LND |
 |---|---|---|
-| **Most dangerous single call** | `listdescriptors` - 8 account xpubs in one response; one call compromises entire wallet address space past and future | `listchannels` - per-channel remote pubkeys, balances, activity counters, total sats sent/received for every channel in one call |
-| **Key material exposure** | xpubs via `getaddressinfo` / `listdescriptors`; xprvs if `private=true`; WIF keys via `dumpprivkey` | Preimages via `listpayments`; macaroons via credential download |
-| **AI-visible topology** | Peer IPs via `getpeerinfo`; no channel graph (bitcoind has no LN layer) | Full channel graph via `listchannels`; node pubkey + peer IPs via `listpeers` |
-| **AI-visible transaction metadata** | On-chain: amounts, addresses, UTXOs linked to wallet via `gettransaction`, `listtransactions` | Off-chain: payment hashes, HTLCs, route data visible in `payinvoice` / `listpayments` responses |
-| **Descriptor sensitivity** | xpubs in `listdescriptors` and `getaddressinfo` - one call compromises all future addresses | No xpub equivalent; preimages and macaroons are the analogous key-material leaks |
-| **IP leakage to AI** | `getpeerinfo.addrlocal` returns our public IP `73.93.99.82` in every peer row - proxy must deny or redact | `listpeers` exposes peer IPs; `connect` logs our IP against a target |
-| **Irreversibility for proxy** | On-chain broadcast via `sendrawtransaction` is permanent and immediately public | LN payment can fail via HTLC timeout; channel close is on-chain but has a cooperative-close window |
-| **Proxy policy complexity** | Higher on wallet/UTXO side: coin selection, PSBT inspection, xpub lockdown | Higher on channel/route side: channel policy, payment routing, pathfinding score lockdown |
+| Most dangerous single call | `listdescriptors` - account xpubs compromise the whole address space, past and future | `listchannels` - every channel's pubkeys, balances, and activity counters in one call |
+| Key material | xpubs (`getaddressinfo` / `listdescriptors`), xprvs, WIF (`dumpprivkey`) | preimages (`listpayments`), macaroons |
+| AI-visible topology | peer IPs (`getpeerinfo`); no channel graph | full channel graph (`listchannels`), node pubkey + peer IPs (`listpeers`) |
+| IP leak to AI | `getpeerinfo.addrlocal` = our public IP in every row | `listpeers` peer IPs; `connect` logs our IP against a target |
+| Irreversibility | `sendtoaddress` broadcast is permanent and immediate | LN payment can fail via HTLC timeout; close has a cooperative window |
+| Policy weight | wallet/UTXO: coin selection, xpub lockdown | channel/route: channel policy, routing, pathfinding-score lockdown |
 
-**Summary (AI-facing):** bitcoind is more dangerous on the wallet and key-derivation side;
-a single negligent `getaddressinfo` or `listdescriptors` call ends wallet privacy
-permanently by giving the AI all future receive and change addresses. LND is more
-dangerous on the topology and payment-correlation side; channel graph data in
-`listchannels` gives the AI a complete map of our LN relationships.
+bitcoind is more dangerous on the wallet / key-derivation side (one `getaddressinfo` or `listdescriptors` ends wallet privacy permanently); LND on the topology / payment-correlation side (`listchannels` maps every LN relationship).
 
-Note: world-facing comparison aspects (on-chain broadcast vs. LN gossip permanence, IP
-exposure to peers vs. esplora operators) are covered in
-`~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` §4.
+## 7. Open questions
 
----
+1. **Rescan timing leak.** Import descriptors of known depth (1000 vs. 3000 addresses), measure `rescanblockchain` duration, and find the `getwalletinfo` rate limit that stops an AI inferring wallet depth from `lastprocessedblock`.
+2. **`estimatesmartfee` cache behavior.** Measure latency variance across targets; determine the cache TTL and whether two concurrent callers share a cached value (a cross-caller side-channel).
+3. **Pruned-mode behavior.** With `prune=2200`, confirm the proxy returns a uniform stub error for sub-horizon `getblock` rather than the raw bitcoind error.
+4. **Binary-search balance probing.** Test [scale cloaking](../../GLOSSARY.md#scale-cloaking) against a sequence of send attempts with rising amounts; design the rate-limit + noise policy.
+5. **`getrpcinfo` cross-caller leak.** If ever exposed, confirm two concurrent callers cannot see each other's in-flight RPC names.
 
-## 7. Open Questions / Things to Test Next
+## 8. Reconciliation status
 
-1. **Quantify rescan timing leak to AI.** Import a descriptor with known depth (e.g.,
-   1000 addresses derived vs. 3000) and measure `rescanblockchain` duration at our
-   current chain height (~309k blocks). Determine whether the duration is distinguishable
-   by depth bucket at the granularity an AI polling `getwalletinfo.lastprocessedblock`
-   could observe - and what rate limit on `getwalletinfo` is needed to prevent this.
-
-2. **Test PSBT round-trip with a watch-only wallet.** Set up the proxy-side as a
-   watch-only wallet (descriptors, no private keys) and a separate signing device (hardware
-   wallet model or an offline `bitcoin-wallet`). Measure the full PSBT-construct → sign →
-   broadcast round-trip and identify which steps the proxy must perform vs. delegate.
-   Verify the proxy can inspect all inputs and outputs before presenting the PSBT for signing.
-
-3. **Measure `estimatesmartfee` cache behavior.** After sync completes, call
-   `estimatesmartfee` at multiple targets (2, 6, 144 blocks) in rapid succession and
-   measure latency variance. Determine the cache TTL and whether two concurrent AI callers
-   see the same cached value or trigger separate computations. A shared cache is a
-   cross-caller timing side-channel in multi-user proxy deployments.
-
-4. **Verify pruned-mode proxy behavior.** With `prune=2200`, test what happens when an
-   AI asks for a block below the prune horizon via `getblock`. Verify that the proxy
-   returns a uniform stub error for all out-of-window block requests, rather than the raw
-   bitcoind error (which confirms the block is pruned and reveals the exact prune horizon).
-
-5. **Binary-search balance probing resilience.** Verify that the banded-balance mitigation
-   is robust against an AI issuing a sequence of `walletcreatefundedpsbt` calls with
-   increasing amounts to resolve the exact UTXO balance. Design and test a rate-limit +
-   noise policy that makes this infeasible within a session budget.
-
-6. **`getrpcinfo` cross-caller leak in proxy.** Simulate two concurrent AI callers
-   hitting the proxy and verify whether either can observe the other's in-flight RPC
-   call names via `getrpcinfo`. The call should be denied entirely; this test confirms
-   no timing side-channel persists after denial.
-
----
-
-## 8. See Also
-
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (Bitcoin P2P
-  peers, single Mutinynet peer at 45.79.52.207, block explorers, hosting operators).
-  World-facing mitigations (Tor, multi-peer, self-hosted esplora) belong there.
-- `2026-05-02-1601-privacy-and-timing-leaks.md` - LND AI-facing privacy, same proxy
-  model applied to the LND RPC surface. Read together with this doc when designing the
-  proxy policy layer.
-
----
-
-## 9. Reconciliation Notes (post-allowlist-deletion, post-standing-approvals)
-
-**Date:** 2026-05-24. Inputs walked: `arbiter/src/bitcoin.py`, `arbiter/src/gateway.py`,
-`arbiter/src/scale.py`; cross-referenced against
-`design-docs/origin/05--2026-05-05-0948-architecture-overview.md` and the GLOSSARY
-entries for `Recipient address registry`, `Standing approvals`, `Scale cloaking`, and
-`Hide secrets`. Triggering commits: a12b1c8 (allowlist deleted, registry IS the
-destination gate) and 99bcc49 (Standing approvals added as the WHAT gate alongside the
-registry's WHO gate).
-
-None of the findings below invalidate the threat model in §2-§4 or the mitigation
-catalogue in §5; they note where the per-API doc and the implementation have drifted.
-
-1. **Allowlist→registry cleanup is complete in this doc.** No "allowlist" string
-   remains in §1-§8. The four per-call cells that previously named the allowlist
-   (§3.2 `gettxspendingprevout`, §3.5 `createrawtransaction`, §3.6 send-broadcast row,
-   §4.3 mempool-probing paragraph) and the §5 mitigation-menu row already point at the
-   registry or use the "internal set" replacement framing. No additional
-   registry-vs-allowlist edits are needed here.
-
-2. **§5 is missing the WHAT gate.** 99bcc49 introduced Standing approvals as a second
-   gate that sits between the registry resolve and dispatch: the registry decides
-   *who* can be a destination; standing approvals decides *which*
-   `(op, destination, amount)` tuples may dispatch without a HITL pause. §5 currently
-   presents the registry row as if it is the only gate for state-changing calls.
-   Doc 05 §4.1 and §6 both list Standing approvals as a sibling mechanism; a
-   corresponding row in this doc's §5 (with its own target threats and own-leak
-   caveat) would keep the per-API view aligned with the architecture-level view.
-
-3. **Banding vs scale cloaking on wallet-level totals.** §3.4 `getbalances` says
-   "Return banded values (e.g., `<10k / 10k-100k / 100k-1M / >1M sats`)." The
-   arbiter's live read ops (`query_balance`, `query_channels`) instead route
-   wallet/channel totals through `scale.present()`, a per-tier cloak with a
-   multi-day randomized tier-shift delay, per doc 05 §4.1 and §6 (scale cloaking
-   replaces straight banding for wallet-level totals; per-call fee fields stay on
-   banding). §5 does not list scale cloaking at all; it should appear alongside
-   "Numeric value banding" with its own target / own-leak entry, and the §3.4 cell
-   should be updated to say "scale-cloaked to a fixed presentation window" for the
-   wallet-total fields.
-
-4. **§3.5 PSBT cells vs the hide-secrets discipline.** §3.5 frames the proxy as
-   constructing PSBTs and signing through `walletprocesspsbt` /
-   `signrawtransactionwithwallet`, and §5's "Default to PSBT-style flows" row
-   presents this as the recommended mitigation. The current arbiter
-   (`arbiter/src/bitcoin.py` + doc 05 §4.2 + GLOSSARY 'Hide secrets') uses
-   `sendtoaddress` as a single black-box call: bitcoind performs coin selection,
-   change-address derivation, signing, and broadcast and returns only a txid. The
-   PSBT bitcoind constructs internally during signing never reaches the arbiter's
-   caller, so it cannot leak through the gateway. This is a stronger position than
-   the PSBT-roundtrip mitigation (no PSBT contents ever leave bitcoind), and the doc
-   should reflect it rather than recommend a flow the implementation deliberately
-   does not take.
-
-5. **§3.6 `sendtoaddress` cell mentions a change address the arbiter never sees.**
-   The cell says the proxy "validates destination, amount, and change address before
-   calling." `sendtoaddress` does not surface the change address to its caller
-   (bitcoind derives it internally), so the change-address validation step does not
-   and cannot happen in `bitcoin.py`. The validated inputs are destination (resolved
-   via the recipient address registry) and amount (passed through from the
-   petitioner). Trim accordingly.
-
-6. **§3 per-RPC table is forward-looking, not surface-active.** The gateway's
-   current `_KNOWN_READ_OPS` is `{query_balance, query_channels}` and
-   `_KNOWN_WRITE_OPS` is `{send_bitcoin, send_lightning}`; both writes route through
-   `sendtoaddress` (or its LND analogue). Zero bitcoind RPCs from §3 are directly
-   petitioner-reachable; every other inbound op parks in HITL via `_hitl_park` and
-   returns the uniform refusal. §3's per-RPC cells therefore describe what *would*
-   apply if an RPC were exposed, not what does apply today. A note at the top of §3
-   ("the cells below define policy for any future expansion of the AI-reachable op
-   set; the current arbiter exposes only `query_balance`, `query_channels`,
-   `send_bitcoin`, `send_lightning`") would prevent a reader from assuming a wider
-   live surface than exists.
-
-7. **§4.1 polling cadence is subsumed by the result registry's 10-min floor.** §4.1
-   warns about the AI inferring polling cadence from metronomic `getblockchaininfo`
-   / `getbalances` polling. In the implemented arbiter the AI does not poll chain
-   state at all; it submits an action and polls the result registry, whose 10-min
-   poll floor (doc 05 §4.8) is fixed by design and decoupled from any
-   arbiter-internal polling. The threat in §4.1 is real for a passthrough proxy
-   model but is moot for the async-result model; either reframe §4.1 to talk about
-   result-poll cadence (already neutralized by the 10-min floor) or note that the
-   threat applies only to a future passthrough mode.
-
-8. **Arbiter ↔ bitcoind link is intentionally un-mitigated locally.** `bitcoin.py`
-   is now explicit that no anti-cadence or anti-timing mitigation is applied between
-   the arbiter and its local bitcoind: Action delay, Result delay, and the privacy
-   gateway's latency normalization cover that link in aggregate from the petitioner
-   side. This is consistent with §1's scope statement (the boundary under analysis
-   is the AI ↔ proxy ↔ bitcoind interface, and the bitcoind-side link is on the
-   trusted side of the proxy) but is worth surfacing in §1 or §2 so a reader does
-   not look for arbiter-internal mitigations that, by design, do not exist.
+**2026-05-24**, reconciled against `arbiter/src/bitcoin.py`, `gateway.py`, and `scale.py` (triggering commits a12b1c8 "allowlist deleted, registry IS the destination gate" and 99bcc49 "standing approvals as the WHAT gate"). The findings are now folded into the body above: the allowlist->registry rename is complete; §3.4 and §5 use scale cloaking for wallet/channel totals (not banding); §3.5/§3.6 reflect the `sendtoaddress` black box rather than a PSBT round-trip, and drop the change-address validation the arbiter never performs; §5 names standing approvals as the WHAT gate beside the registry's WHO gate; §3's lead note marks the per-RPC table as forward-looking policy beyond the live four-op surface; and §1 records the arbiter <-> bitcoind link as intentionally un-mitigated locally. None of this changed the threat model (§2-§4) or the mitigation catalogue (§5).
