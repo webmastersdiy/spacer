@@ -396,6 +396,45 @@ ships GUI-only on macOS arm64. Patches add `signetchallenge` and
 Bitcoin Core CLI surface otherwise. Source URL:
 `https://github.com/benthecarman/bitcoin/releases/tag/mutinynet-covtools`.
 
+### Chaumian eCash (Cashu)
+
+Blind-signature bearer money over Lightning, per the Cashu NUT
+specs. A [mint](#mint) issues *proofs* (bearer tokens) against
+Lightning funds: the wallet sends blinded messages, the mint signs
+them (BDHKE blind Diffie-Hellman key exchange), the wallet unblinds.
+Because the mint signs blind, it cannot link a proof it later sees
+spent back to the issuance event - the unlinkability the whole
+extension leans on. Core ops: **mint** (pay a bolt11 quote, receive
+new proofs), **melt** (surrender proofs, the mint pays a bolt11
+invoice), **swap** (surrender proofs, receive fresh ones - how
+tokens are claimed after a transfer). Amounts are NOT blinded:
+denominations (powers of 2), totals, and keyset epochs are visible
+to the mint, so unlinkability in practice rests on timing and
+amount mitigations, not cryptography alone. Wallets must verify
+DLEQ proofs (NUT-12) or a malicious mint can tag clients with
+per-client keys. Serialized tokens (V4 `cashuB`, CBOR; embeds the
+mint URL) are self-contained bearer strings - holding the string is
+holding the money. Reference implementation: nutshell (Python mint
+and CLI wallet). See the eCash extension design doc
+(`design-docs/origin/07--2026-06-12-0916-ecash-extension.md`).
+
+### Mint
+
+The external party that backs [Cashu eCash](#chaumian-ecash-cashu):
+it holds the Lightning funds behind every outstanding proof
+(custodial), issues and redeems proofs, and serves the token API.
+In spacer the mint is **not** arbiter infrastructure - it is a
+third-party adversary in its own right, alongside the AI client and
+the network observer (design doc 07 §4). It sees amounts, keyset
+epochs, caller IPs, call timing, and the LN legs of mint/melt; it
+cannot link proofs to issuance (blinding), and it cannot tell whose
+proofs are whose. The arbiter <-> mint link is therefore OUTSIDE
+the no-internal-mitigations rule that covers arbiter <-> local
+bitcoind / LND: mint-facing timing mitigations are in scope.
+Deployment guidance: one mint per deployment, operator-chosen,
+pinned in arbiter config (never AI-suppliable), busy and public and
+operator-unaffiliated so its other users form our anonymity set.
+
 ## Mitigations
 
 Each entry below is a specific filtering or policy mechanism the
@@ -671,6 +710,29 @@ or impersonate us.
 Caveat: the arbiter becomes a single point of failure for secret
 custody, so its storage hygiene matters.
 
+### eCash allowance
+
+The hard cap on the AI's [eCash](#chaumian-ecash-cashu) float - the
+bound that replaces per-action control for AI-held bearer value.
+`ecash_allowance_sats` (arbiter config, console-edited like the
+registry and standing approvals) caps **outstanding float**:
+total funded minus total successfully defunded, maintained entirely
+from gateway-visible events. `fund_ecash` refuses past the cap
+(audit `decision_refuse_allowance`, uniform refusal on the wire),
+and the check precedes [standing
+approvals](#standing-approvals): a [HITL](#human-in-the-loop-hitl-approval)
+approval cannot exceed the allowance - raising it is a config edit,
+never an approval click, so operator fatigue cannot widen the blast
+radius. Blast radius = allowance: worst-case AI behavior (burn,
+exfiltrate) and worst-case [mint](#mint) behavior (rug, freeze)
+both cost at most the outstanding float. Size it like petty cash.
+An optional rate cap (max funded per rolling window) bounds
+slow-bleed patterns over time. Caveats: the ledger bounds
+*operator loss*, not AI wealth (AI-direct spends are invisible by
+design; third-party-received tokens are invisible and unbounded),
+and there is no clawback - bearer means the operator can stop
+funding the float but cannot revoke it. See design doc 07 §8.
+
 ### Default --private channels
 
 Open channels with `--private` (LND) or `open_channel` (ldk-node, vs.
@@ -679,6 +741,30 @@ publication of pubkey-pair plus SCID plus capacity. Funding and
 closing txs are still on-chain, but the routing graph entry is not
 gossiped. Defends both AI-facing (AI sees nothing on `listchannels`)
 and world-facing (gossip network sees no entry) at once.
+
+### Delay-scaling principle
+
+The standing rule that sizes every timing mitigation: **delays must
+be adequate for the anonymity-set size and the nuances of the
+particular privacy concern; privacy adequacy is the floor, and UX
+never overrides it.** The UX bet is that delay tolerance tracks
+rail speed - bitcoin is inherently slow so large delays from us are
+tolerable, lightning is fast so smaller, eCash is fast so smaller -
+and the bet pays because the adequate floor is naturally lower on
+faster rails: the observable surface turns over faster, so the
+anonymity set refills in less time. Operationally: each op's
+[action delay](#action-delay) / [result delay](#result-delay)
+window is sized to the anonymity set of the surfaces the op
+touches, and the floor binds to the slowest-turnover surface among
+them (an eCash fund op touches both the mint and Lightning, so the
+Lightning floor governs). Per-rail floors: onchain ~12 h
+(unchanged), lightning ~1 h (proposed target, tuning open), eCash
+boundary ops governed by the Lightning leg, AI-direct token ops
+not arbiter-mediated at all. The principle forbids both shrinking
+a window below adequacy because users are impatient and lazily
+applying the onchain floor everywhere because it is safely large.
+Defined in design doc 07 §7, which is the authority for the
+per-rail split.
 
 ### Action delay
 
@@ -710,7 +796,9 @@ The wait is randomized within a window the arbiter computes
 dynamically from observed global activity for similar actions, with
 the goal of reaching a target anonymity set: high activity
 compresses the window toward its lower bound, low activity stretches
-it. Hard floor: ~12 hours minimum, regardless of activity. Initial
+it. Hard floor: ~12 hours minimum, regardless of activity - the
+**onchain rail's** floor; floors are per-rail under the
+[delay-scaling principle](#delay-scaling-principle). Initial
 tuning target: roughly 12-36 hours, randomized; refine as we
 measure. The floor is intentional - cheap mistakes get caught,
 accidental actions get noticed, and the floor itself is part of the
@@ -740,8 +828,10 @@ petitioner polls a privacy-gateway endpoint for a given handle and
 gets either "result" or "not yet," nothing in between. The privacy
 gateway enforces a 10-minute minimum interval between polls for a
 given handle. Sibling to **Action delay**: same window construction,
-same ~12 hour hard floor; randomized within bounds driven by
-observed network activity for similar result-shapes. See
+same ~12 hour hard floor on the onchain rail (per-rail under the
+[delay-scaling principle](#delay-scaling-principle)); randomized
+within bounds driven by observed network activity for similar
+result-shapes. See
 [Architecture overview, §4.8](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#48-result-registry).
 
 Purpose: a second layer of de-correlation. Even if a global observer
@@ -909,6 +999,25 @@ funding tx with downstream payment activity) is a separate threat
 model, addressed in
 `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md`.
 
+### Mint correlation
+
+The [mint](#mint)'s ability to stitch its two views together: the
+arbiter-side events (LN payment of a mint quote, melt to our node)
+and the AI-side events (swaps, checkstate queries). Blinding breaks
+the cryptographic link between issuance and redemption, but the
+mint still sees amounts, keyset epochs, caller IPs, and timing for
+every call - so a 47,300-sat issuance followed shortly by 47,300
+sats of swaps from a new IP links the AI client to the funding node
+without breaking any cryptography. Channels and mitigations are
+mapped in design doc 07 §6: randomized intra-execution gaps,
+[result-delay](#result-delay)-randomized issuance-to-first-swap
+timing, amount randomization, infrequent randomized defunds (melt
+is the profile-richest op: the bolt11 it pays names our node), and
+busy-public-unaffiliated mint choice so the anonymity set (other
+traffic in the same keyset epoch) stays large. The anonymity-set
+turnover at the mint is not publicly observable, which is an open
+question for the dynamic window (doc 07 §10.1).
+
 ## Inherent leaks
 
 The constraints that no arbiter or infrastructure choice can remove.
@@ -1000,6 +1109,15 @@ See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-ar
   describes a gateway-side hook (between registry resolution and
   dispatch) that is NOT yet wired in `gateway.py`; that lands with
   bl-wisp-a78. Entry left intact as design intent.
+- 2026-06-12: Added the eCash extension vocabulary with design doc
+  07: [Chaumian eCash (Cashu)](#chaumian-ecash-cashu) and
+  [Mint](#mint) under primitives, [eCash
+  allowance](#ecash-allowance) and the [delay-scaling
+  principle](#delay-scaling-principle) under mitigations,
+  [Mint correlation](#mint-correlation) under side channels; the
+  [action delay](#action-delay) / [result delay](#result-delay)
+  ~12h floors are now marked as the onchain rail's floors (per-rail
+  under the delay-scaling principle).
 
 ## See also
 
