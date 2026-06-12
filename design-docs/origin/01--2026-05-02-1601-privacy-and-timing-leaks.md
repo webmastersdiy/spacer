@@ -1,17 +1,18 @@
 # Privacy and Timing Leaks in the LND API Surface (AI-Facing)
 
 **Date:** 2026-05-02 (reconciled 2026-06-12)
-**Context:** AI-facing leak map for the LND surface - what each `lncli` call exposes and which arbiter mitigation covers it. This surface ships as the **advanced Lightning extension** (`SPACER_MODE=lightning|full`, doc 05 §2.2); the default onchain deployment exposes none of it, and doc 03 (bitcoind) is the primary surface. Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-call inventory.
+**Context:** AI-facing leak map for the LND surface - what each `lncli` call exposes and which arbiter mitigation covers it. This surface ships as the **advanced Lightning extension** (`SPACER_MODE=lightning|full`, and equally under `SPACER_MODE=ecash` - ecash implies lightning, doc 07 §9; doc 05 §2.2); the default onchain deployment exposes none of it, and doc 03 (bitcoind) is the primary surface. In the rail ladder this is the middle rail: Bitcoin on-chain (primary) -> Lightning (advanced) -> eCash (advanced, atop Lightning). Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-call inventory.
 **Related:**
 - `2026-05-02-1600-lnd-mutinynet-test-flow.md` - the run these calls came from.
 - `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - the primary (default onchain) surface; read together for the gateway policy layer.
+- `07--2026-06-12-0916-ecash-extension.md` - the eCash extension one rail up: its fund/defund legs are LN payments from this surface, and the mint observes them (doc 07 §5-§6 own that leak map).
 - `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (archived; separate concern).
 
 ---
 
 ## 1. Scope
 
-The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy) for the threat axes. The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> LND ([Node A](../../GLOSSARY.md#node-a), Voltage-hosted, Mutinynet/signet) - a boundary that exists only when the operator enables the advanced Lightning extension. The default onchain arbiter refuses `query_channels` / `send_lightning` uniformly at its mode gate (audit `decision_refuse_mode`) and never imports the LND client, so none of this surface is reachable there; the per-call policies below apply as written whenever the extension is on. World-facing threats (LN gossip, peers, explorers, hosting) are out of scope - see the archived world-facing doc.
+The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy) for the threat axes. The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> LND ([Node A](../../GLOSSARY.md#node-a), Voltage-hosted, Mutinynet/signet) - a boundary that exists only when the operator enables the advanced Lightning extension (`SPACER_MODE=lightning|full|ecash`; ecash mode enables this surface unchanged, doc 07 §9). The default onchain arbiter refuses `query_channels` / `send_lightning` uniformly at its mode gate (audit `decision_refuse_mode`) and never imports the LND client, so none of this surface is reachable there; the per-call policies below apply as written whenever the extension is on. World-facing threats (LN gossip, peers, explorers, hosting) are out of scope - see the archived world-facing doc.
 
 ## 2. Threat model
 
@@ -107,3 +108,4 @@ The §4 timing channels are **not** addressed by per-response padding. Earlier d
 
 - **2026-05-24:** reconciled against `arbiter/src/lnd.py` and the cloak/banding decisions in `arbiter/src/gateway.py`. The §3.2 `walletbalance` / `channelbalance` cells and the §5 scale-cloaking note reflect the gateway's deliberate choice (`_dispatch`) to route balance reads through `scale.present()` rather than layering banding on an already-compressed value. Registry-gated ops (`sendcoins`, `openchannel`, `payinvoice`) verified consistent with the "registry IS the destination gate" framing - no edits needed there.
 - **2026-06-12:** Bitcoin-first mode split (doc 05 §2.2): this surface is now the opt-in advanced extension. petcli moved the Lightning commands under the `advanced` namespace (`advanced send-lightning`, `advanced channels`); the wire ops are unchanged, and `lnd.py` is imported lazily so an onchain deployment never loads it. Nothing in §3-§5 changes when the extension is enabled.
+- **2026-06-12 (eCash build, sp-2hwco4.2):** `SPACER_MODE=ecash` now also enables this surface, unchanged - ecash implies lightning (doc 07 §9), and the exit loop's ladder-regression variants (`query/balance/ecash-lnd-wallet`, `advanced/channels/ecash-mode`) hold the LN surface identical to lightning mode. The eCash extension adds no LN ops here; its fund/defund executions will ride this rail arbiter-internally (`payinvoice` of mint quote invoices; melt paying invoices from our own node), and the mint-facing leak map and timing mitigations for those legs are owned by doc 07 §5-§6 (including first-hop attribution toward the mint's node). Nothing in §3-§5 changes.
