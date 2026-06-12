@@ -1118,6 +1118,16 @@ See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-ar
   [action delay](#action-delay) / [result delay](#result-delay)
   ~12h floors are now marked as the onchain rail's floors (per-rail
   under the delay-scaling principle).
+- 2026-06-12: Verified the eCash entries against the sp-2hwco4.2
+  build: the [eCash allowance](#ecash-allowance) landed as written
+  (`config/ecash.yaml`, audit `decision_refuse_allowance`, checked
+  before standing approvals; the rate cap is deferred to the
+  executor), the [Mint](#mint) pin landed as `CASHU_MINT_URL` with
+  no default, and the [mint correlation](#mint-correlation) T1
+  micro-gaps landed as `timing.mint_gap_s()` (test mode only,
+  production `NotImplementedError`-gated). No body changes - the
+  entries described the build accurately; doc 07 §11 is the full
+  reconcile.
 
 ## See also
 
