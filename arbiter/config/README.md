@@ -18,10 +18,17 @@ Conventions:
 - The arbiter reads these files on every relevant request; there is no
   reload command. An edit takes effect on the next call that reads it.
 
-Per architecture overview §4.7 the recipient address registry will land
-its YAML (`destinations.yaml`) here as part of the SQLite -> YAML
-migration. Other operator-facing configs (e.g., standing approvals,
-§4.1) will follow the same pattern.
+Files:
+
+- `destinations.yaml` - the recipient address registry (architecture
+  overview §4.7): the WHO gate for state-changing calls.
+- `standing_approvals.yaml` - standing approvals (§4.1, §6): the WHAT
+  gate. Ships absent; copy `standing_approvals.yaml.example` and edit.
+- `ecash.yaml` - the eCash allowance (design doc 07 §8): the hard cap
+  on the AI's outstanding eCash float, checked before standing
+  approvals so no approval can exceed it. Ships absent (missing file =
+  allowance 0 = every fund refused); copy `ecash.yaml.example` and
+  edit. Only consulted in ecash mode (`SPACER_MODE=ecash`).
 
 This README exists so `config/` is tracked in git even before any YAML
 lands; without a file the empty directory would not appear in the

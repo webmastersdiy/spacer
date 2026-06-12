@@ -1,10 +1,13 @@
 # Standing approvals: the WHAT gate.
 #
 # Read by arbiter/src/standing_approvals.py. The privacy gateway
-# checks every state-changing op (send_bitcoin, send_lightning)
-# against the rules below AFTER the recipient address registry
-# (§4.7) resolves the destination. First matching rule wins; no
-# match = the gateway HITL-parks the call and refuses uniformly.
+# checks every state-changing op (send_bitcoin, send_lightning,
+# fund_ecash, defund_ecash) against the rules below AFTER the
+# recipient address registry (§4.7) resolves the destination - or,
+# for the eCash ops, after the allowance gate (design doc 07 §8;
+# their destination is structurally the pinned mint, so no registry
+# step applies). First matching rule wins; no match = the gateway
+# HITL-parks the call and refuses uniformly.
 #
 # The arbiter ships this file empty (literally `approvals: []`).
 # Every state-changing call HITLs until you write a rule. That is
@@ -14,14 +17,25 @@
 # trust by adding them here.
 #
 # Schema:
-#   - op:                 send_bitcoin | send_lightning
+#   - op:                 send_bitcoin | send_lightning |
+#                         fund_ecash | defund_ecash
 #     destination:        a registry token (5 Crockford-base32 + 1
 #                         Damm32 check char, e.g. ABCDE4); or the
-#                         literal 'any' for broader rules
+#                         literal 'any' for broader rules; for the
+#                         eCash ops, the literal 'mint' (their
+#                         destination is structurally the pinned
+#                         mint, doc 07 §3)
 #     max_amount_sats:    optional inclusive upper bound (sats);
 #                         absence = any amount; for Lightning,
 #                         amount_msats is rounded up to sats before
-#                         this bound is checked
+#                         this bound is checked; omit on
+#                         defund_ecash rules (defund carries no
+#                         gate-time amount, and an unknown amount
+#                         fails any bounded rule). Note fund_ecash
+#                         is ALSO capped by ecash_allowance_sats
+#                         (config/ecash.yaml), checked before this
+#                         file is consulted - a rule here cannot
+#                         exceed the allowance
 #     rationale:          optional free-text note for your own
 #                         future self - what you approved, when,
 #                         and why
@@ -72,3 +86,17 @@ approvals: []
 #     destination: any
 #     max_amount_sats: 1000
 #     rationale: Sub-1k-sat test payments to any registered dest
+#
+# eCash float maintenance (ecash mode only; doc 07 §3, §8). The fund
+# rule's bound rides under the allowance; the defund rule is
+# deliberately unbounded - defund only shrinks the float:
+#
+# approvals:
+#   - op: fund_ecash
+#     destination: mint
+#     max_amount_sats: 10000
+#     rationale: Float top-ups, approved 2026-06-12; allowance caps total
+#
+#   - op: defund_ecash
+#     destination: mint
+#     rationale: Always willing to take float back

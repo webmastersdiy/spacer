@@ -1,0 +1,40 @@
+# eCash allowance: the blast-radius bound on the AI's float.
+#
+# Read by arbiter/src/ecash.py (allowance_sats). The privacy gateway
+# checks every fund_ecash against this cap BEFORE standing approvals:
+#
+#   refuse when  outstanding + requested > ecash_allowance_sats
+#
+# where outstanding = total funded - total successfully defunded
+# (the ecash_ledger, maintained from gateway-visible events). The
+# ordering is the point (design doc 07 §8): a standing approval - or
+# a tired HITL "approve" - cannot widen the blast radius; raising
+# the cap is an edit to this file at the directly-attached console,
+# never an approval click.
+#
+# The arbiter ships with NO ecash.yaml: a missing file (or an
+# unparseable value) reads as allowance 0, which refuses every fund.
+# The float cannot exist until you write its bound here.
+#
+# Sizing discipline: this is petty cash. Worst-case AI behavior
+# (burn, exfiltrate, gamble) and worst-case mint behavior (rug,
+# freeze) both cost at most the outstanding float - size it as an
+# amount whose TOTAL loss is acceptable as the cost of the autonomy
+# experiment. There is no clawback on a bearer instrument: you can
+# stop funding the float, but you cannot revoke it.
+#
+# What this does NOT bound (doc 07 §8): AI-direct spends inside the
+# float are invisible by design, and tokens the AI receives from
+# third parties are invisible AND unbounded - the allowance bounds
+# operator loss, not AI wealth.
+#
+# Edit at the directly-attached arbiter console. Changes are
+# captured by the arb-auditability snapshot tree under
+# arbiter/config/ - the edit history IS the audit trail. The
+# optional rate cap (ecash_funding_rate, doc 07 §8) lands with the
+# timing-layer executor.
+#
+# Per design-docs/origin/07--2026-06-12-0916-ecash-extension.md §8
+# and GLOSSARY 'eCash allowance'.
+
+# ecash_allowance_sats: 50000
