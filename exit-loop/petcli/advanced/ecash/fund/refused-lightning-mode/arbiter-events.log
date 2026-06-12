@@ -1,0 +1,3 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":49938},"ts":"2026-06-12T17:56:51Z"}
+{"event":"request_received","payload":{"op":"fund_ecash"},"ts":"2026-06-12T17:56:51Z"}
+{"event":"decision_refuse_mode","payload":{"op":"fund_ecash","reason":"advanced_extension_disabled"},"ts":"2026-06-12T17:56:51Z"}

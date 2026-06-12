@@ -1,0 +1,1 @@
+# Local petitioner-side eCash wallet command: petcli shells to the cashu CLI at $PETCLI_CASHU_BIN (the runner's fake) and never reaches the arbiter. No bitcoind / LND / arbiter-side mint interaction is possible; the doc 07 §3 custody split puts these ops on the AI's side of the boundary by design.

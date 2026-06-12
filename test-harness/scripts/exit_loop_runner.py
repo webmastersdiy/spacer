@@ -37,14 +37,18 @@ deposit / floor-anchor / consume primitives. That coupling is
 acceptable because the runner lives next to the arbiter source in
 this repo and rebuilds in lockstep with it.
 
-Stdlib only. No bitcoind / LND infrastructure is exercised through
-the gateway dispatch in the current code base for state-changing
-ops (no executor wires the timing layer to bitcoin.py / lnd.py yet),
-so infra-events.log records that fact rather than capturing real
-RPC traffic. Read-only query_balance exercises a fake bitcoin-cli in
-onchain (default) mode and a fake lncli in the advanced Lightning
-extension; query_channels exercises the fake lncli (advanced only).
-Both fakes are installed below.
+Stdlib only. No bitcoind / LND / mint infrastructure is exercised
+through the gateway dispatch in the current code base for
+state-changing ops (no executor wires the timing layer to
+bitcoin.py / lnd.py / ecash.py yet), so infra-events.log records
+that fact rather than capturing real RPC traffic. Read-only
+query_balance exercises a fake bitcoin-cli in onchain (default)
+mode and a fake lncli in the advanced Lightning extension;
+query_channels exercises the fake lncli (advanced only). The local
+petcli eCash wallet commands exercise a fake cashu CLI (petitioner-
+side, $PETCLI_CASHU_BIN) - the arbiter-side cashu wrapper is never
+reached because eCash writes stop at the gateway gates or the
+not_implemented dispatch stub. All three fakes are installed below.
 
 Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
@@ -101,6 +105,16 @@ assert "lnd" not in sys.modules, (
     "mode must carry no LND dependency"
 )
 
+# Structural no-eCash guarantee, one rung up the ladder (doc 07 §9):
+# ecash.py is imported lazily by gateway._ecash() only on an
+# ecash-mode call, so onchain AND lightning deployments carry no
+# nutshell dependency. The runtime check fires in main() just before
+# the first ecash-mode variant (see the no-ecash-import gate).
+assert "ecash" not in sys.modules, (
+    "importing arbiter modules pulled in ecash.py; only ecash mode "
+    "may carry the eCash extension dependency"
+)
+
 # Test-mode timing on the arbiter side: SPACER_TIMING_MODE=test
 # selects the §10 5-15s windows. The gateway dispatch is currently a
 # stub so the timing layer is not actually exercised end-to-end via
@@ -131,6 +145,15 @@ os.environ["PETCLI_TEST_TIMING"] = "1"
 _STANDING_APPROVALS_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-standing-"))
 _STANDING_APPROVALS_PATH = _STANDING_APPROVALS_DIR / "standing_approvals.yaml"
 os.environ["SPACER_STANDING_APPROVALS_PATH"] = str(_STANDING_APPROVALS_PATH)
+
+# eCash allowance config path (doc 07 §8, ecash.allowance_sats). Same
+# per-variant lifecycle as standing approvals: cleared before each
+# variant's preconditions, so a variant without seed_ecash_allowance
+# sees the missing-config default - allowance 0, every fund refused -
+# which is itself the fail-safe behavior one variant asserts.
+_ECASH_ALLOWANCE_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-ecash-allow-"))
+_ECASH_ALLOWANCE_PATH = _ECASH_ALLOWANCE_DIR / "ecash.yaml"
+os.environ["SPACER_ECASH_ALLOWANCE_PATH"] = str(_ECASH_ALLOWANCE_PATH)
 
 # Pre-computed valid recipient token + a real testnet address. Used
 # by the seed_registry precondition so the new send-bitcoin /
@@ -283,6 +306,61 @@ os.environ["BITCOIN_DATADIR"] = str(_BITCOIN_FAKE_DIR)
 os.environ["BITCOIN_CLI_TIMEOUT_S"] = "5.0"
 
 
+# === Fake cashu for the local petcli eCash wallet variants ===========
+#
+# The local eCash commands (petcli advanced ecash balance/send/receive/
+# info) shell out to the petitioner-side cashu CLI ($PETCLI_CASHU_BIN)
+# and never touch the arbiter - they operate the AI's own bearer
+# wallet (doc 07 §3 custody split). The fake covers the full petcli ->
+# subprocess -> _petcli_local envelope pipeline deterministically,
+# mirroring the fake bitcoin-cli / fake lncli pattern with scenario
+# selection via $CASHU_SCENARIO. The ARBITER-side cashu wrapper
+# (arbiter/src/ecash.py) deliberately gets no fake here: no manifest
+# variant can reach it (eCash writes stop at the gateway gates or the
+# not_implemented dispatch stub), and leaving CASHU_BIN/CASHU_MINT_URL
+# unset means any unexpected arbiter-side mint call would error loudly
+# instead of being quietly absorbed by a fake.
+_CASHU_FAKE_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-cashu-"))
+_CASHU_FAKE = _CASHU_FAKE_DIR / "cashu"
+_CASHU_FAKE.write_text(
+    """#!/bin/sh
+# Fake petitioner-side cashu for the exit-loop runner. Dispatches on
+# the wallet subcommand; scenario via $CASHU_SCENARIO (default
+# "funded"). Values are deterministic so result.json artifacts are
+# byte-stable across runs.
+scenario="${CASHU_SCENARIO:-funded}"
+case "$1" in
+  balance)
+    case "$scenario" in
+      empty)
+        printf 'Balance: 0 sat\\n'
+        ;;
+      *)
+        printf 'Balance: 2500 sat\\n'
+        ;;
+    esac
+    ;;
+  send)
+    printf 'cashuBfakeexitloopvector\\n'
+    ;;
+  receive)
+    printf 'Received 1000 sat\\n'
+    ;;
+  info)
+    printf 'Version: nutshell/fake\\nWallet: petitioner\\nMint URL: https://mint.example.test\\n'
+    ;;
+  *)
+    echo "unknown command: $1" >&2
+    exit 64
+    ;;
+esac
+"""
+)
+_CASHU_FAKE.chmod(
+    _CASHU_FAKE.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+)
+
+
 # === Arbiter lifecycle ==============================================
 
 def _start_arbiter(audit_path, state_path, registry_yaml_path):
@@ -364,6 +442,12 @@ def _apply_precondition(precondition):
         rule so the gateway's standing_approvals.matches() returns
         True and dispatch fires (or omit and rely on the runner's
         per-variant clear for the default-pause path).
+      ("seed_ecash_allowance", sats)
+        Writes `ecash_allowance_sats: <sats>` to the eCash allowance
+        config path (doc 07 §8). Lets a fund_ecash variant pass (or
+        deliberately exceed) the allowance gate; omit and rely on
+        the runner's per-variant clear for the missing-config
+        default (allowance 0 = every fund refused).
     """
     op = precondition[0]
     if op == "deposit":
@@ -419,6 +503,11 @@ def _apply_precondition(precondition):
         _STANDING_APPROVALS_PATH.write_text(
             standing_approvals.render_yaml(rules)
         )
+    elif op == "seed_ecash_allowance":
+        _, sats = precondition
+        _ECASH_ALLOWANCE_PATH.write_text(
+            f"ecash_allowance_sats: {int(sats)}\n"
+        )
     else:
         raise ValueError(f"unknown precondition op {op!r}")
 
@@ -440,6 +529,10 @@ def _apply_precondition(precondition):
 #                    runner records the variant as "passed" iff this
 #                    returns True. Any exception in the callable also
 #                    counts as a failure.
+#   expected_audit_events / forbidden_audit_events:
+#                    event names that must / must not appear in the
+#                    variant's arbiter-events.log (see the assertion
+#                    block in _run_variant for why).
 #   description:     human-readable note on what the variant
 #                    exercises and which audit events fire.
 #
@@ -447,35 +540,58 @@ def _apply_precondition(precondition):
 #                    run with the variable UNSET - the onchain default
 #                    deployment. Advanced-extension variants set
 #                    "lightning" or "full" (both enable the extension;
-#                    the manifest exercises each at least once).
-#   bitcoin_cli_scenario / lncli_scenario:
+#                    the manifest exercises each at least once);
+#                    eCash-extension variants set "ecash" (the full
+#                    ladder, doc 07 §9).
+#   bitcoin_cli_scenario / lncli_scenario / cashu_scenario:
 #                    canned-reply selector for the fake bitcoin-cli /
-#                    fake lncli (default "funded" for both).
+#                    fake lncli / fake cashu (default "funded" for
+#                    all three).
+#   petcli_cashu_bin:
+#                    override for $PETCLI_CASHU_BIN (default: the
+#                    fake cashu installed above). The missing-binary
+#                    variant points it at a fixed nonexistent path so
+#                    the artifact stays deterministic.
 #
 # Variants in this list are the ones that exercise distinct code
-# paths reachable in the current code base, in both deployment modes
-# (gateway SPACER_MODE):
+# paths reachable in the current code base, across the deployment
+# modes (gateway SPACER_MODE):
 #
 # - onchain (default, SPACER_MODE unset): query_balance dispatches
 #   through arbiter/src/bitcoin.py against a fake bitcoin-cli the
 #   runner installs at module-import time; send_bitcoin exercises the
 #   registry-miss refusal and both standing-approvals branches. The
-#   Lightning ops (query_channels / send_lightning) are extension-
-#   gated: recognized but refused uniformly (decision_refuse_mode).
+#   extension ops (query_channels / send_lightning / fund_ecash /
+#   defund_ecash) are extension-gated: recognized but refused
+#   uniformly (decision_refuse_mode).
 # - advanced (SPACER_MODE=lightning|full): the Lightning extension
 #   layers query_channels / send_lightning back on, and query_balance
 #   reads the LND wallet instead of bitcoind - all through
-#   arbiter/src/lnd.py against the fake lncli.
+#   arbiter/src/lnd.py against the fake lncli. The eCash ops remain
+#   extension-gated (doc 07 §9: full is frozen at onchain+lightning).
+# - ecash (SPACER_MODE=ecash): the full ladder. The Lightning surface
+#   stays on (the ladder regression variants assert it) and the eCash
+#   writes run their gate pipeline: allowance cap (fund only,
+#   doc 07 §8) -> standing approvals -> the not_implemented dispatch
+#   stub pending the timing-layer executor.
+# - local petcli eCash wallet commands (no arbiter): petcli shells to
+#   the fake cashu ($PETCLI_CASHU_BIN) and wraps its output in the
+#   _petcli_local envelope.
 #
-# ORDER MATTERS: every onchain-mode variant precedes every advanced-
-# mode variant so the no-lnd-import gate in main() can verify, just
-# before the first advanced variant runs, that no onchain code path
-# imported lnd.py (the "no LND dependency at runtime" claim).
+# ORDER MATTERS twice: every onchain-mode variant precedes every
+# advanced-mode variant so the no-lnd-import gate in main() can
+# verify, just before the first advanced variant runs, that no
+# onchain code path imported lnd.py (the "no LND dependency at
+# runtime" claim); and every onchain- and lightning-mode variant
+# precedes every ecash-mode variant so the no-ecash-import gate can
+# verify, just before the first ecash variant runs, that both lower
+# rungs ran mint-free (doc 07 §9).
 #
-# Happy-path sends and the other registry-rejection subcases
-# (expired / used / bad checksum / anomalous) become reachable once
-# the timing-layer executor lands; their artifact directories stay
-# absent per §10's "an empty one signals not-yet-validated".
+# Happy-path sends (including fund/defund) and the other registry-
+# rejection subcases (expired / used / bad checksum / anomalous)
+# become reachable once the timing-layer executor lands; their
+# artifact directories stay absent per §10's "an empty one signals
+# not-yet-validated".
 VARIANTS = [
     # --- estimate window: local-only, no arbiter ---
     {
@@ -808,6 +924,7 @@ VARIANTS = [
             "status": "ok",
             "balance_sats": 150000,
         },
+        "forbidden_audit_events": ["scale_tier_shift_applied"],
         "description": (
             "Pending tier shift, future due_at. scale_state was seeded "
             "with active_tier=0 / target_tier=1 / due_at=now+1h before "
@@ -819,7 +936,7 @@ VARIANTS = [
             "fidelity because forcing the range immediately would "
             "re-couple the tier shift to the underlying fund movement. "
             "Audit log does NOT contain scale_tier_shift_applied for "
-            "this variant."
+            "this variant (the runner asserts the absence)."
         ),
     },
     {
@@ -910,6 +1027,56 @@ VARIANTS = [
             "arbiter-events.log carries decision_refuse_mode (the "
             "runner asserts the event); the wire body is the same "
             "uniform refusal every other refusal cause produces."
+        ),
+    },
+    # --- extension gate, eCash rung (doc 07 §9): the eCash writes are
+    # recognized in every mode but honored only in ecash mode. Against
+    # an onchain (default) arbiter they refuse uniformly at the same
+    # mode gate as the Lightning ops - decision_refuse_mode, op field
+    # disambiguating which extension was asked for - and ecash.py is
+    # never imported (the no-ecash-import gate asserts that later).
+    {
+        "path": ("advanced", "ecash", "fund", "refused-onchain-mode"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "fund_ecash against an onchain (default) arbiter. The op "
+            "belongs to the disabled eCash extension, so the gateway "
+            "refuses uniformly at the mode gate before any allowance "
+            "or standing-approvals logic runs (arbiter/src/ecash.py "
+            "is never imported). arbiter-events.log carries "
+            "decision_refuse_mode with reason "
+            "advanced_extension_disabled; the op field tells the "
+            "operator it was the eCash extension being probed."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "defund", "refused-onchain-mode"),
+        "petcli_args": [
+            "advanced", "ecash", "defund",
+            "--token", "cashuBfakeexitloopvector",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "defund_ecash against an onchain (default) arbiter: same "
+            "mode-gate refusal as the fund variant. The canned token "
+            "string is never parsed - the gate fires on the op alone, "
+            "so no token validation surface exists outside ecash mode."
         ),
     },
     # =================================================================
@@ -1066,6 +1233,426 @@ VARIANTS = [
             "decision_allow."
         ),
     },
+    # --- extension gate, eCash rung against the LIGHTNING extension:
+    # doc 07 §9 freezes `full` (and `lightning`) at onchain+lightning,
+    # so the eCash writes refuse at the mode gate even with the
+    # Lightning extension fully enabled. One variant runs under
+    # SPACER_MODE=lightning and one under SPACER_MODE=full to pin the
+    # frozen-alias behavior on both advanced values: neither silently
+    # arms ecash.
+    {
+        "path": ("advanced", "ecash", "fund", "refused-lightning-mode"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "fund_ecash against a lightning-mode arbiter. The "
+            "Lightning extension is on, but the eCash extension is "
+            "its own opt-in rung (doc 07 §9): the mode gate refuses "
+            "uniformly with decision_refuse_mode, and ecash.py stays "
+            "unimported (the no-ecash-import gate asserts that "
+            "lightning-mode variants ran mint-free)."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "defund", "refused-lightning-mode"),
+        "petcli_args": [
+            "advanced", "ecash", "defund",
+            "--token", "cashuBfakeexitloopvector",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "full",
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "defund_ecash against a SPACER_MODE=full arbiter: `full` "
+            "stays frozen at its 2026-06 meaning (onchain + "
+            "lightning, a legacy alias of `lightning`), so the eCash "
+            "write refuses at the mode gate exactly as under "
+            "`lightning`. This is the doc 07 §9 no-silent-arming "
+            "guarantee: an existing full deployment does not gain "
+            "bearer-value ops at upgrade."
+        ),
+    },
+    # =================================================================
+    # eCash-extension group (SPACER_MODE=ecash). Every variant below
+    # this divider runs the full ladder; every variant above runs
+    # onchain or lightning/full. main()'s no-ecash-import gate fires
+    # between the two groups, asserting both lower rungs ran with
+    # ecash.py unimported. The first fund_ecash gate check lazily
+    # imports ecash.py (gateway._ecash) for the allowance lookup;
+    # Python caches it for the rest of the run; that is expected.
+    # =================================================================
+    {
+        "path": ("query", "balance", "ecash-lnd-wallet"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "bitcoin_cli_scenario": "empty",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 50000,
+        },
+        "description": (
+            "query_balance under SPACER_MODE=ecash keeps its "
+            "lightning-mode behavior - the LND on-chain wallet via "
+            "the fake lncli (50_000 sat), NOT bitcoind (pinned to "
+            "the empty scenario to prove which path dispatched) and "
+            "NOT any eCash figure (doc 07 §9: no new read ops; the "
+            "AI counts its own float locally). Ladder regression: "
+            "ecash mode is lightning mode plus the eCash writes."
+        ),
+    },
+    {
+        "path": ("advanced", "channels", "ecash-mode"),
+        "petcli_args": ["advanced", "channels"],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "capacity_sats": 80000,
+        },
+        "description": (
+            "query_channels under SPACER_MODE=ecash: identical "
+            "behavior to the lightning-mode default variant "
+            "(local 50000 + remote 30000 = 80000, T0 no-cloak). "
+            "Ladder regression: enabling the eCash rung leaves the "
+            "Lightning read surface exactly as it was."
+        ),
+    },
+    # --- fund_ecash gate pipeline (doc 07 §3, §8): allowance cap ->
+    # standing approvals -> dispatch stub. The allowance check fires
+    # FIRST and is config-bounded (a HITL approval cannot exceed it).
+    {
+        "path": ("advanced", "ecash", "fund", "refused-no-allowance-config"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            # No seed_ecash_allowance: the missing-config default.
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_allowance"],
+        "description": (
+            "fund_ecash in ecash mode with NO allowance config "
+            "written. ecash.allowance_sats() reads a missing config "
+            "as 0, so outstanding(0) + 1000 > 0 refuses at the "
+            "allowance gate: the float cannot exist until the "
+            "operator explicitly writes its bound (doc 07 §8 "
+            "fail-safe). arbiter-events.log carries "
+            "decision_refuse_allowance with the requested/outstanding/"
+            "allowance figures."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "fund", "refused-over-allowance"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "100000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            ("seed_ecash_allowance", 50000),
+            # A matching standing-approval rule is deliberately staged
+            # to prove the allowance check fires FIRST (doc 07 §8: a
+            # HITL approval cannot exceed the allowance - the rule
+            # would admit the amount, but it is never consulted).
+            ("seed_standing_approvals", [
+                {"op": "fund_ecash",
+                 "destination": "mint",
+                 "max_amount_sats": 200000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_allowance"],
+        "forbidden_audit_events": ["standing_approval_match"],
+        "description": (
+            "fund_ecash for 100_000 sat against a 50_000-sat "
+            "allowance (outstanding 0). A standing-approval rule "
+            "admitting up to 200_000 sat is staged and must NOT "
+            "rescue the call: the allowance check precedes standing "
+            "approvals by design, so no approval - standing or HITL - "
+            "can widen the blast radius past the console-edited cap. "
+            "arbiter-events.log carries decision_refuse_allowance and "
+            "must NOT carry standing_approval_match (the runner "
+            "asserts both)."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "fund", "parked-no-standing-approval"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            ("seed_ecash_allowance", 50000),
+            # No seed_standing_approvals: default-pause path.
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_defer_hitl"],
+        "description": (
+            "fund_ecash inside the allowance (1000 of 50_000) but "
+            "with NO standing-approval rule: the allowance gate "
+            "passes, the standing-approvals check fails (default-"
+            "pause = empty config), the gateway HITL-parks and "
+            "refuses uniformly. arbiter-events.log carries "
+            "decision_defer_hitl with reason no_standing_approval, "
+            "distinct from the allowance refusal."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "fund", "allowed-by-standing-approval"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            ("seed_ecash_allowance", 50000),
+            ("seed_standing_approvals", [
+                {"op": "fund_ecash",
+                 "destination": "mint",
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: r == {
+            "status": "not_implemented",
+            "op": "fund_ecash",
+            "_petcli_estimate_window_s": 30.0,
+        },
+        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "description": (
+            "fund_ecash where the allowance admits the amount AND a "
+            "standing-approval rule matches (op fund_ecash, "
+            "destination 'mint' - the structural constant for eCash "
+            "ops, doc 07 §3 - amount under max). Both gates pass; "
+            "dispatch fires and returns the not_implemented stub "
+            "(the fund executor lands with the timing-layer "
+            "executor). arbiter-events.log contains "
+            "standing_approval_match and decision_allow."
+        ),
+    },
+    # --- defund_ecash gate pipeline: standing approvals -> dispatch
+    # stub. No allowance check (defund only shrinks exposure), and no
+    # gate-time amount (the token's value is the wallet's to decode at
+    # execution), so only an unbounded rule matches.
+    {
+        "path": ("advanced", "ecash", "defund", "parked-no-standing-approval"),
+        "petcli_args": [
+            "advanced", "ecash", "defund",
+            "--token", "cashuBfakeexitloopvector",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_defer_hitl"],
+        "description": (
+            "defund_ecash in ecash mode with no standing-approval "
+            "rule: no allowance check applies (defund only shrinks "
+            "the float), the standing-approvals default-pause parks "
+            "it in HITL and refuses uniformly. arbiter-events.log "
+            "carries decision_defer_hitl with reason "
+            "no_standing_approval. No allowance config is seeded - "
+            "defund must not require one."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "defund", "allowed-by-standing-approval"),
+        "petcli_args": [
+            "advanced", "ecash", "defund",
+            "--token", "cashuBfakeexitloopvector",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            # The rule is UNBOUNDED (no max_amount_sats): defund
+            # carries no gate-time amount, and an unknown amount fails
+            # any bounded rule, so a bounded defund rule would never
+            # match. Unbounded is the right shape - defund reduces
+            # exposure regardless of size.
+            ("seed_standing_approvals", [
+                {"op": "defund_ecash",
+                 "destination": "mint",
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: r == {
+            "status": "not_implemented",
+            "op": "defund_ecash",
+            "_petcli_estimate_window_s": 30.0,
+        },
+        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "description": (
+            "defund_ecash with an unbounded standing-approval rule "
+            "(op defund_ecash, destination 'mint', no amount bound): "
+            "the gate passes and dispatch returns the "
+            "not_implemented stub (the defund executor - swap-claim "
+            "at the pinned mint, melt to our LND - lands with the "
+            "timing-layer executor). arbiter-events.log contains "
+            "standing_approval_match and decision_allow."
+        ),
+    },
+    # =================================================================
+    # Local petcli eCash wallet commands (no arbiter). The custody
+    # split's other half (doc 07 §3): balance/send/receive/info
+    # operate the AI's own bearer wallet by shelling to the
+    # petitioner-side cashu CLI - here the fake at $PETCLI_CASHU_BIN.
+    # Position in the manifest is irrelevant to the import gates
+    # (petcli runs in its own subprocess and never touches arbiter
+    # modules); they sit last as their own group.
+    # =================================================================
+    {
+        "path": ("advanced", "ecash", "balance", "default"),
+        "petcli_args": ["advanced", "ecash", "balance"],
+        "uses_arbiter": False,
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "_petcli_local": True,
+            "exit_code": 0,
+            "stdout": "Balance: 2500 sat\n",
+            "stderr": "",
+        },
+        "description": (
+            "petcli advanced ecash balance: local wallet count via "
+            "the fake cashu (funded scenario, 2500 sat). The "
+            "_petcli_local envelope wraps the CLI's stdout verbatim; "
+            "petcli interprets nothing. The float is precisely "
+            "countable by design - scale cloaking does not apply to "
+            "a bearer instrument in hand (doc 07 §5.2)."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "balance", "empty-wallet"),
+        "petcli_args": ["advanced", "ecash", "balance"],
+        "uses_arbiter": False,
+        "cashu_scenario": "empty",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "_petcli_local": True,
+            "exit_code": 0,
+            "stdout": "Balance: 0 sat\n",
+            "stderr": "",
+        },
+        "description": (
+            "Same local path under CASHU_SCENARIO=empty: a zero "
+            "float renders as the wallet's own zero line, exit 0."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "balance", "missing-binary"),
+        "petcli_args": ["advanced", "ecash", "balance"],
+        "uses_arbiter": False,
+        "petcli_cashu_bin": "/nonexistent/petcli-cashu",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "_petcli_local": True,
+            "error": "cashu binary not found: /nonexistent/petcli-cashu",
+        },
+        "description": (
+            "petcli advanced ecash balance with $PETCLI_CASHU_BIN "
+            "pointing at a fixed nonexistent path: the wallet-missing "
+            "failure surfaces as a structured _petcli_local error "
+            "envelope (not a traceback), keeping petcli JSON-shaped "
+            "end-to-end."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "send", "default"),
+        "petcli_args": [
+            "advanced", "ecash", "send",
+            "--amount-sats", "500",
+        ],
+        "uses_arbiter": False,
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "_petcli_local": True,
+            "exit_code": 0,
+            "stdout": "cashuBfakeexitloopvector\n",
+            "stderr": "",
+        },
+        "description": (
+            "petcli advanced ecash send: serialize float value into "
+            "a handoff token, locally - the autonomy the extension "
+            "buys (doc 07 §3: no gateway mediation inside the "
+            "float). The fake returns the canned token string."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "receive", "default"),
+        "petcli_args": [
+            "advanced", "ecash", "receive",
+            "--token", "cashuBfakeexitloopvector",
+        ],
+        "uses_arbiter": False,
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "_petcli_local": True,
+            "exit_code": 0,
+            "stdout": "Received 1000 sat\n",
+            "stderr": "",
+        },
+        "description": (
+            "petcli advanced ecash receive: swap-claim a token into "
+            "the local wallet (the token string passes through as a "
+            "single argv entry - no shell expansion surface)."
+        ),
+    },
+    {
+        "path": ("advanced", "ecash", "info", "default"),
+        "petcli_args": ["advanced", "ecash", "info"],
+        "uses_arbiter": False,
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("_petcli_local") is True
+            and r.get("exit_code") == 0
+            and "nutshell/fake" in r.get("stdout", "")
+            and "mint.example.test" in r.get("stdout", "")
+        ),
+        "description": (
+            "petcli advanced ecash info: local wallet / mint info "
+            "via the fake cashu. The mint URL appearing here is by "
+            "design - the AI can always see which mint its tokens "
+            "embed (doc 07 §5.2); the mitigations are mint CHOICE, "
+            "not mint secrecy."
+        ),
+    },
 ]
 
 
@@ -1086,14 +1673,18 @@ def _run_variant(variant):
     # Per-variant environment. The fake binaries read their scenario
     # vars to pick which canned reply to print; SPACER_MODE selects the
     # gateway's deployment mode (the gateway reads it per request, so
-    # one runner process exercises both modes). A None value means the
+    # one runner process exercises every mode). A None value means the
     # variable must be UNSET for the variant - that is how onchain
     # variants prove onchain is the no-configuration default. Prior
     # values are restored in the finally block so a later variant's
-    # env is not contaminated.
+    # env is not contaminated. PETCLI_CASHU_BIN is always pinned (to
+    # the fake by default) so the local eCash wallet variants never
+    # fall through to a real `cashu` on the host PATH.
     env_overrides = {
         "LNCLI_SCENARIO": variant.get("lncli_scenario", "funded"),
         "BITCOIN_CLI_SCENARIO": variant.get("bitcoin_cli_scenario", "funded"),
+        "CASHU_SCENARIO": variant.get("cashu_scenario", "funded"),
+        "PETCLI_CASHU_BIN": variant.get("petcli_cashu_bin", str(_CASHU_FAKE)),
         "SPACER_MODE": variant.get("spacer_mode"),
     }
     saved_env = {k: os.environ.get(k) for k in env_overrides}
@@ -1103,14 +1694,17 @@ def _run_variant(variant):
         else:
             os.environ[k] = v
 
-    # Standing-approvals config is process-global state shared across
-    # variants via the env var; clear it here so a variant without a
-    # seed_standing_approvals precondition sees the empty-default
-    # (HITL every write), not whatever the previous variant wrote.
-    try:
-        _STANDING_APPROVALS_PATH.unlink()
-    except FileNotFoundError:
-        pass
+    # Standing-approvals and eCash-allowance configs are process-
+    # global state shared across variants via their env vars; clear
+    # them here so a variant without the corresponding seed
+    # precondition sees the empty default (HITL every write;
+    # allowance 0 = every fund refused), not whatever the previous
+    # variant wrote.
+    for stale in (_STANDING_APPROVALS_PATH, _ECASH_ALLOWANCE_PATH):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
 
     server = thread = port = None
     try:
@@ -1170,10 +1764,20 @@ def _run_variant(variant):
         # deployment mode this variant ran under so a non-AI reviewer
         # can tell at a glance.
         if not variant.get("uses_arbiter", True):
-            infra_note = (
-                "# Local-only variant: never reaches the arbiter, so no "
-                "bitcoind / LND interaction is possible.\n"
-            )
+            if variant["path"][:2] == ("advanced", "ecash"):
+                infra_note = (
+                    "# Local petitioner-side eCash wallet command: petcli "
+                    "shells to the cashu CLI at $PETCLI_CASHU_BIN (the "
+                    "runner's fake) and never reaches the arbiter. No "
+                    "bitcoind / LND / arbiter-side mint interaction is "
+                    "possible; the doc 07 §3 custody split puts these ops "
+                    "on the AI's side of the boundary by design.\n"
+                )
+            else:
+                infra_note = (
+                    "# Local-only variant: never reaches the arbiter, so no "
+                    "bitcoind / LND interaction is possible.\n"
+                )
         elif variant.get("spacer_mode") is None:
             infra_note = (
                 "# onchain (default) mode - SPACER_MODE unset. Read "
@@ -1181,11 +1785,27 @@ def _run_variant(variant):
                 "fake bitcoin-cli at $BITCOIN_CLI_BIN; write variants stop "
                 "at the recipient-address-registry / standing-approvals "
                 "gates or the not_implemented dispatch stub before "
-                "reaching bitcoin.py; Lightning-extension ops refuse at "
-                "the mode gate (decision_refuse_mode). arbiter/src/lnd.py "
-                "is never imported in this mode (the runner asserts it). "
-                "No live bitcoind / LND traffic for any variant in the "
-                "current manifest.\n"
+                "reaching bitcoin.py; Lightning- and eCash-extension ops "
+                "refuse at the mode gate (decision_refuse_mode). "
+                "arbiter/src/lnd.py and arbiter/src/ecash.py are never "
+                "imported in this mode (the runner asserts both). "
+                "No live bitcoind / LND / mint traffic for any variant in "
+                "the current manifest.\n"
+            )
+        elif variant.get("spacer_mode") == "ecash":
+            infra_note = (
+                "# ecash mode - SPACER_MODE=ecash (the full ladder, doc 07 "
+                "§9). Lightning reads (and query_balance, which reads the "
+                "LND wallet in this mode) dispatch through "
+                "arbiter/src/lnd.py to the fake lncli at $LNCLI_BIN; eCash "
+                "writes stop at the allowance / standing-approvals gates "
+                "or the not_implemented dispatch stub before any mint "
+                "call - arbiter/src/ecash.py is imported only for the "
+                "fund_ecash allowance lookup and no cashu subprocess ever "
+                "runs (CASHU_BIN / CASHU_MINT_URL are deliberately unset; "
+                "an unexpected arbiter-side mint call would error loudly). "
+                "No live bitcoind / LND / mint traffic for any variant in "
+                "the current manifest.\n"
             )
         else:
             infra_note = (
@@ -1194,8 +1814,12 @@ def _run_variant(variant):
                 "wallet in this mode) dispatch through arbiter/src/lnd.py "
                 "to the fake lncli at $LNCLI_BIN; Lightning writes stop "
                 "at the registry / standing-approvals gates or the "
-                "not_implemented dispatch stub. No live bitcoind / LND "
-                "traffic for any variant in the current manifest.\n"
+                "not_implemented dispatch stub; eCash-extension ops "
+                "refuse at the mode gate (decision_refuse_mode - the "
+                "eCash rung is its own opt-in; arbiter/src/ecash.py "
+                "stays unimported, the runner asserts it). No live "
+                "bitcoind / LND / mint traffic for any variant in the "
+                "current manifest.\n"
             )
         (artifact_dir / "infra-events.log").write_text(infra_note)
 
@@ -1238,14 +1862,19 @@ def _run_variant(variant):
         if not ok:
             return (False, f"expected returned False; result={parsed}")
 
-        # Optional audit-event assertion. Refusal wire shapes are
+        # Optional audit-event assertions. Refusal wire shapes are
         # deliberately uniform across causes (§4.1), so a variant whose
         # whole point is WHICH gate fired (mode gate vs. registry miss
-        # vs. standing-approvals park) cannot be told apart by the
-        # response alone; the distinguishing audit event in arbiter-
-        # events.log is the evidence, and the runner checks it here.
+        # vs. allowance vs. standing-approvals park) cannot be told
+        # apart by the response alone; the distinguishing audit event
+        # in arbiter-events.log is the evidence, and the runner checks
+        # it here. forbidden_audit_events is the complement: a variant
+        # whose point is that a gate did NOT fire (the allowance check
+        # preceding standing approvals; a pending tier shift not yet
+        # applied) asserts the event's absence.
         required_events = variant.get("expected_audit_events", [])
-        if required_events:
+        forbidden_events = variant.get("forbidden_audit_events", [])
+        if required_events or forbidden_events:
             audit_events = [
                 json.loads(line)["event"]
                 for line in (artifact_dir / "arbiter-events.log")
@@ -1256,6 +1885,10 @@ def _run_variant(variant):
                 if required not in audit_events:
                     return (False, f"audit log missing {required!r}; "
                                    f"events={audit_events}")
+            for forbidden in forbidden_events:
+                if forbidden in audit_events:
+                    return (False, f"audit log must not contain "
+                                   f"{forbidden!r}; events={audit_events}")
         return (True, None)
     finally:
         if server is not None:
@@ -1308,6 +1941,9 @@ def main(argv=None):
     lnd_gate_pending = any(
         v.get("spacer_mode") is not None for v in VARIANTS
     )
+    ecash_gate_pending = any(
+        v.get("spacer_mode") == "ecash" for v in VARIANTS
+    )
     for variant in VARIANTS:
         # The no-lnd-import gate: fires once, immediately before the
         # first advanced-mode variant. Every variant above it in the
@@ -1326,6 +1962,30 @@ def main(argv=None):
                     gate_name,
                     "lnd.py was imported while only onchain-mode "
                     "variants had run",
+                ))
+            else:
+                print(f"PASS  {gate_name}")
+                passed_paths.append(gate_name)
+        # The no-ecash-import gate, one rung up (doc 07 §9): fires
+        # once, immediately before the first ecash-mode variant.
+        # Every variant above it ran onchain or lightning/full; if
+        # any of them caused ecash.py to be imported, an onchain or
+        # lightning deployment would be carrying the eCash
+        # extension's nutshell dependency. (After this point the
+        # fund_ecash allowance gate imports ecash.py legitimately.)
+        if ecash_gate_pending and variant.get("spacer_mode") == "ecash":
+            ecash_gate_pending = False
+            checks_total += 1
+            gate_name = (
+                "no-ecash-import gate "
+                "(onchain+lightning variants ran mint-free)"
+            )
+            if "ecash" in sys.modules:
+                print(f"FAIL  {gate_name}")
+                failed.append((
+                    gate_name,
+                    "ecash.py was imported while only onchain- and "
+                    "lightning-mode variants had run",
                 ))
             else:
                 print(f"PASS  {gate_name}")
