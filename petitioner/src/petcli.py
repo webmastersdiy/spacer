@@ -32,9 +32,16 @@ Command tree:
     |   `-- poll                   check for a result against a handle
     |-- estimate                   local-only estimate display (§5.2)
     |   `-- window                 upper-bound seconds, no arbiter call
-    `-- advanced                   Lightning extension (SPACER_MODE=lightning|full)
+    `-- advanced                   opt-in extensions (arbiter SPACER_MODE gates)
         |-- send-lightning         Lightning send by recipient token
-        `-- channels               LN channels (aggregate-by-default)
+        |-- channels               LN channels (aggregate-by-default)
+        `-- ecash                  eCash extension (SPACER_MODE=ecash; doc 07)
+            |-- fund               arbiter-mediated: operator wallet -> float
+            |-- defund             arbiter-mediated: float -> operator wallet
+            |-- balance            local wallet: count the float
+            |-- send               local wallet: serialize a token to hand off
+            |-- receive            local wallet: swap-claim a token
+            `-- info               local wallet / mint info
 
 Bitcoin on-chain is the primary surface: send-bitcoin and balance live
 at the top of the tree. The Lightning commands move under `advanced`
@@ -44,16 +51,39 @@ arbiter refuses them uniformly. petcli holds no policy, so it always
 exposes the `advanced` namespace for discovery; the mode gate lives on
 the arbiter side.
 
+The eCash commands (design doc 07) split along the custody boundary:
+`fund` and `defund` are arbiter-mediated writes (ops fund_ecash /
+defund_ecash; honored only under SPACER_MODE=ecash, refused uniformly
+elsewhere), while `balance`, `send`, `receive`, and `info` are local
+operations on the AI's own bearer wallet - they shell out to the
+petitioner-side cashu CLI and never touch the arbiter. That is the
+extension's point: value inside the float moves without the gateway
+mediating each action.
+
 Specific command shape (which commands exist, what flags) is an
 implementation decision per §5.1; the doc deliberately does not
 enumerate it.
 """
 import argparse
 import json
+import os
+import subprocess
 import sys
 
 import estimate
 import protocol
+
+# The petitioner-side cashu CLI for the local eCash wallet commands.
+# PATH resolution is acceptable here - the petitioner runs inside the
+# AI's environment and holds no operator secrets, so the arbiter-side
+# pin-everything discipline does not apply; the env overrides exist so
+# the AI's environment (and the exit-loop harness) can point at a
+# specific binary. The wallet's own configuration (mint URL, wallet
+# dir) is the AI environment's concern: petcli passes the subcommand
+# argv through unmodified and adds no flags, holding no policy here
+# either.
+DEFAULT_CASHU_BIN = "cashu"
+DEFAULT_CASHU_TIMEOUT_S = 60.0
 
 
 def _emit(response):
@@ -144,6 +174,107 @@ def _do_advanced_send_lightning(args):
         estimate.action_plus_result_window_s()
     )
     _emit(response)
+
+
+def _do_advanced_ecash_fund(args):
+    # eCash fund: an arbiter-mediated write (op fund_ecash, doc 07 §3).
+    # No recipient token - the destination is structurally the
+    # arbiter's operator-pinned mint - so the body carries only the
+    # amount. The arbiter honors this under SPACER_MODE=ecash only and
+    # gates it on the allowance cap and standing approvals; any other
+    # mode refuses uniformly.
+    response = protocol.submit(
+        op="fund_ecash",
+        params={"amount_sats": args.amount_sats},
+        host=args.host,
+        port=args.port,
+        timeout_s=args.timeout_s,
+    )
+    response["_petcli_estimate_window_s"] = (
+        estimate.action_plus_result_window_s()
+    )
+    _emit(response)
+
+
+def _do_advanced_ecash_defund(args):
+    # eCash defund: the float -> operator-wallet crossing (op
+    # defund_ecash). The request body carries the serialized cashuB
+    # token being returned; the arbiter swap-claims and melts it at
+    # execution time. Like fund, ecash-mode only.
+    response = protocol.submit(
+        op="defund_ecash",
+        params={"token": args.token},
+        host=args.host,
+        port=args.port,
+        timeout_s=args.timeout_s,
+    )
+    response["_petcli_estimate_window_s"] = (
+        estimate.action_plus_result_window_s()
+    )
+    _emit(response)
+
+
+def _run_local_cashu(cashu_args):
+    """Run the petitioner-side cashu CLI and emit its outcome as a
+    JSON object, keeping petcli JSON-shaped end-to-end.
+
+    petcli does not interpret the wallet's output any more than it
+    interprets arbiter responses: stdout/stderr are presented
+    verbatim under a structured envelope, and the leading-underscore
+    `_petcli_local` marker distinguishes a local wallet outcome from
+    anything the arbiter said (mirroring `_petcli_transport_error`).
+    Binary-missing and timeout failures surface as structured errors
+    rather than tracebacks for the same reason.
+    """
+    bin_path = os.environ.get("PETCLI_CASHU_BIN", DEFAULT_CASHU_BIN)
+    timeout_s = float(
+        os.environ.get("PETCLI_CASHU_TIMEOUT_S", DEFAULT_CASHU_TIMEOUT_S)
+    )
+    # Argv list, no shell: token strings and amounts pass through
+    # without shell-metacharacter expansion.
+    cmd = [bin_path] + [str(a) for a in cashu_args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except FileNotFoundError:
+        _emit({
+            "_petcli_local": True,
+            "error": f"cashu binary not found: {bin_path}",
+        })
+        return
+    except subprocess.TimeoutExpired:
+        _emit({
+            "_petcli_local": True,
+            "error": f"cashu timed out after {timeout_s}s",
+        })
+        return
+    _emit({
+        "_petcli_local": True,
+        "exit_code": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    })
+
+
+def _do_advanced_ecash_balance(args):
+    _run_local_cashu(["balance"])
+
+
+def _do_advanced_ecash_send(args):
+    _run_local_cashu(["send", args.amount_sats])
+
+
+def _do_advanced_ecash_receive(args):
+    _run_local_cashu(["receive", args.token])
+
+
+def _do_advanced_ecash_info(args):
+    _run_local_cashu(["info"])
 
 
 def _do_query_balance(args):
@@ -400,6 +531,125 @@ def _build_parser():
     )
     _add_endpoint_flags(ach)
     ach.set_defaults(func=_do_advanced_channels)
+
+    # --- advanced ecash: the eCash extension (design doc 07) --------
+    # Custody split per doc 07 §3: fund/defund are arbiter-mediated
+    # writes (every custody crossing is gateway-mediated); balance/
+    # send/receive/info operate the AI's own local bearer wallet
+    # (movement within the float is not mediated - the autonomy the
+    # extension buys). As with the rest of `advanced`, the namespace
+    # is always visible for discovery and the mode gate lives on the
+    # arbiter side (SPACER_MODE=ecash).
+    ecash_p = advanced_sub.add_parser(
+        "ecash",
+        help="eCash extension commands (arbiter SPACER_MODE=ecash; doc 07)",
+        description=(
+            "Chaumian eCash (Cashu) extension, layered on top of the "
+            "Lightning extension. fund/defund cross the custody "
+            "boundary and are arbiter-mediated (ops fund_ecash / "
+            "defund_ecash; honored only when the arbiter runs "
+            "SPACER_MODE=ecash, refused uniformly elsewhere; fund is "
+            "additionally bounded by the operator's eCash allowance). "
+            "balance/send/receive/info operate the local bearer "
+            "wallet directly - they shell out to the petitioner-side "
+            "cashu CLI (env PETCLI_CASHU_BIN) and never touch the "
+            "arbiter."
+        ),
+    )
+    ecash_sub = ecash_p.add_subparsers(dest="ecash_op", metavar="<op>")
+    ecash_sub.required = True
+
+    ef = ecash_sub.add_parser(
+        "fund",
+        help="fund the eCash float from the operator wallet (arbiter-mediated)",
+        description=(
+            "Submit a fund_ecash write: move amount-sats from the "
+            "operator's Lightning liquidity into the AI's eCash "
+            "float, via the arbiter's full write pipeline (allowance "
+            "cap, standing approvals / HITL, action+result delays). "
+            "The serialized token arrives later via `petcli result "
+            "poll`. eCash extension: refused uniformly unless the "
+            "arbiter runs SPACER_MODE=ecash."
+        ),
+    )
+    ef.add_argument(
+        "--amount-sats", required=True, type=int, help="amount in satoshis"
+    )
+    _add_endpoint_flags(ef)
+    ef.set_defaults(func=_do_advanced_ecash_fund)
+
+    ed = ecash_sub.add_parser(
+        "defund",
+        help="return float value to the operator wallet (arbiter-mediated)",
+        description=(
+            "Submit a defund_ecash write: hand a serialized cashuB "
+            "token back across the custody boundary. The arbiter "
+            "swap-claims and melts it to its own Lightning node at "
+            "execution time. Subject to standing approvals / HITL "
+            "and the action+result delays; no allowance check "
+            "(defund only shrinks the float). eCash extension: "
+            "refused uniformly unless the arbiter runs "
+            "SPACER_MODE=ecash."
+        ),
+    )
+    ed.add_argument(
+        "--token", required=True, help="serialized cashuB token to return"
+    )
+    _add_endpoint_flags(ed)
+    ed.set_defaults(func=_do_advanced_ecash_defund)
+
+    eb = ecash_sub.add_parser(
+        "balance",
+        help="count the local eCash float (local wallet; no arbiter)",
+        description=(
+            "Show the local bearer wallet's balance. Local-only: "
+            "runs the petitioner-side cashu CLI. The float is "
+            "precisely countable by design (doc 07 §5.2: scale "
+            "cloaking does not apply to a bearer instrument in "
+            "hand)."
+        ),
+    )
+    eb.set_defaults(func=_do_advanced_ecash_balance)
+
+    es = ecash_sub.add_parser(
+        "send",
+        help="serialize float value into a token to hand off (local wallet)",
+        description=(
+            "Serialize amount-sats of the local float into a cashuB "
+            "token string for handoff to a third party. Local-only: "
+            "runs the petitioner-side cashu CLI; no arbiter "
+            "mediation (the autonomy the extension buys)."
+        ),
+    )
+    es.add_argument(
+        "--amount-sats", required=True, type=int, help="amount in satoshis"
+    )
+    es.set_defaults(func=_do_advanced_ecash_send)
+
+    er = ecash_sub.add_parser(
+        "receive",
+        help="swap-claim a received token into the float (local wallet)",
+        description=(
+            "Claim a serialized cashuB token into the local wallet "
+            "by swapping it at the mint (which invalidates the "
+            "handed-off proofs). Local-only: runs the petitioner-"
+            "side cashu CLI."
+        ),
+    )
+    er.add_argument(
+        "--token", required=True, help="serialized cashuB token to claim"
+    )
+    er.set_defaults(func=_do_advanced_ecash_receive)
+
+    ei = ecash_sub.add_parser(
+        "info",
+        help="show local wallet / mint info (local wallet)",
+        description=(
+            "Show the local wallet's view of itself and its mint. "
+            "Local-only: runs the petitioner-side cashu CLI."
+        ),
+    )
+    ei.set_defaults(func=_do_advanced_ecash_info)
 
     return p
 

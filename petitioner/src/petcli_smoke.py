@@ -54,14 +54,23 @@ def _expected_command_tree():
     walking) depends on these names."""
     return {
         # Bitcoin on-chain is the primary surface: send-bitcoin and
-        # balance sit at the top of the tree. The Lightning commands
-        # live under `advanced` (the opt-in extension namespace).
+        # balance sit at the top of the tree. The Lightning and eCash
+        # commands live under `advanced` (the opt-in extension
+        # namespace); the eCash leaves nest one level deeper and are
+        # checked separately in main().
         "submit": {"send-bitcoin"},
         "query": {"balance"},
         "result": {"poll"},
         "estimate": {"window"},
-        "advanced": {"send-lightning", "channels"},
+        "advanced": {"send-lightning", "channels", "ecash"},
     }
+
+
+def _expected_ecash_leaves():
+    """The third-level leaves under `advanced ecash` (design doc 07
+    §9): fund/defund are arbiter-mediated; balance/send/receive/info
+    are local wallet operations."""
+    return {"fund", "defund", "balance", "send", "receive", "info"}
 
 
 def main():
@@ -91,6 +100,24 @@ def main():
             set(leaf_action.choices.keys()) == leaves
         ), (group, leaf_action.choices.keys())
 
+    # The eCash group nests a third level under advanced (the only
+    # three-deep node in the tree); verify its leaf set the same way.
+    advanced_sp = top_action.choices["advanced"]
+    [advanced_action] = [
+        a
+        for a in advanced_sp._actions
+        if hasattr(a, "choices") and a.dest == "advanced_op"
+    ]
+    ecash_sp = advanced_action.choices["ecash"]
+    [ecash_action] = [
+        a
+        for a in ecash_sp._actions
+        if hasattr(a, "choices") and a.dest == "ecash_op"
+    ]
+    assert set(ecash_action.choices.keys()) == _expected_ecash_leaves(), (
+        ecash_action.choices.keys()
+    )
+
     # --help works at every node. Spot-check distinguishing strings
     # from the description so the test fails meaningfully if a
     # description regresses, not just on missing words like "petcli".
@@ -114,6 +141,22 @@ def main():
 
     out = _capture_help(parser, ["advanced", "send-lightning", "--help"])
     assert "to-token" in out and "amount-msats" in out, out
+
+    # The eCash extension namespace and its custody split must be
+    # discoverable: fund/defund (arbiter-mediated) and the local
+    # wallet leaves all appear under `advanced ecash`.
+    out = _capture_help(parser, ["advanced", "ecash", "--help"])
+    for leaf in ("fund", "defund", "balance", "send", "receive", "info"):
+        assert leaf in out, (leaf, out)
+
+    out = _capture_help(parser, ["advanced", "ecash", "fund", "--help"])
+    assert "amount-sats" in out and "SPACER_MODE=ecash" in out, out
+
+    out = _capture_help(parser, ["advanced", "ecash", "defund", "--help"])
+    assert "token" in out and "standing approvals" in out, out
+
+    out = _capture_help(parser, ["advanced", "ecash", "balance", "--help"])
+    assert "Local-only" in out, out
 
     out = _capture_help(parser, ["result", "poll", "--help"])
     assert "handle" in out, out
@@ -204,6 +247,32 @@ def main():
         assert decoded["amount_msats"] == 12345, decoded
         assert "_petcli_estimate_window_s" in decoded, decoded
 
+        # eCash fund/defund are arbiter-mediated writes: wire ops
+        # fund_ecash / defund_ecash, estimate annotation stamped like
+        # every other submit. fund carries only the amount (no
+        # recipient token - the destination is structurally the
+        # arbiter's pinned mint); defund carries the serialized token.
+        out = _capture_main(
+            ["advanced", "ecash", "fund", "--amount-sats", "5000"] + common
+        ).strip()
+        decoded = json.loads(out)
+        assert decoded["op"] == "fund_ecash", decoded
+        assert decoded["amount_sats"] == 5000, decoded
+        assert "_petcli_estimate_window_s" in decoded, decoded
+        assert captured_requests[-1] == {
+            "op": "fund_ecash",
+            "amount_sats": 5000,
+        }, captured_requests[-1]
+
+        out = _capture_main(
+            ["advanced", "ecash", "defund", "--token", "cashuBsmokevector"]
+            + common
+        ).strip()
+        decoded = json.loads(out)
+        assert decoded["op"] == "defund_ecash", decoded
+        assert decoded["token"] == "cashuBsmokevector", decoded
+        assert "_petcli_estimate_window_s" in decoded, decoded
+
         out = _capture_main(["query", "balance"] + common).strip()
         decoded = json.loads(out)
         assert decoded == {"op": "query_balance"}, decoded
@@ -224,6 +293,77 @@ def main():
         server.shutdown()
         server.server_close()
         t.join(timeout=2)
+
+    # Local eCash wallet commands: petcli shells to the cashu CLI
+    # (PETCLI_CASHU_BIN) and presents stdout/stderr verbatim under the
+    # _petcli_local envelope. A fake binary covers the full argv ->
+    # subprocess -> envelope pipeline; the missing-binary path must
+    # surface as a structured error, not a traceback.
+    import stat
+    import tempfile
+    from pathlib import Path
+
+    work = Path(tempfile.mkdtemp(prefix="petcli-cashu-smoke-"))
+    try:
+        fake = work / "cashu"
+        fake.write_text(
+            """#!/bin/sh
+case "$1" in
+  balance) printf 'Balance: 2500 sat\\n';;
+  send) printf 'cashuBfakesmokevector\\n';;
+  receive) printf 'Received 1000 sat\\n';;
+  info) printf 'Version: nutshell/fake\\n';;
+  *) echo "unknown command: $1" >&2; exit 64;;
+esac
+"""
+        )
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        os.environ["PETCLI_CASHU_BIN"] = str(fake)
+
+        out = _capture_main(["advanced", "ecash", "balance"]).strip()
+        decoded = json.loads(out)
+        assert decoded == {
+            "_petcli_local": True,
+            "exit_code": 0,
+            "stdout": "Balance: 2500 sat\n",
+            "stderr": "",
+        }, decoded
+
+        # Args propagate as separate argv entries (no shell): send
+        # passes the amount through, receive passes the token.
+        out = _capture_main(
+            ["advanced", "ecash", "send", "--amount-sats", "500"]
+        ).strip()
+        decoded = json.loads(out)
+        assert decoded["exit_code"] == 0, decoded
+        assert decoded["stdout"].strip() == "cashuBfakesmokevector", decoded
+
+        out = _capture_main(
+            ["advanced", "ecash", "receive", "--token", "cashuBfakesmokevector"]
+        ).strip()
+        decoded = json.loads(out)
+        assert "Received" in decoded["stdout"], decoded
+
+        # A failing wallet command surfaces its exit code and stderr
+        # verbatim; petcli does not interpret.
+        os.environ["PETCLI_CASHU_BIN"] = str(fake)
+        out = _capture_main(["advanced", "ecash", "info"]).strip()
+        decoded = json.loads(out)
+        assert decoded["exit_code"] == 0, decoded
+
+        # Missing binary: structured error envelope.
+        os.environ["PETCLI_CASHU_BIN"] = "/nonexistent/petcli-cashu"
+        out = _capture_main(["advanced", "ecash", "balance"]).strip()
+        decoded = json.loads(out)
+        assert decoded == {
+            "_petcli_local": True,
+            "error": "cashu binary not found: /nonexistent/petcli-cashu",
+        }, decoded
+    finally:
+        del os.environ["PETCLI_CASHU_BIN"]
+        import shutil
+
+        shutil.rmtree(work, ignore_errors=True)
 
     print(f"OK: petcli command tree round-trips against echo at port={bind_port}")
 
