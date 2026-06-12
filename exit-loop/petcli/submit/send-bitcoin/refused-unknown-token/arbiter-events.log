@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":49166},"ts":"2026-06-12T17:56:38Z"}
-{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T17:56:38Z"}
-{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-06-12T17:56:38Z"}
-{"event":"decision_refuse_registry","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T17:56:38Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52861},"ts":"2026-06-12T18:02:02Z"}
+{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T18:02:02Z"}
+{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-06-12T18:02:02Z"}
+{"event":"decision_refuse_registry","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T18:02:02Z"}

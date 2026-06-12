@@ -471,23 +471,31 @@ def _build_parser():
     )
     ew.set_defaults(func=_do_estimate_window)
 
-    # --- advanced: opt-in Lightning extension ----------------------
-    # Bitcoin on-chain is primary; the Lightning commands live here
-    # under `advanced` because the arbiter only honors them when it runs
-    # the advanced extension (SPACER_MODE=lightning|full). petcli holds
-    # no policy and cannot see the arbiter's mode, so it always exposes
-    # these for discovery; an onchain-mode arbiter refuses them uniformly
-    # (the wire response is the standard refusal body).
+    # --- advanced: opt-in extensions --------------------------------
+    # Bitcoin on-chain is primary; the Lightning and eCash commands
+    # live here under `advanced` because the arbiter only honors them
+    # when it runs the corresponding extension (Lightning:
+    # SPACER_MODE=lightning|full; eCash: SPACER_MODE=ecash). petcli
+    # holds no policy and cannot see the arbiter's mode, so it always
+    # exposes these for discovery; an arbiter without the extension
+    # refuses them uniformly (the wire response is the standard
+    # refusal body).
     advanced_p = sub.add_parser(
         "advanced",
-        help="Lightning extension commands (arbiter SPACER_MODE=lightning|full)",
+        help=(
+            "opt-in extension commands: Lightning "
+            "(SPACER_MODE=lightning|full) and eCash (SPACER_MODE=ecash)"
+        ),
         description=(
-            "Advanced Lightning extension. These commands speak the "
-            "same Lightning ops the gateway has always routed "
-            "(send_lightning, query_channels) but are grouped here to "
-            "signal they are opt-in: the arbiter honors them only when "
-            "deployed in advanced mode (SPACER_MODE=lightning|full). An "
-            "onchain-mode arbiter - the default - refuses them uniformly. "
+            "Advanced extensions, grouped here to signal they are "
+            "opt-in. The Lightning commands speak the same Lightning "
+            "ops the gateway has always routed (send_lightning, "
+            "query_channels); the arbiter honors them only when "
+            "deployed with the Lightning extension "
+            "(SPACER_MODE=lightning|full). The ecash group layers the "
+            "eCash extension on top (SPACER_MODE=ecash; design doc "
+            "07). An arbiter without the corresponding extension - "
+            "onchain is the default - refuses these uniformly. "
             "Bitcoin on-chain commands (submit send-bitcoin, query "
             "balance) are the primary surface."
         ),

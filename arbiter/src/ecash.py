@@ -59,6 +59,7 @@ Stdlib only.
 """
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import audit
@@ -359,8 +360,6 @@ def record_defunded(handle, amount_sats):
 
 
 def _record(direction, handle, amount_sats):
-    import time
-
     amount = int(amount_sats)
     if amount <= 0:
         raise ValueError(f"amount_sats must be positive, got {amount}")

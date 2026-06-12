@@ -619,8 +619,8 @@ def _handle_ecash_write(handler, request, deadline):
     (doc 07 §9), sleeping timing.mint_gap_s() between the mint-facing
     steps (doc 07 §6 T1)."""
     op = request.get("op")
+    amount = _request_amount_sats(request)
     if op == "fund_ecash":
-        amount = _request_amount_sats(request)
         ecash = _ecash()
         outstanding = ecash.outstanding_sats()
         allowance = ecash.allowance_sats()
@@ -646,11 +646,7 @@ def _handle_ecash_write(handler, request, deadline):
             )
             _respond_refused(handler, deadline)
             return
-    if not standing_approvals.matches(
-        op,
-        _ECASH_DESTINATION,
-        _request_amount_sats(request),
-    ):
+    if not standing_approvals.matches(op, _ECASH_DESTINATION, amount):
         audit.record(
             "decision_defer_hitl",
             {"op": op, "reason": "no_standing_approval"},
