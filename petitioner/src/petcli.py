@@ -25,15 +25,24 @@ Command tree:
 
     petcli
     |-- submit                     state-changing actions (§3, §4.6)
-    |   |-- send-bitcoin           Bitcoin send by recipient token
-    |   `-- send-lightning         Lightning send by recipient token
+    |   `-- send-bitcoin           Bitcoin send by recipient token
     |-- query                      read-only inspection (§3 last paragraph)
-    |   |-- balance                node balance (banded)
-    |   `-- channels               LN channels (aggregate-by-default)
+    |   `-- balance                node balance (banded)
     |-- result                     poll the result registry (§4.8)
     |   `-- poll                   check for a result against a handle
-    `-- estimate                   local-only estimate display (§5.2)
-        `-- window                 upper-bound seconds, no arbiter call
+    |-- estimate                   local-only estimate display (§5.2)
+    |   `-- window                 upper-bound seconds, no arbiter call
+    `-- advanced                   Lightning extension (SPACER_MODE=lightning|full)
+        |-- send-lightning         Lightning send by recipient token
+        `-- channels               LN channels (aggregate-by-default)
+
+Bitcoin on-chain is the primary surface: send-bitcoin and balance live
+at the top of the tree. The Lightning commands move under `advanced`
+because they belong to the opt-in advanced extension - the arbiter only
+honors them when it runs SPACER_MODE=lightning|full; an onchain-mode
+arbiter refuses them uniformly. petcli holds no policy, so it always
+exposes the `advanced` namespace for discovery; the mode gate lives on
+the arbiter side.
 
 Specific command shape (which commands exist, what flags) is an
 implementation decision per §5.1; the doc deliberately does not
@@ -111,7 +120,12 @@ def _do_submit_send_bitcoin(args):
     _emit(response)
 
 
-def _do_submit_send_lightning(args):
+def _do_advanced_send_lightning(args):
+    # Lightning send: an advanced-extension command. The wire op is the
+    # same send_lightning the gateway has always routed; only the petcli
+    # command path moved under `advanced`. An onchain-mode arbiter
+    # refuses this uniformly (the mode gate), so the AI sees the standard
+    # refusal body when the extension is not enabled.
     response = protocol.submit(
         op="send_lightning",
         # Same wire-field convention as send-bitcoin above: the CLI
@@ -143,7 +157,10 @@ def _do_query_balance(args):
     _emit(response)
 
 
-def _do_query_channels(args):
+def _do_advanced_channels(args):
+    # LN channels query: an advanced-extension command. The wire op is
+    # the same query_channels; only the petcli command path moved under
+    # `advanced`. An onchain-mode arbiter refuses this uniformly.
     response = protocol.submit(
         op="query_channels",
         params={},
@@ -234,28 +251,6 @@ def _build_parser():
     _add_endpoint_flags(sb)
     sb.set_defaults(func=_do_submit_send_bitcoin)
 
-    sl = submit_sub.add_parser(
-        "send-lightning",
-        help="send a Lightning payment to a recipient token",
-        description=(
-            "Send a Lightning payment to a recipient token from the "
-            "arbiter's recipient address registry (§4.7). The token "
-            "is a pseudonym; the real invoice/offer/pubkey never "
-            "appears AI-side."
-        ),
-    )
-    sl.add_argument(
-        "--to-token", required=True, help="recipient address registry token"
-    )
-    sl.add_argument(
-        "--amount-msats",
-        required=True,
-        type=int,
-        help="amount in millisatoshis",
-    )
-    _add_endpoint_flags(sl)
-    sl.set_defaults(func=_do_submit_send_lightning)
-
     # --- query: read-only inspection -------------------------------
     query_p = sub.add_parser(
         "query",
@@ -282,19 +277,6 @@ def _build_parser():
     )
     _add_endpoint_flags(qb)
     qb.set_defaults(func=_do_query_balance)
-
-    qc = query_sub.add_parser(
-        "channels",
-        help="list Lightning channels (aggregate-by-default)",
-        description=(
-            "List Lightning channels. Aggregate-by-default applies "
-            "(§4.1, §6): the response is summary-shaped unless the "
-            "arbiter has been asked, with audit-logged justification, "
-            "for per-item detail."
-        ),
-    )
-    _add_endpoint_flags(qc)
-    qc.set_defaults(func=_do_query_channels)
 
     # --- result: poll the result registry --------------------------
     result_p = sub.add_parser(
@@ -357,6 +339,67 @@ def _build_parser():
         ),
     )
     ew.set_defaults(func=_do_estimate_window)
+
+    # --- advanced: opt-in Lightning extension ----------------------
+    # Bitcoin on-chain is primary; the Lightning commands live here
+    # under `advanced` because the arbiter only honors them when it runs
+    # the advanced extension (SPACER_MODE=lightning|full). petcli holds
+    # no policy and cannot see the arbiter's mode, so it always exposes
+    # these for discovery; an onchain-mode arbiter refuses them uniformly
+    # (the wire response is the standard refusal body).
+    advanced_p = sub.add_parser(
+        "advanced",
+        help="Lightning extension commands (arbiter SPACER_MODE=lightning|full)",
+        description=(
+            "Advanced Lightning extension. These commands speak the "
+            "same Lightning ops the gateway has always routed "
+            "(send_lightning, query_channels) but are grouped here to "
+            "signal they are opt-in: the arbiter honors them only when "
+            "deployed in advanced mode (SPACER_MODE=lightning|full). An "
+            "onchain-mode arbiter - the default - refuses them uniformly. "
+            "Bitcoin on-chain commands (submit send-bitcoin, query "
+            "balance) are the primary surface."
+        ),
+    )
+    advanced_sub = advanced_p.add_subparsers(dest="advanced_op", metavar="<op>")
+    advanced_sub.required = True
+
+    asl = advanced_sub.add_parser(
+        "send-lightning",
+        help="send a Lightning payment to a recipient token",
+        description=(
+            "Send a Lightning payment to a recipient token from the "
+            "arbiter's recipient address registry (§4.7). The token is a "
+            "pseudonym; the real invoice/offer/pubkey never appears "
+            "AI-side. Advanced extension: refused uniformly unless the "
+            "arbiter runs SPACER_MODE=lightning|full."
+        ),
+    )
+    asl.add_argument(
+        "--to-token", required=True, help="recipient address registry token"
+    )
+    asl.add_argument(
+        "--amount-msats",
+        required=True,
+        type=int,
+        help="amount in millisatoshis",
+    )
+    _add_endpoint_flags(asl)
+    asl.set_defaults(func=_do_advanced_send_lightning)
+
+    ach = advanced_sub.add_parser(
+        "channels",
+        help="list Lightning channels (aggregate-by-default)",
+        description=(
+            "List Lightning channels. Aggregate-by-default applies "
+            "(§4.1, §6): the response is summary-shaped unless the "
+            "arbiter has been asked, with audit-logged justification, "
+            "for per-item detail. Advanced extension: refused uniformly "
+            "unless the arbiter runs SPACER_MODE=lightning|full."
+        ),
+    )
+    _add_endpoint_flags(ach)
+    ach.set_defaults(func=_do_advanced_channels)
 
     return p
 

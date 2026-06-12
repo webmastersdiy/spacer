@@ -1,0 +1,1 @@
+# advanced mode - SPACER_MODE=lightning. Lightning reads (and query_balance, which reads the LND wallet in this mode) dispatch through arbiter/src/lnd.py to the fake lncli at $LNCLI_BIN; Lightning writes stop at the registry / standing-approvals gates or the not_implemented dispatch stub. No live bitcoind / LND traffic for any variant in the current manifest.

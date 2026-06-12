@@ -1,14 +1,28 @@
 """
 Privacy gateway: the only network-reachable component on the arbiter.
 
-Every petitioner request hits this module first. The handler routes
-each inbound request through one of three branches based on op:
+Every petitioner request hits this module first. The exposed op set
+depends on the deployment mode (SPACER_MODE; see _advanced_mode):
 
-- Known read ops (query_balance, query_channels): dispatch directly.
-- Known write ops (send_bitcoin, send_lightning): resolve the
-  recipient_token through the recipient address registry during
-  pseudonymize-inbound; on miss, refuse uniformly. The registry IS
-  the destination gate - there is no separate outbound-policy step.
+- onchain (default): Bitcoin on-chain is the primary surface. The read
+  is query_balance (bitcoind wallet); the write is send_bitcoin. The
+  gateway runs with NO LND dependency in this mode - lnd.py is never
+  imported (see _lnd).
+- advanced (SPACER_MODE=lightning|full): the Lightning extension layers
+  query_channels (read) and send_lightning (write) back on, reading the
+  LND node via arbiter/src/lnd.py.
+
+The handler routes each inbound request through one of these branches
+based on op:
+
+- Known read ops: dispatch directly.
+- Known write ops: resolve the recipient_token through the recipient
+  address registry during pseudonymize-inbound; on miss, refuse
+  uniformly. The registry IS the destination gate - there is no
+  separate outbound-policy step.
+- Lightning ops while in onchain mode: refuse uniformly (gated behind
+  the advanced extension), audit-logged decision_refuse_mode so the
+  operator sees an extension-gated call distinctly from an unknown op.
 - Unknown ops: park in the HITL queue and refuse uniformly so the
   operator can decide on the directly-attached console.
 
@@ -41,12 +55,17 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
-import lnd
+import bitcoin
 import registry
 import results
 import scale
 import standing_approvals
 import state
+
+# NOTE: arbiter/src/lnd.py is deliberately NOT imported here. It is the
+# advanced Lightning extension's only dependency and is pulled in lazily
+# by _lnd(), so onchain (default) mode runs with no LND dependency at
+# all (scope item 1: "gateway must NOT import lnd unconditionally").
 
 # Loopback by default. The gateway binds the loopback interface because
 # the petitioner reaches it through a transport (Tor hidden service,
@@ -180,8 +199,9 @@ def process_request(handler):
 
     # Known read ops dispatch directly. No recipient_token, no
     # destination universe to resolve against; the gateway just calls
-    # into the backend wrapper. Outbound filtering still applies.
-    if op in _KNOWN_READ_OPS:
+    # into the backend wrapper. Outbound filtering still applies. The
+    # exposed read set depends on the deployment mode (_known_read_ops).
+    if op in _known_read_ops():
         response = _dispatch(request)
         response = _hide_secrets(response)
         response = _band_outbound(response)
@@ -201,8 +221,9 @@ def process_request(handler):
     # audit-logged as decision_defer_hitl with reason
     # no_standing_approval so the operator can distinguish the
     # default-pause from the registry miss and from an unknown op.
-    # Both gates must pass for dispatch to fire.
-    if op in _KNOWN_WRITE_OPS:
+    # Both gates must pass for dispatch to fire. The exposed write set
+    # depends on the deployment mode (_known_write_ops).
+    if op in _known_write_ops():
         resolved = _pseudonymize_inbound(request)
         if resolved is None:
             audit.record("decision_refuse_registry", {"op": op})
@@ -226,6 +247,21 @@ def process_request(handler):
         response = _aggregate_outbound(response)
         audit.record("decision_allow", {"op": op})
         _respond_ok(handler, response, deadline)
+        return
+
+    # Lightning op while running onchain (default) mode. The op is
+    # recognized but deliberately disabled: it belongs to the advanced
+    # extension the operator did not enable. Refuse uniformly - the
+    # operator already decided (by deploying onchain mode), so unlike an
+    # unknown op there is nothing to HITL-park. The distinct
+    # decision_refuse_mode audit event lets the operator tell an
+    # extension-gated call apart from a registry miss or an unknown op.
+    if op in _EXTENSION_GATED_OPS:
+        audit.record(
+            "decision_refuse_mode",
+            {"op": op, "reason": "advanced_extension_disabled"},
+        )
+        _respond_refused(handler, deadline)
         return
 
     # Unknown op. Park in the HITL queue and refuse uniformly so the
@@ -274,20 +310,81 @@ def _parse_request(raw):
     return obj
 
 
-# Known read ops the gateway dispatches without registry resolution.
-# These touch arbiter-internal node state (LND wallet / channel
-# balances), have no recipient_token, and are not state-changing.
-# Outbound filters (hide-secrets / band / aggregate) still apply on
-# the response.
-_KNOWN_READ_OPS = frozenset({"query_balance", "query_channels"})
+# Deployment mode (SPACER_MODE). onchain (default) makes Bitcoin
+# on-chain the primary - and only - surface, with no LND dependency.
+# The advanced Lightning extension (SPACER_MODE=lightning|full) layers
+# the LN ops back on. Anything other than the two advanced values reads
+# as onchain so a typo or an empty value fails safe toward the no-LND
+# default rather than silently enabling the extension.
+_ADVANCED_MODES = frozenset({"lightning", "full"})
 
-# Known write ops the gateway resolves through the recipient address
-# registry (§4.7). The registry IS the destination gate: a miss
-# refuses uniformly with audit decision_refuse_registry; a hit
-# rewrites the request to carry the real recipient_address before
-# dispatch. New write ops added here MUST also be handled in
-# _dispatch and must require a recipient_token in their wire shape.
-_KNOWN_WRITE_OPS = frozenset({"send_bitcoin", "send_lightning"})
+
+def _advanced_mode():
+    """True iff the deployment runs the advanced Lightning extension.
+
+    Read per-request (not cached at import) so the exit-loop runner can
+    exercise both modes in one process by setting SPACER_MODE around
+    each variant, mirroring how scale.py / timing.py read their own
+    mode env vars."""
+    return os.environ.get("SPACER_MODE", "onchain").strip().lower() in _ADVANCED_MODES
+
+
+def _lnd():
+    """Lazily import the LND extension module (arbiter/src/lnd.py).
+
+    The whole point of onchain mode (scope item 1) is "no LND dependency
+    at runtime": a deployment that does not run Lightning must not even
+    import lnd.py. Importing it here - inside the advanced-mode dispatch
+    path - rather than at module top is what makes that literally true.
+    Python caches the module in sys.modules after the first advanced-mode
+    call, so the import cost is paid once."""
+    import lnd
+    return lnd
+
+
+# Satoshis per bitcoin. bitcoin.getbalance() returns a Decimal in BTC;
+# the gateway presents satoshis (matching the LND path's integer-sat
+# wire shape), so it scales by 1e8 before scale.present(). Kept as an
+# int literal so Decimal * int stays exact - no float in the money path.
+_SATS_PER_BTC = 100_000_000
+
+# Read op exposed in onchain (default) mode. query_balance reads the
+# bitcoind wallet; it has no recipient_token and is not state-changing.
+# Outbound filters (hide-secrets / band / aggregate) still apply.
+_ONCHAIN_READ_OPS = frozenset({"query_balance"})
+
+# Write op exposed in onchain (default) mode. send_bitcoin resolves its
+# recipient_token through the recipient address registry (§4.7), the
+# same WHO-gate every write passes. New onchain write ops added here
+# MUST also be handled in _dispatch and require a recipient_token.
+_ONCHAIN_WRITE_OPS = frozenset({"send_bitcoin"})
+
+# Ops the advanced Lightning extension layers back on. query_channels
+# (read) and send_lightning (write) require the LND module and node; in
+# onchain mode they are gated (refused uniformly, decision_refuse_mode).
+_ADVANCED_READ_OPS = frozenset({"query_channels"})
+_ADVANCED_WRITE_OPS = frozenset({"send_lightning"})
+
+# Advanced-only ops, used by the onchain-mode gate in process_request to
+# refuse Lightning calls uniformly rather than HITL-park them like an
+# unknown op. In advanced mode these are already in _known_read_ops() /
+# _known_write_ops() and never reach the gate.
+_EXTENSION_GATED_OPS = _ADVANCED_READ_OPS | _ADVANCED_WRITE_OPS
+
+
+def _known_read_ops():
+    """Read ops the gateway dispatches directly, for the active mode."""
+    if _advanced_mode():
+        return _ONCHAIN_READ_OPS | _ADVANCED_READ_OPS
+    return _ONCHAIN_READ_OPS
+
+
+def _known_write_ops():
+    """Write ops the gateway resolves through the registry, for the
+    active mode."""
+    if _advanced_mode():
+        return _ONCHAIN_WRITE_OPS | _ADVANCED_WRITE_OPS
+    return _ONCHAIN_WRITE_OPS
 
 
 def _hitl_park(request):
@@ -412,31 +509,45 @@ def _dispatch(request):
     then falls through to the "not_implemented" fallback. Wiring is
     mechanical when the executor lands; structure is in place.
 
-    query_balance returns the LND on-chain wallet's total balance,
-    routed through scale.present() so the precise satoshi value AND
-    the wallet's order of magnitude are hidden from the petitioner.
-    The cloak is on; numeric banding (the old _band_sats step) is
-    deliberately dropped for these ops because the cloak's per-tier
-    scale already provides 10x+ compression of the presented value -
-    layering a fixed-resolution band on top would muddy the math
-    without adding meaningful privacy. Banding remains the design for
-    fields that are NOT cloak-eligible (e.g., per-call fee amounts on
-    send paths); those land with their own beads.
+    query_balance returns the wallet's total balance, routed through
+    scale.present() so the precise satoshi value AND the wallet's order
+    of magnitude are hidden from the petitioner. In onchain (default)
+    mode the figure comes from the bitcoind wallet (bitcoin.getbalance(),
+    a BTC Decimal scaled to integer sats); in the advanced Lightning
+    extension it comes from the LND on-chain wallet (lnd.walletbalance()).
+    Either way the wire shape is balance_sats. The cloak is on; numeric
+    banding (the old _band_sats step) is deliberately dropped for these
+    ops because the cloak's per-tier scale already provides 10x+
+    compression of the presented value - layering a fixed-resolution
+    band on top would muddy the math without adding meaningful privacy.
+    Banding remains the design for fields that are NOT cloak-eligible
+    (e.g., per-call fee amounts on send paths); those land with their
+    own beads.
 
-    query_channels returns the LND channel pool's aggregate capacity
-    (local + remote), also routed through scale.present(). Aggregate-
-    by-default per §4.3: per-channel detail is suppressed without a
-    per-call justification.
+    query_channels (advanced extension only) returns the LND channel
+    pool's aggregate capacity (local + remote), also routed through
+    scale.present(). Aggregate-by-default per §4.3: per-channel detail
+    is suppressed without a per-call justification.
 
     Per GLOSSARY 'Scale cloaking' and §4.3.
     """
     op = request.get("op")
     if op == "query_balance":
-        raw = lnd.walletbalance()
-        total = int(raw.get("total_balance", "0"))
+        if _advanced_mode():
+            # Advanced extension: the LND on-chain wallet total.
+            raw = _lnd().walletbalance()
+            total = int(raw.get("total_balance", "0"))
+            return {"status": "ok", "balance_sats": scale.present(total)}
+        # onchain (default): the bitcoind wallet's confirmed balance.
+        # getbalance() returns a Decimal in BTC; scale to integer sats
+        # (the same wire shape the LND path presents) before cloaking.
+        total = int(bitcoin.getbalance() * _SATS_PER_BTC)
         return {"status": "ok", "balance_sats": scale.present(total)}
     if op == "query_channels":
-        raw = lnd.channelbalance()
+        # query_channels is an advanced-extension read; the onchain
+        # router gates it before dispatch, so this branch only runs in
+        # advanced mode and the lazy LND import is always satisfied.
+        raw = _lnd().channelbalance()
         local = int(raw.get("local_balance", {}).get("sat", "0"))
         remote = int(raw.get("remote_balance", {}).get("sat", "0"))
         return {"status": "ok", "capacity_sats": scale.present(local + remote)}

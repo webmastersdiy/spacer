@@ -53,10 +53,14 @@ def _expected_command_tree():
     without updating this map - the AI's discovery surface (`--help`
     walking) depends on these names."""
     return {
-        "submit": {"send-bitcoin", "send-lightning"},
-        "query": {"balance", "channels"},
+        # Bitcoin on-chain is the primary surface: send-bitcoin and
+        # balance sit at the top of the tree. The Lightning commands
+        # live under `advanced` (the opt-in extension namespace).
+        "submit": {"send-bitcoin"},
+        "query": {"balance"},
         "result": {"poll"},
         "estimate": {"window"},
+        "advanced": {"send-lightning", "channels"},
     }
 
 
@@ -95,13 +99,21 @@ def main():
     assert "submit" in out and "query" in out, out
 
     out = _capture_help(parser, ["submit", "--help"])
-    assert "send-bitcoin" in out and "send-lightning" in out, out
+    assert "send-bitcoin" in out, out
 
     out = _capture_help(parser, ["submit", "send-bitcoin", "--help"])
     assert "to-token" in out and "amount-sats" in out, out
 
     out = _capture_help(parser, ["query", "--help"])
-    assert "balance" in out and "channels" in out, out
+    assert "balance" in out, out
+
+    # The Lightning commands moved under the `advanced` extension
+    # namespace; the group and its leaves must be discoverable there.
+    out = _capture_help(parser, ["advanced", "--help"])
+    assert "send-lightning" in out and "channels" in out, out
+
+    out = _capture_help(parser, ["advanced", "send-lightning", "--help"])
+    assert "to-token" in out and "amount-msats" in out, out
 
     out = _capture_help(parser, ["result", "poll", "--help"])
     assert "handle" in out, out
@@ -174,9 +186,11 @@ def main():
             "amount_sats": 1000,
         }, captured_requests[-1]
 
+        # Lightning send now lives under `advanced`; the wire op is
+        # still send_lightning (only the command path moved).
         out = _capture_main(
             [
-                "submit",
+                "advanced",
                 "send-lightning",
                 "--to-token",
                 "tok_Y",
@@ -194,7 +208,8 @@ def main():
         decoded = json.loads(out)
         assert decoded == {"op": "query_balance"}, decoded
 
-        out = _capture_main(["query", "channels"] + common).strip()
+        # Channels query now lives under `advanced`; wire op unchanged.
+        out = _capture_main(["advanced", "channels"] + common).strip()
         decoded = json.loads(out)
         assert decoded == {"op": "query_channels"}, decoded
 

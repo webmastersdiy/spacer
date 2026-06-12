@@ -15,10 +15,13 @@ For every variant declared in VARIANTS:
      ephemeral port. Capture stdout, stderr, the variant-specific
      audit log, the parsed petcli response, and a placeholder
      infra-events.log under exit-loop/petcli/<command-path>/<variant-name>/.
-  4. Tear the arbiter down and apply the variant's expected check to
-     the parsed response. A failed check leaves the artifacts in
-     place so a non-AI reviewer can confirm what actually executed
-     (per §2.1 auditability).
+  4. Tear the arbiter down, apply the variant's expected check to
+     the parsed response, and assert any expected_audit_events
+     against the captured audit log (refusals are wire-uniform by
+     design, so the audit event is what distinguishes which gate
+     fired). A failed check leaves the artifacts in place so a
+     non-AI reviewer can confirm what actually executed (per §2.1
+     auditability).
 
 Validations that pass are populated under exit-loop/; validations
 that fail leave failure artifacts on disk and the runner exits
@@ -38,7 +41,10 @@ Stdlib only. No bitcoind / LND infrastructure is exercised through
 the gateway dispatch in the current code base for state-changing
 ops (no executor wires the timing layer to bitcoin.py / lnd.py yet),
 so infra-events.log records that fact rather than capturing real
-RPC traffic. Read-only ops exercise the fake lncli installed below.
+RPC traffic. Read-only query_balance exercises a fake bitcoin-cli in
+onchain (default) mode and a fake lncli in the advanced Lightning
+extension; query_channels exercises the fake lncli (advanced only).
+Both fakes are installed below.
 
 Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
@@ -82,6 +88,18 @@ import registry  # noqa: E402
 import scale  # noqa: E402
 import standing_approvals  # noqa: E402
 import timing  # noqa: E402, F401
+
+# Structural no-LND guarantee: importing the gateway (and every other
+# arbiter module above) must not pull in lnd.py. The LND wrapper is the
+# advanced Lightning extension's dependency, imported lazily by
+# gateway._lnd() only on an advanced-mode dispatch. If this fires, some
+# arbiter module regained a top-level lnd import and onchain (default)
+# mode no longer runs LND-free. A second, runtime check fires in main()
+# after all onchain-mode variants have run (see the no-lnd-import gate).
+assert "lnd" not in sys.modules, (
+    "importing arbiter modules pulled in lnd.py; onchain (default) "
+    "mode must carry no LND dependency"
+)
 
 # Test-mode timing on the arbiter side: SPACER_TIMING_MODE=test
 # selects the §10 5-15s windows. The gateway dispatch is currently a
@@ -207,6 +225,64 @@ os.environ["LNCLI_NETWORK"] = "signet"
 os.environ["LNCLI_TIMEOUT_S"] = "5.0"
 
 
+# === Fake bitcoin-cli for the onchain-mode query variants ===========
+#
+# In onchain (default) mode gateway._dispatch wires query_balance
+# through arbiter/src/bitcoin.py, which shells out to `bitcoin-cli`.
+# Same pattern as the fake lncli above (and as bitcoin.py's own smoke
+# test): a fake binary covers the full gateway -> dispatch -> bitcoin
+# argv-construction -> Decimal parse stack without a live bitcoind.
+# Scenario selection via $BITCOIN_CLI_SCENARIO; balances are the same
+# sat figures the lncli scenarios use (getbalance prints BTC, so each
+# value here is the lncli scenario's sats / 1e8), keeping the cloak-
+# tier expectations identical across the two backends.
+_BITCOIN_FAKE_DIR = Path(tempfile.mkdtemp(prefix="exit-loop-bitcoin-"))
+_BITCOIN_FAKE = _BITCOIN_FAKE_DIR / "bitcoin-cli"
+_BITCOIN_FAKE.write_text(
+    """#!/bin/sh
+# Fake bitcoin-cli for the exit-loop runner. Strips the -datadir=
+# flag the way arbiter/src/bitcoin.py prepends it, then dispatches
+# on the RPC name. Scenario via $BITCOIN_CLI_SCENARIO (default
+# "funded"); values are deterministic BTC decimals that the gateway
+# scales to integer sats before cloaking.
+case "$1" in -datadir=*) shift;; esac
+scenario="${BITCOIN_CLI_SCENARIO:-funded}"
+case "$1" in
+  getbalance)
+    case "$scenario" in
+      empty)
+        printf '0.00000000'
+        ;;
+      tier-1)
+        # 150_000 sat -> natural cloak tier T1.
+        printf '0.00150000'
+        ;;
+      tier-2)
+        # 1_500_000 sat -> natural cloak tier T2.
+        printf '0.01500000'
+        ;;
+      *)
+        # Default funded scenario: 50_000 sat, inside T0 so the
+        # cloak is a no-op and the wire response is the raw figure.
+        printf '0.00050000'
+        ;;
+    esac
+    ;;
+  *)
+    echo "unknown rpc: $1" >&2
+    exit 64
+    ;;
+esac
+"""
+)
+_BITCOIN_FAKE.chmod(
+    _BITCOIN_FAKE.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+)
+os.environ["BITCOIN_CLI_BIN"] = str(_BITCOIN_FAKE)
+os.environ["BITCOIN_DATADIR"] = str(_BITCOIN_FAKE_DIR)
+os.environ["BITCOIN_CLI_TIMEOUT_S"] = "5.0"
+
+
 # === Arbiter lifecycle ==============================================
 
 def _start_arbiter(audit_path, state_path, registry_yaml_path):
@@ -218,10 +294,10 @@ def _start_arbiter(audit_path, state_path, registry_yaml_path):
     The registry's storage substrate is the YAML file at
     arbiter/config/destinations.yaml in production (bead bl-2lbqu4);
     isolating it per variant via configure() keeps each variant from
-    seeing entries from any other variant. The runner does not seed
-    registry entries (the only registry-touching variants are the
-    refused-unknown-token sends, which use a token absent from the
-    registry by construction)."""
+    seeing entries from any other variant. Variants that need a
+    resolvable token stage it via the seed_registry precondition;
+    the refused-unknown-token sends rely on the fresh registry being
+    empty by construction."""
     audit.configure(audit_path)
     state.configure(state_path)
     state.migrate()
@@ -367,19 +443,39 @@ def _apply_precondition(precondition):
 #   description:     human-readable note on what the variant
 #                    exercises and which audit events fire.
 #
+#   spacer_mode:     SPACER_MODE value for the variant, or absent to
+#                    run with the variable UNSET - the onchain default
+#                    deployment. Advanced-extension variants set
+#                    "lightning" or "full" (both enable the extension;
+#                    the manifest exercises each at least once).
+#   bitcoin_cli_scenario / lncli_scenario:
+#                    canned-reply selector for the fake bitcoin-cli /
+#                    fake lncli (default "funded" for both).
+#
 # Variants in this list are the ones that exercise distinct code
-# paths reachable in the current code base. Read-only query_balance
-# and query_channels are known-read ops in gateway._KNOWN_READ_OPS
-# and dispatch through arbiter/src/lnd.py against a fake lncli the
-# runner installs at module-import time, producing deterministic
-# cloak-presented responses. State-changing send_bitcoin /
-# send_lightning are known-write ops; the runner currently exercises
-# only the registry-miss refusal path against an unknown test token
-# (decision_refuse_registry on the audit side, uniform refusal on
-# the wire). Happy-path sends and the other registry-rejection
-# subcases (expired / used / bad checksum / anomalous) become
-# reachable once the timing-layer executor lands and the runner
-# can seed registry entries to exercise each subcase distinctly.
+# paths reachable in the current code base, in both deployment modes
+# (gateway SPACER_MODE):
+#
+# - onchain (default, SPACER_MODE unset): query_balance dispatches
+#   through arbiter/src/bitcoin.py against a fake bitcoin-cli the
+#   runner installs at module-import time; send_bitcoin exercises the
+#   registry-miss refusal and both standing-approvals branches. The
+#   Lightning ops (query_channels / send_lightning) are extension-
+#   gated: recognized but refused uniformly (decision_refuse_mode).
+# - advanced (SPACER_MODE=lightning|full): the Lightning extension
+#   layers query_channels / send_lightning back on, and query_balance
+#   reads the LND wallet instead of bitcoind - all through
+#   arbiter/src/lnd.py against the fake lncli.
+#
+# ORDER MATTERS: every onchain-mode variant precedes every advanced-
+# mode variant so the no-lnd-import gate in main() can verify, just
+# before the first advanced variant runs, that no onchain code path
+# imported lnd.py (the "no LND dependency at runtime" claim).
+#
+# Happy-path sends and the other registry-rejection subcases
+# (expired / used / bad checksum / anomalous) become reachable once
+# the timing-layer executor lands; their artifact directories stay
+# absent per §10's "an empty one signals not-yet-validated".
 VARIANTS = [
     # --- estimate window: local-only, no arbiter ---
     {
@@ -501,14 +597,15 @@ VARIANTS = [
             "wire."
         ),
     },
-    # --- submit / query: state-changing ops resolve through the
-    # recipient address registry (§4.7). Sending with a token that
-    # is not in the registry (here, the made-up 'ABCDEF') refuses
-    # uniformly at the registry gate. The wire shape is the standard
-    # refusal body; the audit log carries decision_refuse_registry
-    # so the operator can see *which* token failed and why. These
-    # variants exercise that miss path; happy-path sends become
-    # reachable once registry seeding + the timing-layer executor land.
+    # --- submit send-bitcoin: the primary (onchain) write op. State-
+    # changing ops resolve through the recipient address registry
+    # (§4.7). Sending with a token that is not in the registry (here,
+    # the made-up 'ABCDEF') refuses uniformly at the registry gate.
+    # The wire shape is the standard refusal body; the audit log
+    # carries decision_refuse_registry so the operator can see *which*
+    # token failed and why. The advanced-extension send_lightning
+    # analogues live in the advanced-mode group at the end of the
+    # manifest.
     {
         "path": ("submit", "send-bitcoin", "refused-unknown-token"),
         "petcli_args": [
@@ -529,25 +626,6 @@ VARIANTS = [
             "and the gateway refuses uniformly. petcli stamps the "
             "§5.2 local 30s estimate alongside the refusal. Audit "
             "logs decision_refuse_registry."
-        ),
-    },
-    {
-        "path": ("submit", "send-lightning", "refused-unknown-token"),
-        "petcli_args": [
-            "submit", "send-lightning",
-            "--to-token", "ABCDEF",
-            "--amount-msats", "1000",
-        ],
-        "uses_arbiter": True,
-        "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
-        "description": (
-            "Same registry-miss path as send-bitcoin/refused-unknown-"
-            "token, but for the Lightning send op. Audit logs "
-            "decision_refuse_registry."
         ),
     },
     # --- submit: post-registry, standing-approvals gate. The token
@@ -576,6 +654,7 @@ VARIANTS = [
             r.get("status") == "refused"
             and r.get("_petcli_estimate_window_s") == 30.0
         ),
+        "expected_audit_events": ["decision_defer_hitl"],
         "description": (
             "send_bitcoin with a valid (registry-resolved) recipient "
             "token but NO matching standing-approval rule. The "
@@ -609,6 +688,7 @@ VARIANTS = [
             "op": "send_bitcoin",
             "_petcli_estimate_window_s": 30.0,
         },
+        "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
             "send_bitcoin where the registry token resolves AND a "
             "standing-approval rule matches (op + destination + "
@@ -617,61 +697,6 @@ VARIANTS = [
             "the not_implemented marker. The variant proves the gate "
             "let the call through. arbiter-events.log must contain "
             "standing_approval_match and decision_allow."
-        ),
-    },
-    {
-        "path": ("submit", "send-lightning", "parked-no-standing-approval"),
-        "petcli_args": [
-            "submit", "send-lightning",
-            "--to-token", _VALID_TOKEN,
-            "--amount-msats", "1000000",
-        ],
-        "uses_arbiter": True,
-        "preconditions": [
-            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
-        ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
-        "description": (
-            "Same default-pause path as send-bitcoin/parked-no-"
-            "standing-approval but for the Lightning send op. "
-            "amount_msats=1_000_000 (= 1000 sats post-ceiling) is "
-            "irrelevant here because no rule exists; arbiter-events."
-            "log records decision_defer_hitl with reason "
-            "no_standing_approval."
-        ),
-    },
-    {
-        "path": ("submit", "send-lightning", "allowed-by-standing-approval"),
-        "petcli_args": [
-            "submit", "send-lightning",
-            "--to-token", _VALID_TOKEN,
-            "--amount-msats", "1000000",
-        ],
-        "uses_arbiter": True,
-        "preconditions": [
-            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
-            ("seed_standing_approvals", [
-                {"op": "send_lightning",
-                 "destination": _VALID_TOKEN,
-                 "max_amount_sats": 50000,
-                 "rationale": "exit-loop test rule"},
-            ]),
-        ],
-        "expected": lambda r: r == {
-            "status": "not_implemented",
-            "op": "send_lightning",
-            "_petcli_estimate_window_s": 30.0,
-        },
-        "description": (
-            "send_lightning analogue of send-bitcoin/allowed-by-"
-            "standing-approval. amount_msats=1_000_000 rounds up to "
-            "1000 sats; max_amount_sats=50000 admits it. The gate "
-            "passes; dispatch returns the not_implemented stub. "
-            "arbiter-events.log contains standing_approval_match "
-            "and decision_allow."
         ),
     },
     {
@@ -684,32 +709,14 @@ VARIANTS = [
             "balance_sats": 50000,
         },
         "description": (
-            "query_balance is a known read op (gateway._KNOWN_READ_OPS), "
-            "dispatch reads lnd.walletbalance() via the fake lncli "
-            "(total_balance=50000), and the gateway routes it through "
+            "query_balance in onchain (default) mode: a known read op, "
+            "dispatch reads bitcoin.getbalance() via the fake "
+            "bitcoin-cli (0.00050000 BTC), the gateway scales the BTC "
+            "Decimal to 50_000 integer sats and routes it through "
             "scale.present(). 50k is comfortably inside T0 [0, 100k) "
             "so the cloak is a no-op (scale 1.0) and the wire response "
-            "is the raw figure. Confirms the no-cloak branch of "
-            "dispatch is wired correctly. Audit logs request_received, "
-            "scale_tier_init, decision_allow."
-        ),
-    },
-    {
-        "path": ("query", "channels", "default"),
-        "petcli_args": ["query", "channels"],
-        "uses_arbiter": True,
-        "preconditions": [],
-        "expected": lambda r: r == {
-            "status": "ok",
-            "capacity_sats": 80000,
-        },
-        "description": (
-            "query_channels is a known read op, dispatch reads "
-            "lnd.channelbalance() via the fake lncli (local=50000, "
-            "remote=30000), aggregates to 80000, and the gateway "
-            "routes it through scale.present(). 80k is inside T0 "
-            "[0, 100k) so the cloak is a no-op. Per-channel detail "
-            "is suppressed (aggregate-by-default, §4.3). Audit logs "
+            "is the raw figure. Confirms the no-cloak branch of the "
+            "bitcoind-backed dispatch is wired correctly. Audit logs "
             "request_received, scale_tier_init, decision_allow."
         ),
     },
@@ -717,38 +724,19 @@ VARIANTS = [
         "path": ("query", "balance", "empty-wallet"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "lncli_scenario": "empty",
+        "bitcoin_cli_scenario": "empty",
         "preconditions": [],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 0,
         },
         "description": (
-            "Same dispatch path as the funded variant, but the fake "
-            "lncli reports total_balance=0 under LNCLI_SCENARIO=empty. "
-            "0 is inside T0 so the cloak is a no-op (scale 1.0) and "
-            "the wire response is balance_sats=0. Confirms the zero-"
-            "balance edge without leaking the precise (zero) figure as "
-            "a different status."
-        ),
-    },
-    {
-        "path": ("query", "channels", "no-channels"),
-        "petcli_args": ["query", "channels"],
-        "uses_arbiter": True,
-        "lncli_scenario": "no-channels",
-        "preconditions": [],
-        "expected": lambda r: r == {
-            "status": "ok",
-            "capacity_sats": 0,
-        },
-        "description": (
-            "Channels query when lncli reports zero local + zero "
-            "remote capacity (LNCLI_SCENARIO=no-channels). 0 is inside "
-            "T0 so the cloak is a no-op; the gateway returns "
-            "capacity_sats=0, petitioner-visibly indistinguishable "
-            "from any wallet that has channels but real capacity below "
-            "the cloak's sub-tier resolution."
+            "Same onchain dispatch path as the funded variant, but the "
+            "fake bitcoin-cli reports 0.00000000 BTC under "
+            "BITCOIN_CLI_SCENARIO=empty. 0 is inside T0 so the cloak "
+            "is a no-op (scale 1.0) and the wire response is "
+            "balance_sats=0. Confirms the zero-balance edge without "
+            "leaking the precise (zero) figure as a different status."
         ),
     },
     # --- scale cloaking: GLOSSARY 'Scale cloaking'. The first two
@@ -756,52 +744,55 @@ VARIANTS = [
     # init picks the natural tier and the deterministic test-mode
     # scale). The last two exercise the transition state machine:
     # one with a future due_at (drift > range allowed) and one with a
-    # past due_at (apply on next present() call).
+    # past due_at (apply on next present() call). All four run in
+    # onchain (default) mode - the cloak sits between dispatch and
+    # the wire regardless of which backend produced the figure.
     {
         "path": ("query", "balance", "cloaked-tier-1"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "lncli_scenario": "tier-1",
+        "bitcoin_cli_scenario": "tier-1",
         "preconditions": [],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 15000,
         },
         "description": (
-            "Wallet real total 150_000 sat -> natural tier T1. With "
-            "no prior scale_state row, scale.present() initializes "
-            "the cloak at T1 (test-mode deterministic scale 0.1) and "
-            "presents 150_000 * 0.1 = 15_000. Confirms the cloak's "
-            "init path picks the natural tier from a non-T0 wallet "
-            "and the petitioner sees a sat figure compressed by an "
-            "order of magnitude. Audit logs scale_tier_init."
+            "Wallet real total 150_000 sat (0.00150000 BTC from the "
+            "fake bitcoin-cli) -> natural tier T1. With no prior "
+            "scale_state row, scale.present() initializes the cloak "
+            "at T1 (test-mode deterministic scale 0.1) and presents "
+            "150_000 * 0.1 = 15_000. Confirms the cloak's init path "
+            "picks the natural tier from a non-T0 wallet and the "
+            "petitioner sees a sat figure compressed by an order of "
+            "magnitude. Audit logs scale_tier_init."
         ),
     },
     {
         "path": ("query", "balance", "cloaked-tier-2"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "lncli_scenario": "tier-2",
+        "bitcoin_cli_scenario": "tier-2",
         "preconditions": [],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 15000,
         },
         "description": (
-            "Wallet real total 1_500_000 sat -> natural tier T2 "
-            "(scale 0.01). scale.present() initializes at T2 and "
-            "presents 1_500_000 * 0.01 = 15_000. The wire response "
-            "is IDENTICAL to the cloaked-tier-1 variant despite the "
-            "real total being 10x larger - that is the point of the "
-            "cloak (GLOSSARY 'Scale cloaking'). Audit logs "
-            "scale_tier_init."
+            "Wallet real total 1_500_000 sat (0.01500000 BTC) -> "
+            "natural tier T2 (scale 0.01). scale.present() "
+            "initializes at T2 and presents 1_500_000 * 0.01 = "
+            "15_000. The wire response is IDENTICAL to the "
+            "cloaked-tier-1 variant despite the real total being 10x "
+            "larger - that is the point of the cloak (GLOSSARY 'Scale "
+            "cloaking'). Audit logs scale_tier_init."
         ),
     },
     {
         "path": ("query", "balance", "transition-pending"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "lncli_scenario": "tier-1",
+        "bitcoin_cli_scenario": "tier-1",
         "preconditions": [
             # Seed: wallet was at T0 (scale 1.0); a transition to T1
             # (scale 0.1) has been scheduled for 1h in the future.
@@ -835,7 +826,7 @@ VARIANTS = [
         "path": ("query", "balance", "transition-applied"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "lncli_scenario": "tier-1",
+        "bitcoin_cli_scenario": "tier-1",
         "preconditions": [
             # Seed: wallet was at T0; a transition to T1 was scheduled
             # 5s AGO. present() must auto-apply the shift, audit-log
@@ -847,6 +838,7 @@ VARIANTS = [
             "status": "ok",
             "balance_sats": 15000,
         },
+        "expected_audit_events": ["scale_tier_shift_applied"],
         "description": (
             "Past-due tier shift. scale_state was seeded with "
             "active_tier=0 / target_tier=1 / due_at=now-5s. The "
@@ -859,6 +851,219 @@ VARIANTS = [
             "to 15_000 is by construction indistinguishable from a "
             "real send. arbiter-events.log MUST contain a "
             "scale_tier_shift_applied entry for this variant."
+        ),
+    },
+    # --- extension gate: Lightning ops while the arbiter runs onchain
+    # (default) mode. The ops are recognized but deliberately disabled;
+    # the gateway refuses uniformly BEFORE the registry or standing-
+    # approvals gates are consulted and audit-logs decision_refuse_mode
+    # (distinct from decision_refuse_registry / decision_defer_hitl).
+    # The send variant stages a resolvable token + a matching standing-
+    # approval rule to prove the mode gate wins over an otherwise-
+    # allowable call.
+    {
+        "path": ("advanced", "send-lightning", "refused-onchain-mode"),
+        "petcli_args": [
+            "advanced", "send-lightning",
+            "--to-token", _VALID_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_standing_approvals", [
+                {"op": "send_lightning",
+                 "destination": _VALID_TOKEN,
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "send_lightning against an onchain (default) arbiter. The "
+            "registry token resolves and a standing-approval rule "
+            "matches - in advanced mode this exact call dispatches "
+            "(advanced/send-lightning/allowed-by-standing-approval) - "
+            "but the mode gate refuses first: the op belongs to the "
+            "disabled Lightning extension. Wire shape is the standard "
+            "uniform refusal; arbiter-events.log carries "
+            "decision_refuse_mode with reason "
+            "advanced_extension_disabled (the runner asserts the "
+            "event), distinct from a registry miss or an unknown op."
+        ),
+    },
+    {
+        "path": ("advanced", "channels", "refused-onchain-mode"),
+        "petcli_args": ["advanced", "channels"],
+        "uses_arbiter": True,
+        "preconditions": [],
+        "expected": lambda r: r == {"status": "refused"},
+        "expected_audit_events": ["decision_refuse_mode"],
+        "description": (
+            "query_channels against an onchain (default) arbiter: the "
+            "Lightning read is extension-gated, so the gateway refuses "
+            "uniformly without dispatching (lnd.py is never imported). "
+            "arbiter-events.log carries decision_refuse_mode (the "
+            "runner asserts the event); the wire body is the same "
+            "uniform refusal every other refusal cause produces."
+        ),
+    },
+    # =================================================================
+    # Advanced-extension group (SPACER_MODE=lightning|full). Every
+    # variant below runs with the Lightning extension enabled; every
+    # variant above runs onchain (SPACER_MODE unset). main()'s
+    # no-lnd-import gate fires between the two groups. The first
+    # advanced-mode dispatch lazily imports lnd.py (gateway._lnd) and
+    # Python caches it for the rest of the run; that is expected.
+    # =================================================================
+    {
+        "path": ("query", "balance", "advanced-lnd-wallet"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "bitcoin_cli_scenario": "empty",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 50000,
+        },
+        "description": (
+            "query_balance in advanced mode reads the LND on-chain "
+            "wallet (lnd.walletbalance() via the fake lncli, "
+            "total_balance=50000) instead of bitcoind. The fake "
+            "bitcoin-cli is pinned to the empty scenario (0 BTC) for "
+            "this variant, so the 50_000-sat response proves dispatch "
+            "took the LND path - had it read bitcoind, the wire "
+            "response would be balance_sats=0. Same T0 no-cloak "
+            "presentation as query/balance/default."
+        ),
+    },
+    {
+        "path": ("advanced", "channels", "default"),
+        "petcli_args": ["advanced", "channels"],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "capacity_sats": 80000,
+        },
+        "description": (
+            "query_channels (petcli: advanced channels) with the "
+            "extension enabled: dispatch reads lnd.channelbalance() "
+            "via the fake lncli (local=50000, remote=30000), "
+            "aggregates to 80000, and the gateway routes it through "
+            "scale.present(). 80k is inside T0 [0, 100k) so the cloak "
+            "is a no-op. Per-channel detail is suppressed (aggregate-"
+            "by-default, §4.3). Audit logs request_received, "
+            "scale_tier_init, decision_allow."
+        ),
+    },
+    {
+        "path": ("advanced", "channels", "no-channels"),
+        "petcli_args": ["advanced", "channels"],
+        "uses_arbiter": True,
+        "spacer_mode": "full",
+        "lncli_scenario": "no-channels",
+        "preconditions": [],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "capacity_sats": 0,
+        },
+        "description": (
+            "Channels query when lncli reports zero local + zero "
+            "remote capacity (LNCLI_SCENARIO=no-channels). 0 is "
+            "inside T0 so the cloak is a no-op; the gateway returns "
+            "capacity_sats=0, petitioner-visibly indistinguishable "
+            "from any wallet that has channels but real capacity "
+            "below the cloak's sub-tier resolution. Runs under "
+            "SPACER_MODE=full to confirm the second advanced value "
+            "enables the extension identically to 'lightning'."
+        ),
+    },
+    {
+        "path": ("advanced", "send-lightning", "refused-unknown-token"),
+        "petcli_args": [
+            "advanced", "send-lightning",
+            "--to-token", "ABCDEF",
+            "--amount-msats", "1000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_registry"],
+        "description": (
+            "Same registry-miss path as submit/send-bitcoin/refused-"
+            "unknown-token, but for the Lightning send op with the "
+            "extension enabled. Audit logs decision_refuse_registry."
+        ),
+    },
+    {
+        "path": ("advanced", "send-lightning", "parked-no-standing-approval"),
+        "petcli_args": [
+            "advanced", "send-lightning",
+            "--to-token", _VALID_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_defer_hitl"],
+        "description": (
+            "Same default-pause path as submit/send-bitcoin/parked-no-"
+            "standing-approval but for the Lightning send op with the "
+            "extension enabled. amount_msats=1_000_000 (= 1000 sats "
+            "post-ceiling) is irrelevant here because no rule exists; "
+            "arbiter-events.log records decision_defer_hitl with "
+            "reason no_standing_approval."
+        ),
+    },
+    {
+        "path": ("advanced", "send-lightning", "allowed-by-standing-approval"),
+        "petcli_args": [
+            "advanced", "send-lightning",
+            "--to-token", _VALID_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [
+            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_standing_approvals", [
+                {"op": "send_lightning",
+                 "destination": _VALID_TOKEN,
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+        ],
+        "expected": lambda r: r == {
+            "status": "not_implemented",
+            "op": "send_lightning",
+            "_petcli_estimate_window_s": 30.0,
+        },
+        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "description": (
+            "send_lightning analogue of submit/send-bitcoin/allowed-"
+            "by-standing-approval, with the extension enabled. "
+            "amount_msats=1_000_000 rounds up to 1000 sats; "
+            "max_amount_sats=50000 admits it. The gate passes; "
+            "dispatch returns the not_implemented stub. arbiter-"
+            "events.log contains standing_approval_match and "
+            "decision_allow."
         ),
     },
 ]
@@ -878,14 +1083,25 @@ def _run_variant(variant):
     state_path = state_dir / "state.db"
     registry_yaml_path = registry_dir / "destinations.yaml"
 
-    # Per-variant fake-lncli scenario. The fake binary reads
-    # $LNCLI_SCENARIO to pick which canned reply to print; the runner
-    # sets it to the variant's "lncli_scenario" (default "funded")
-    # before the in-thread arbiter dispatches to lnd.py, and restores
-    # the prior value after the variant runs so a later variant's
+    # Per-variant environment. The fake binaries read their scenario
+    # vars to pick which canned reply to print; SPACER_MODE selects the
+    # gateway's deployment mode (the gateway reads it per request, so
+    # one runner process exercises both modes). A None value means the
+    # variable must be UNSET for the variant - that is how onchain
+    # variants prove onchain is the no-configuration default. Prior
+    # values are restored in the finally block so a later variant's
     # env is not contaminated.
-    saved_lncli_scenario = os.environ.get("LNCLI_SCENARIO")
-    os.environ["LNCLI_SCENARIO"] = variant.get("lncli_scenario", "funded")
+    env_overrides = {
+        "LNCLI_SCENARIO": variant.get("lncli_scenario", "funded"),
+        "BITCOIN_CLI_SCENARIO": variant.get("bitcoin_cli_scenario", "funded"),
+        "SPACER_MODE": variant.get("spacer_mode"),
+    }
+    saved_env = {k: os.environ.get(k) for k in env_overrides}
+    for k, v in env_overrides.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
     # Standing-approvals config is process-global state shared across
     # variants via the env var; clear it here so a variant without a
@@ -944,27 +1160,42 @@ def _run_variant(variant):
         else:
             (artifact_dir / "arbiter-events.log").write_text("")
 
-        # Bitcoind / LND infrastructure events. Variants that dispatch
-        # through the known-read branch exercise lnd.py against a fake
-        # lncli installed at module-import time; known-write variants
-        # refuse at the recipient address registry gate and never
-        # reach the lnd module. The runner does not capture per-variant
-        # lncli stdout (the fake's reply lands in the petcli response
-        # and is therefore already in result.json); the log records
-        # which mode this variant ran under so a non-AI reviewer can
-        # tell at a glance.
-        if variant.get("uses_arbiter", True):
-            infra_note = (
-                "# Known-read variants dispatch through arbiter/src/lnd.py "
-                "to the fake lncli at $LNCLI_BIN; known-write variants "
-                "refuse at the recipient address registry gate and never "
-                "reach the lnd module. No live bitcoind / LND traffic for "
-                "any variant in the current manifest.\n"
-            )
-        else:
+        # Bitcoind / LND infrastructure events. Read variants dispatch
+        # against the fake backend binaries installed at module-import
+        # time; write variants stop at a gateway gate or the
+        # not_implemented dispatch stub before reaching a backend
+        # module. The runner does not capture per-variant fake-binary
+        # stdout (the fake's reply lands in the petcli response and is
+        # therefore already in result.json); the log records which
+        # deployment mode this variant ran under so a non-AI reviewer
+        # can tell at a glance.
+        if not variant.get("uses_arbiter", True):
             infra_note = (
                 "# Local-only variant: never reaches the arbiter, so no "
                 "bitcoind / LND interaction is possible.\n"
+            )
+        elif variant.get("spacer_mode") is None:
+            infra_note = (
+                "# onchain (default) mode - SPACER_MODE unset. Read "
+                "variants dispatch through arbiter/src/bitcoin.py to the "
+                "fake bitcoin-cli at $BITCOIN_CLI_BIN; write variants stop "
+                "at the recipient-address-registry / standing-approvals "
+                "gates or the not_implemented dispatch stub before "
+                "reaching bitcoin.py; Lightning-extension ops refuse at "
+                "the mode gate (decision_refuse_mode). arbiter/src/lnd.py "
+                "is never imported in this mode (the runner asserts it). "
+                "No live bitcoind / LND traffic for any variant in the "
+                "current manifest.\n"
+            )
+        else:
+            infra_note = (
+                f"# advanced mode - SPACER_MODE={variant['spacer_mode']}. "
+                "Lightning reads (and query_balance, which reads the LND "
+                "wallet in this mode) dispatch through arbiter/src/lnd.py "
+                "to the fake lncli at $LNCLI_BIN; Lightning writes stop "
+                "at the registry / standing-approvals gates or the "
+                "not_implemented dispatch stub. No live bitcoind / LND "
+                "traffic for any variant in the current manifest.\n"
             )
         (artifact_dir / "infra-events.log").write_text(infra_note)
 
@@ -1006,17 +1237,37 @@ def _run_variant(variant):
             return (False, f"expected raised: {e}; result={parsed}")
         if not ok:
             return (False, f"expected returned False; result={parsed}")
+
+        # Optional audit-event assertion. Refusal wire shapes are
+        # deliberately uniform across causes (§4.1), so a variant whose
+        # whole point is WHICH gate fired (mode gate vs. registry miss
+        # vs. standing-approvals park) cannot be told apart by the
+        # response alone; the distinguishing audit event in arbiter-
+        # events.log is the evidence, and the runner checks it here.
+        required_events = variant.get("expected_audit_events", [])
+        if required_events:
+            audit_events = [
+                json.loads(line)["event"]
+                for line in (artifact_dir / "arbiter-events.log")
+                .read_text().splitlines()
+                if line.strip()
+            ]
+            for required in required_events:
+                if required not in audit_events:
+                    return (False, f"audit log missing {required!r}; "
+                                   f"events={audit_events}")
         return (True, None)
     finally:
         if server is not None:
             _stop_arbiter(server, thread)
-        # Restore the prior LNCLI_SCENARIO so cross-variant env state
-        # is not sticky. Setting a None back means "delete the var"
-        # rather than setting it to the literal string "None".
-        if saved_lncli_scenario is None:
-            os.environ.pop("LNCLI_SCENARIO", None)
-        else:
-            os.environ["LNCLI_SCENARIO"] = saved_lncli_scenario
+        # Restore the prior per-variant env so cross-variant state is
+        # not sticky. A saved None means "the var was unset" - delete
+        # it rather than setting the literal string "None".
+        for k, prior in saved_env.items():
+            if prior is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prior
         # Best-effort cleanup of the per-variant tempdirs.
         for d in (audit_dir, state_dir, registry_dir):
             try:
@@ -1053,9 +1304,35 @@ def main(argv=None):
 
     passed_paths = []
     failed = []
+    checks_total = 0
+    lnd_gate_pending = any(
+        v.get("spacer_mode") is not None for v in VARIANTS
+    )
     for variant in VARIANTS:
+        # The no-lnd-import gate: fires once, immediately before the
+        # first advanced-mode variant. Every variant above it in the
+        # manifest ran in onchain (default) mode; if any of them caused
+        # lnd.py to be imported, the "no LND dependency at runtime"
+        # claim is broken even if each variant's wire response looked
+        # right. (After this point advanced-mode dispatches import
+        # lnd.py legitimately, so the claim is only checkable here.)
+        if lnd_gate_pending and variant.get("spacer_mode") is not None:
+            lnd_gate_pending = False
+            checks_total += 1
+            gate_name = "no-lnd-import gate (onchain variants ran LND-free)"
+            if "lnd" in sys.modules:
+                print(f"FAIL  {gate_name}")
+                failed.append((
+                    gate_name,
+                    "lnd.py was imported while only onchain-mode "
+                    "variants had run",
+                ))
+            else:
+                print(f"PASS  {gate_name}")
+                passed_paths.append(gate_name)
         path_str = "/".join(variant["path"])
         ok, err = _run_variant(variant)
+        checks_total += 1
         status = "PASS" if ok else "FAIL"
         print(f"{status}  {path_str}")
         if ok:
@@ -1067,7 +1344,7 @@ def main(argv=None):
 
     print()
     print(f"--- exit-loop summary ---")
-    print(f"passed: {len(passed_paths)}/{len(VARIANTS)}")
+    print(f"passed: {len(passed_paths)}/{checks_total}")
     if failed:
         print(f"failed: {len(failed)}")
         for path_str, err in failed:

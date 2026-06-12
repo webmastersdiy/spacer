@@ -1,1 +1,0 @@
-# Known-read variants dispatch through arbiter/src/lnd.py to the fake lncli at $LNCLI_BIN; known-write variants refuse at the recipient address registry gate and never reach the lnd module. No live bitcoind / LND traffic for any variant in the current manifest.
