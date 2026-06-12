@@ -38,6 +38,7 @@ arbiter/
   state/        # runtime SQLite, WAL, audit log, scratch - GITIGNORED
   bitcoin/      # bitcoind datadir - GITIGNORED
   lnd/          # LND datadir - GITIGNORED
+  ecash/        # nutshell eCash wallet datadir (doc 07 §3) - GITIGNORED
   data/         # any other transient runtime - GITIGNORED
 ```
 
@@ -135,7 +136,7 @@ The design landed in five commits on `webmastersdiy/spacer` main (bead `bl-hu56z
 | `52f148c` | §8/§9: `ops/audit/` with the seven wrappers + `audit/README.md` |
 | `c80ebe7` | 05-- cross-refs: §2.1 third invariant + §4.5 companion-primitive framing |
 
-The reconciliation pass corrected §3 (added `ops/` as a fourth tracked subtree + the file-pattern gitignores) and §4 (the shipped units + auto-derived `ARBITER_ROOT`). An empty-tree smoke test confirmed `state.db` / `audit.log` / WAL sidecars land under gitignored `arbiter/state/` with `git status` clean outside it (17/17 exit-loop variants pass).
+The reconciliation pass corrected §3 (added `ops/` as a fourth tracked subtree + the file-pattern gitignores) and §4 (the shipped units + auto-derived `ARBITER_ROOT`). An empty-tree smoke test confirmed `state.db` / `audit.log` / WAL sidecars land under gitignored `arbiter/state/` with `git status` clean outside it (17/17 exit-loop variants pass). The 2026-06-12 eCash build (sp-2hwco4.2, doc 07 §3) added `ecash/` to §3 as a fifth gitignored runtime subtree - the arbiter's transient eCash custody wallet - in both `.gitignore` copies.
 
 **Deliberate script divergences from the §8/§9 narrative:**
 
