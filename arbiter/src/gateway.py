@@ -2,7 +2,10 @@
 Privacy gateway: the only network-reachable component on the arbiter.
 
 Every petitioner request hits this module first. The exposed op set
-depends on the deployment mode (SPACER_MODE; see _advanced_mode):
+depends on the deployment mode (SPACER_MODE; see _advanced_mode /
+_ecash_mode) along the rail ladder of design doc 07: Bitcoin on-chain
+(primary, default) -> Lightning (advanced) -> eCash (advanced, atop
+Lightning):
 
 - onchain (default): Bitcoin on-chain is the primary surface. The read
   is query_balance (bitcoind wallet); the write is send_bitcoin. The
@@ -11,6 +14,11 @@ depends on the deployment mode (SPACER_MODE; see _advanced_mode):
 - advanced (SPACER_MODE=lightning|full): the Lightning extension layers
   query_channels (read) and send_lightning (write) back on, reading the
   LND node via arbiter/src/lnd.py.
+- ecash (SPACER_MODE=ecash): the eCash extension layers fund_ecash /
+  defund_ecash (writes, doc 07 §3) on top of the full Lightning
+  surface (ecash implies lightning: the fund/defund legs are LN
+  payments). arbiter/src/ecash.py is imported only in this mode (see
+  _ecash). No new read ops: the AI counts its own float locally.
 
 The handler routes each inbound request through one of these branches
 based on op:
@@ -20,9 +28,14 @@ based on op:
   address registry during pseudonymize-inbound; on miss, refuse
   uniformly. The registry IS the destination gate - there is no
   separate outbound-policy step.
-- Lightning ops while in onchain mode: refuse uniformly (gated behind
-  the advanced extension), audit-logged decision_refuse_mode so the
-  operator sees an extension-gated call distinctly from an unknown op.
+- eCash write ops in ecash mode: no recipient_token (the destination
+  is structurally the operator-pinned mint), so they skip the
+  registry and run allowance cap (fund only) -> standing approvals ->
+  dispatch (doc 07 §3, §8).
+- Extension ops while their extension is disabled (Lightning or eCash
+  ops in onchain mode; eCash ops in lightning mode): refuse uniformly,
+  audit-logged decision_refuse_mode so the operator sees an
+  extension-gated call distinctly from an unknown op.
 - Unknown ops: park in the HITL queue and refuse uniformly so the
   operator can decide on the directly-attached console.
 
@@ -66,6 +79,9 @@ import state
 # advanced Lightning extension's only dependency and is pulled in lazily
 # by _lnd(), so onchain (default) mode runs with no LND dependency at
 # all (scope item 1: "gateway must NOT import lnd unconditionally").
+# arbiter/src/ecash.py follows the same rule one rung up the ladder:
+# pulled in lazily by _ecash() on ecash-mode calls only, so onchain AND
+# lightning deployments run with no nutshell dependency (doc 07 §9).
 
 # Loopback by default. The gateway binds the loopback interface because
 # the petitioner reaches it through a transport (Tor hidden service,
@@ -85,7 +101,10 @@ DEFAULT_LATENCY_TARGET_S = 0.250
 
 # Hard cap on inbound request size. Defense-in-depth against memory
 # exhaustion probes and runaway deserialization. The protocol shape is
-# small (one JSON object per call), so 64 KiB is generous.
+# small (one JSON object per call), so 64 KiB is generous - including
+# for defund_ecash, whose request body carries a serialized V4 cashuB
+# token (doc 07 §3 build note): a petty-cash float's token is a few
+# hundred bytes to a few KiB, comfortably inside the cap.
 MAX_REQUEST_BYTES = 65536
 
 # Refusal response shape. A single uniform body for every refusal so
@@ -249,14 +268,28 @@ def process_request(handler):
         _respond_ok(handler, response, deadline)
         return
 
-    # Lightning op while running onchain (default) mode. The op is
-    # recognized but deliberately disabled: it belongs to the advanced
-    # extension the operator did not enable. Refuse uniformly - the
-    # operator already decided (by deploying onchain mode), so unlike an
-    # unknown op there is nothing to HITL-park. The distinct
-    # decision_refuse_mode audit event lets the operator tell an
-    # extension-gated call apart from a registry miss or an unknown op.
-    if op in _EXTENSION_GATED_OPS:
+    # eCash write op in ecash mode (doc 07 §3). No recipient_token -
+    # the destination is structurally the operator-pinned mint - so
+    # the registry step does not apply; the pipeline is allowance cap
+    # (fund only) -> standing approvals -> dispatch. Outside ecash
+    # mode this set is empty and the same ops land in the extension
+    # gate below.
+    if op in _known_ecash_write_ops():
+        _handle_ecash_write(handler, request, deadline)
+        return
+
+    # Extension op while its extension is disabled: a Lightning or
+    # eCash op in onchain (default) mode, or an eCash op in
+    # lightning/full mode (doc 07 §9). The op is recognized but
+    # deliberately disabled: it belongs to an extension the operator
+    # did not enable. Refuse uniformly - the operator already decided
+    # (by choosing the mode), so unlike an unknown op there is nothing
+    # to HITL-park. The distinct decision_refuse_mode audit event lets
+    # the operator tell an extension-gated call apart from a registry
+    # miss or an unknown op; the op field disambiguates which
+    # extension was asked for. In the op's home mode it is already in
+    # the active known sets above and never reaches this gate.
+    if op in _EXTENSION_OPS:
         audit.record(
             "decision_refuse_mode",
             {"op": op, "reason": "advanced_extension_disabled"},
@@ -313,20 +346,40 @@ def _parse_request(raw):
 # Deployment mode (SPACER_MODE). onchain (default) makes Bitcoin
 # on-chain the primary - and only - surface, with no LND dependency.
 # The advanced Lightning extension (SPACER_MODE=lightning|full) layers
-# the LN ops back on. Anything other than the two advanced values reads
-# as onchain so a typo or an empty value fails safe toward the no-LND
-# default rather than silently enabling the extension.
-_ADVANCED_MODES = frozenset({"lightning", "full"})
+# the LN ops back on; the eCash extension (SPACER_MODE=ecash) layers
+# the eCash writes on top of the full Lightning surface (doc 07 §9:
+# ecash implies lightning exactly as lightning implies bitcoind).
+# `full` stays frozen at its 2026-06 meaning (onchain + lightning) as
+# a legacy alias of `lightning`: an extension that moves bearer value
+# out of gateway control must never switch on without the operator
+# typing its name, so `full` does not auto-grow to include ecash.
+# Anything outside {lightning, full, ecash} reads as onchain so a typo
+# or an empty value fails safe toward the no-extension default rather
+# than silently enabling an extension.
+_ADVANCED_MODES = frozenset({"lightning", "full", "ecash"})
+_ECASH_MODES = frozenset({"ecash"})
+
+
+def _mode():
+    """Return the normalized SPACER_MODE value. Read per-request (not
+    cached at import) so the exit-loop runner can exercise every mode
+    in one process by setting SPACER_MODE around each variant,
+    mirroring how scale.py / timing.py read their own mode env vars."""
+    return os.environ.get("SPACER_MODE", "onchain").strip().lower()
 
 
 def _advanced_mode():
     """True iff the deployment runs the advanced Lightning extension.
+    ecash mode counts: the eCash extension cannot exist without LND
+    (fund/defund are LN legs), so SPACER_MODE=ecash enables the full
+    Lightning surface as well (doc 07 §9)."""
+    return _mode() in _ADVANCED_MODES
 
-    Read per-request (not cached at import) so the exit-loop runner can
-    exercise both modes in one process by setting SPACER_MODE around
-    each variant, mirroring how scale.py / timing.py read their own
-    mode env vars."""
-    return os.environ.get("SPACER_MODE", "onchain").strip().lower() in _ADVANCED_MODES
+
+def _ecash_mode():
+    """True iff the deployment runs the eCash extension
+    (SPACER_MODE=ecash). Implies _advanced_mode()."""
+    return _mode() in _ECASH_MODES
 
 
 def _lnd():
@@ -340,6 +393,16 @@ def _lnd():
     call, so the import cost is paid once."""
     import lnd
     return lnd
+
+
+def _ecash():
+    """Lazily import the eCash extension module (arbiter/src/ecash.py),
+    mirroring _lnd() one rung up the ladder: an onchain or lightning
+    deployment never imports it and carries no nutshell dependency at
+    runtime (doc 07 §9). First import also registers and applies the
+    ecash_ledger schema (see ecash.py's tail comment)."""
+    import ecash
+    return ecash
 
 
 # Satoshis per bitcoin. bitcoin.getbalance() returns a Decimal in BTC;
@@ -365,11 +428,28 @@ _ONCHAIN_WRITE_OPS = frozenset({"send_bitcoin"})
 _ADVANCED_READ_OPS = frozenset({"query_channels"})
 _ADVANCED_WRITE_OPS = frozenset({"send_lightning"})
 
-# Advanced-only ops, used by the onchain-mode gate in process_request to
-# refuse Lightning calls uniformly rather than HITL-park them like an
-# unknown op. In advanced mode these are already in _known_read_ops() /
-# _known_write_ops() and never reach the gate.
-_EXTENSION_GATED_OPS = _ADVANCED_READ_OPS | _ADVANCED_WRITE_OPS
+# Ops the eCash extension layers on (ecash mode only; doc 07 §9).
+# These are writes WITHOUT a recipient_token - the destination is
+# structurally the operator-pinned mint - so they route through their
+# own branch (allowance -> standing approvals -> dispatch) rather than
+# the registry-gated write branch. No new read ops: the AI counts its
+# own float locally, and query_balance keeps its lightning-mode
+# behavior (the LND wallet) in ecash mode.
+_ECASH_WRITE_OPS = frozenset({"fund_ecash", "defund_ecash"})
+
+# The standing-approvals destination for eCash ops (doc 07 §3: rules
+# match on op + amount band; the destination is structurally fixed, so
+# the operator writes `destination: mint` - or `any` - in the rule).
+_ECASH_DESTINATION = "mint"
+
+# Extension-gated ops, used by the mode gate in process_request to
+# refuse a recognized-but-disabled extension call uniformly rather
+# than HITL-park it like an unknown op. Mode-dependent membership:
+# in onchain mode every extension op is gated; in lightning/full mode
+# the eCash ops are gated (doc 07 §9); in ecash mode the full ladder
+# is enabled and nothing is gated. The active known sets and this
+# gate are complementary by construction.
+_EXTENSION_OPS = _ADVANCED_READ_OPS | _ADVANCED_WRITE_OPS | _ECASH_WRITE_OPS
 
 
 def _known_read_ops():
@@ -381,10 +461,18 @@ def _known_read_ops():
 
 def _known_write_ops():
     """Write ops the gateway resolves through the registry, for the
-    active mode."""
+    active mode. The eCash writes are NOT here: they carry no
+    recipient_token and route through _known_ecash_write_ops()."""
     if _advanced_mode():
         return _ONCHAIN_WRITE_OPS | _ADVANCED_WRITE_OPS
     return _ONCHAIN_WRITE_OPS
+
+
+def _known_ecash_write_ops():
+    """eCash write ops for the active mode: the full set in ecash
+    mode, empty otherwise (outside ecash mode the same ops fall
+    through to the extension gate and refuse uniformly)."""
+    return _ECASH_WRITE_OPS if _ecash_mode() else frozenset()
 
 
 def _hitl_park(request):
@@ -495,6 +583,86 @@ def _handle_poll(handler, request, deadline):
     else:
         response = {"status": "not_yet"}
     audit.record("decision_allow", {"op": "poll"})
+    _respond_ok(handler, response, deadline)
+
+
+def _handle_ecash_write(handler, request, deadline):
+    """Run an eCash write (fund_ecash / defund_ecash) through its
+    gate pipeline (doc 07 §3, §8). Only reachable in ecash mode.
+
+    fund_ecash: allowance cap -> standing approvals -> dispatch.
+    defund_ecash: standing approvals -> dispatch (no allowance check -
+    defund only shrinks exposure).
+
+    The allowance check precedes standing approvals BY DESIGN (doc 07
+    §8): a HITL approval cannot exceed the allowance, so raising the
+    cap is a console config edit, never an approval click - the
+    operator's tired "approve" cannot widen the blast radius.
+
+    Standing approvals match on (op, _ECASH_DESTINATION, amount): the
+    destination is structurally the operator-pinned mint, so no
+    recipient_token exists to resolve and the registry step does not
+    apply. defund_ecash carries no amount (the token's value is not
+    parseable at the gate), so only an unbounded rule (no
+    max_amount_sats) matches it - which is the right shape: defund
+    reduces exposure regardless of size.
+
+    The defund token itself is NOT validated here: decoding a cashuB
+    token is the wallet's job, and the mint-pin rule (doc 07 §2) is
+    enforced at execution time when the executor's swap-claim runs
+    against the pinned mint. The gate's job is mode, allowance, and
+    approval - not token parsing.
+
+    Dispatch currently returns the not_implemented stub for these ops:
+    the happy-path fund/defund executor lands with the same
+    timing-layer executor that gates the other happy-path sends
+    (doc 07 §9), sleeping timing.mint_gap_s() between the mint-facing
+    steps (doc 07 §6 T1)."""
+    op = request.get("op")
+    if op == "fund_ecash":
+        amount = _request_amount_sats(request)
+        ecash = _ecash()
+        outstanding = ecash.outstanding_sats()
+        allowance = ecash.allowance_sats()
+        # A missing, non-integer, or non-positive amount fails the
+        # allowance check: an amount the gate cannot bound is refused,
+        # mirroring the standing-approvals rule that an unknown amount
+        # fails any bounded rule. A missing config reads as allowance
+        # 0 (ecash.allowance_sats), so the float cannot exist until
+        # the operator explicitly writes its bound.
+        if (
+            not isinstance(amount, int)
+            or amount <= 0
+            or outstanding + amount > allowance
+        ):
+            audit.record(
+                "decision_refuse_allowance",
+                {
+                    "op": op,
+                    "requested_sats": amount,
+                    "outstanding_sats": outstanding,
+                    "allowance_sats": allowance,
+                },
+            )
+            _respond_refused(handler, deadline)
+            return
+    if not standing_approvals.matches(
+        op,
+        _ECASH_DESTINATION,
+        _request_amount_sats(request),
+    ):
+        audit.record(
+            "decision_defer_hitl",
+            {"op": op, "reason": "no_standing_approval"},
+        )
+        _hitl_park(request)
+        _respond_refused(handler, deadline)
+        return
+    response = _dispatch(request)
+    response = _hide_secrets(response)
+    response = _band_outbound(response)
+    response = _aggregate_outbound(response)
+    audit.record("decision_allow", {"op": op})
     _respond_ok(handler, response, deadline)
 
 

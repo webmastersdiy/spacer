@@ -16,6 +16,10 @@ bitcoin/
 # LND datadir / credentials.
 lnd/
 
+# nutshell eCash wallet datadir (doc 07 §3: the arbiter's transient
+# eCash custody during fund/defund execution).
+ecash/
+
 # Catch-all for any other transient runtime that does not fit one of
 # the named subtrees. Modules MUST NOT write outside this set; see
 # §3 implementation invariant.

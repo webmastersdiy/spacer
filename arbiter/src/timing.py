@@ -52,6 +52,17 @@ _TEST_RESULT_MAX_S = 15.0
 # 5-15s result window in the same proportional sense.
 _TEST_REJECTION_MIN_S = 1.0
 _TEST_REJECTION_MAX_S = 5.0
+# Mint-boundary intra-execution gap (design doc 07 §6 T1). The eCash
+# executor sleeps one of these between each pair of mint-facing steps
+# in a fund/defund execution (quote -> pay -> issue; swap -> melt) so
+# the sub-second cadence of back-to-back automation does not
+# fingerprint every arbiter funding event as one caller to the mint.
+# The gap rides INSIDE the action-delay window - it shapes the
+# micro-timing of the steps, not the macro placement of the execution.
+# The test window clears the sub-second automation signature while
+# keeping exit-loop runs fast.
+_TEST_MINT_GAP_MIN_S = 0.5
+_TEST_MINT_GAP_MAX_S = 2.0
 
 # Two tables. pending_actions holds calls awaiting execution against
 # bitcoind/LND; pending_results holds outcomes awaiting delivery to the
@@ -117,6 +128,25 @@ def _result_window_s(kind):
     if kind == "rejection":
         return random.uniform(_TEST_REJECTION_MIN_S, _TEST_REJECTION_MAX_S)
     raise ValueError(f"unknown kind {kind!r}; expected 'result' or 'rejection'")
+
+
+def mint_gap_s():
+    """Pick a randomized mint-boundary gap in seconds for the active
+    mode (design doc 07 §6 T1; see _TEST_MINT_GAP_* above).
+
+    Production gaps are blocked on the mint-activity question (doc 07
+    §10.1: a mint's swap volume is not publicly observable, so the
+    adequate gap cannot be computed yet) and raise NotImplementedError
+    exactly like the action/result windows - the safe failure mode
+    carries over to every rail (doc 07 §7)."""
+    if _mode() == "test":
+        return random.uniform(_TEST_MINT_GAP_MIN_S, _TEST_MINT_GAP_MAX_S)
+    raise NotImplementedError(
+        "production mint-boundary gap is blocked on the mint-activity "
+        "source question (design doc 07 §10.1); set "
+        "SPACER_TIMING_MODE=test to use the test-mode 0.5-2s gap for "
+        "iteration"
+    )
 
 
 def enqueue_action(handle, op, params):
@@ -280,6 +310,8 @@ if __name__ == "__main__":
         assert _TEST_RESULT_MIN_S <= r <= _TEST_RESULT_MAX_S, r
         j = _result_window_s("rejection")
         assert _TEST_REJECTION_MIN_S <= j <= _TEST_REJECTION_MAX_S, j
+        g = mint_gap_s()
+        assert _TEST_MINT_GAP_MIN_S <= g <= _TEST_MINT_GAP_MAX_S, g
 
     # Enqueue one of each kind.
     h_action = "smoke-action"
@@ -334,6 +366,7 @@ if __name__ == "__main__":
         ("enqueue_action", lambda: enqueue_action("nope", "send", {})),
         ("enqueue_result(result)", lambda: enqueue_result("nope", {}, kind="result")),
         ("enqueue_result(rejection)", lambda: enqueue_result("nope", {}, kind="rejection")),
+        ("mint_gap_s", mint_gap_s),
     ):
         raised = False
         try:

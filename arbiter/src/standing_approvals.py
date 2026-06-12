@@ -19,9 +19,18 @@ Schema (closes the §7 'Standing approvals YAML schema' open
 question):
 
   approvals:
-    - op: send_bitcoin             # required: send_bitcoin or send_lightning
-      destination: ABCDE4          # required: a registry token, or 'any'
-      max_amount_sats: 50000       # optional: inclusive upper bound (sats)
+    - op: send_bitcoin             # required: send_bitcoin, send_lightning,
+                                   #           fund_ecash, or defund_ecash
+      destination: ABCDE4          # required: a registry token, or 'any';
+                                   #           for the eCash ops write 'mint'
+                                   #           (their destination is
+                                   #           structurally the pinned mint;
+                                   #           doc 07 §3)
+      max_amount_sats: 50000       # optional: inclusive upper bound (sats);
+                                   #           omit it on defund_ecash rules
+                                   #           (defund carries no gate-time
+                                   #           amount, and an unknown amount
+                                   #           fails any bounded rule)
       rationale: Daily coffee...   # optional: operator free-text
 
 Precedence: first matching rule wins (top-down file order). The
@@ -56,7 +65,10 @@ def matches(op, destination, amount_sats):
     """Return True iff some rule in the config matches.
 
     `op` is the wire op string (e.g., "send_bitcoin").
-    `destination` is the resolved recipient token (post-registry).
+    `destination` is the resolved recipient token (post-registry),
+    or the structural constant "mint" for the eCash ops (their
+    destination is the operator-pinned mint, not a registry entry;
+    gateway._ECASH_DESTINATION).
     `amount_sats` is the amount in satoshis, or None when the
     request did not carry one. Caller is responsible for any
     msat -> sat conversion (round UP, so a max_amount_sats bound

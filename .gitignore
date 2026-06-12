@@ -55,15 +55,16 @@ __pycache__/
 
 # Per design-docs/origin/06--2026-05-24-0623-arb-auditability.md §3,
 # arbiter/ now holds three tracked subtrees (src/, config/, bin/) plus
-# four gitignored runtime subtrees (state/, bitcoin/, lnd/, data/).
-# arbiter/.gitignore inside the arbiter tree is the load-bearing copy
-# (it is what the continuous git snapshot reads when run from the
-# deployed arbiter root). These root-level entries are defense in
-# depth for this monorepo so the runtime subtrees do not leak into
-# checkins from the repo root.
+# five gitignored runtime subtrees (state/, bitcoin/, lnd/, ecash/,
+# data/). arbiter/.gitignore inside the arbiter tree is the
+# load-bearing copy (it is what the continuous git snapshot reads when
+# run from the deployed arbiter root). These root-level entries are
+# defense in depth for this monorepo so the runtime subtrees do not
+# leak into checkins from the repo root.
 arbiter/state/
 arbiter/bitcoin/
 arbiter/lnd/
+arbiter/ecash/
 arbiter/data/
 
 # Local Go SDK / module cache
