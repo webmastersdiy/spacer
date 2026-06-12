@@ -15,23 +15,36 @@ Variants currently absent from the manifest correspond to code paths
 that are not yet reachable end-to-end (happy-path send-bitcoin /
 send-lightning, registry-rejection subcases beyond the bare miss).
 They will be added once the timing-layer executor wires the
-arbiter's send pipeline through to bitcoin.py / lnd.py and the
-runner gains the ability to seed registry entries to exercise each
-rejection subcase distinctly.
+arbiter's send pipeline through to bitcoin.py / lnd.py; the runner
+can already seed registry entries and standing-approval rules per
+variant.
 
-The gateway currently routes inbound requests on a small fixed set
-of recognized ops: query_balance and query_channels (known reads,
-dispatch directly), send_bitcoin and send_lightning (known writes,
-resolve recipient_token through the recipient address registry per
-§4.7 - miss = uniform refusal), and poll (the result-registry fast
-path). Unknown ops HITL-park. Read-only query-balance /
-query-channels are validated end-to-end via the fake lncli installed
-by the runner; state-changing sends are validated on the
-registry-miss path only (refused-unknown-token variants). The
-[standing approvals](../GLOSSARY.md#standing-approvals) gate
-described in §4.1 / §6 has not landed in the gateway yet, so no
-parked-no-standing-approval variants exist; they become reachable
-once the standing-approvals check is wired into the write-op path.
+The gateway routes inbound requests on a small fixed set of
+recognized ops, and the exposed set depends on the deployment mode
+(`SPACER_MODE`; onchain is the default): query_balance (known read -
+the bitcoind wallet in onchain mode, the LND wallet under the
+advanced Lightning extension), send_bitcoin (known write - the
+recipient_token resolves through the recipient address registry per
+§4.7, miss = uniform refusal, then the
+[standing approvals](../GLOSSARY.md#standing-approvals) gate decides
+default-pause vs dispatch), poll (the result-registry fast path),
+and, only under `SPACER_MODE=lightning|full`, the Lightning ops
+query_channels / send_lightning. In onchain mode the Lightning ops
+refuse uniformly at the mode gate (audit `decision_refuse_mode`) and
+`arbiter/src/lnd.py` is never imported; the runner asserts both.
+Unknown ops HITL-park.
+
+Artifact paths mirror the petcli command tree: Bitcoin on-chain
+commands are the primary surface (`submit/send-bitcoin`,
+`query/balance`) and the Lightning commands live under the opt-in
+`advanced` namespace, so their artifacts live under
+`petcli/advanced/`. Read-only queries are validated end-to-end via
+the fake bitcoin-cli / fake lncli the runner installs;
+state-changing sends are validated on the registry-miss path
+(refused-unknown-token) and both standing-approvals branches
+(parked-no-standing-approval / allowed-by-standing-approval; the
+allowed branch ends at dispatch's not_implemented stub pending the
+timing-layer executor).
 
 [Scale cloaking](../GLOSSARY.md#scale-cloaking) is wired for the
 read-only balance path. Four cloaked variants exercise the cloak's
