@@ -1,9 +1,9 @@
 # Privacy and Timing Leaks in the bitcoind RPC Surface (AI-Facing)
 
-**Date:** 2026-05-02 (reconciled 2026-05-24)
-**Context:** AI-facing leak map for the bitcoind RPC surface - what each `bitcoin-cli` call exposes and which arbiter mitigation covers it. Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-RPC inventory. bitcoind-side counterpart to the LND doc; read together for the gateway policy layer.
+**Date:** 2026-05-02 (reconciled 2026-06-12)
+**Context:** AI-facing leak map for the bitcoind RPC surface - what each `bitcoin-cli` call exposes and which arbiter mitigation covers it. **bitcoind is the primary surface**: the default deployment mode (onchain, doc 05 §2.2) serves everything from it, with Lightning an opt-in advanced extension. Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-RPC inventory. Read together with the LND doc for the gateway policy layer.
 **Related:**
-- `2026-05-02-1601-privacy-and-timing-leaks.md` - LND companion.
+- `2026-05-02-1601-privacy-and-timing-leaks.md` - the LND surface (advanced extension).
 - `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
 - `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
 
@@ -11,7 +11,7 @@
 
 ## 1. Scope
 
-The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy). The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> [local bitcoind](../../GLOSSARY.md#local-bitcoind) (v25.99.0 covtools fork, pruned signet). The arbiter <-> bitcoind link is on the *trusted* side of the gateway and carries no local anti-timing mitigation by design - [action delay](../../GLOSSARY.md#action-delay), [result delay](../../GLOSSARY.md#result-delay), and the gateway's latency normalization cover it in aggregate from the petitioner side. World-facing threats (P2P peers, the single Mutinynet peer, explorers, hosting) are out of scope - see the archived world-facing doc.
+The adversary is the AI client itself; see [AI-facing privacy](../../GLOSSARY.md#ai-facing-privacy). The boundary is AI <-> [privacy gateway](../../GLOSSARY.md#privacy-gateway) <-> [local bitcoind](../../GLOSSARY.md#local-bitcoind) (v25.99.0 covtools fork, pruned signet) - the primary boundary: the default onchain mode serves reads and writes from bitcoind alone and never imports the LND client (doc 01 covers the advanced extension that adds the LN surface back). The arbiter <-> bitcoind link is on the *trusted* side of the gateway and carries no local anti-timing mitigation by design - [action delay](../../GLOSSARY.md#action-delay), [result delay](../../GLOSSARY.md#result-delay), and the gateway's latency normalization cover it in aggregate from the petitioner side. World-facing threats (P2P peers, the single Mutinynet peer, explorers, hosting) are out of scope - see the archived world-facing doc.
 
 ## 2. Threat model
 
@@ -30,7 +30,7 @@ Out of scope: the bitcoind host OS / disk operator; Bitcoin P2P peers (world-fac
 
 ## 3. Per-RPC leak surface
 
-> **Live surface vs. policy.** The arbiter currently exposes only four ops to the petitioner - `query_balance`, `query_channels` (reads) and `send_bitcoin`, `send_lightning` (writes, routed through `sendtoaddress` or the LND analogue). Every other inbound op parks in [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and returns the uniform refusal, so no raw RPC below is directly petitioner-reachable. The cells define policy for any future expansion of the AI-reachable set.
+> **Live surface vs. policy.** The exposed op set depends on the deployment mode (doc 05 §2.2; onchain is the default). Onchain mode - this doc's surface - exposes `query_balance` (read, the bitcoind wallet) and `send_bitcoin` (write, routed through `sendtoaddress` after the registry and standing-approvals gates). The advanced Lightning extension layers `query_channels` / `send_lightning` back on; against an onchain arbiter those refuse uniformly at the mode gate (audit `decision_refuse_mode`). Every other inbound op parks in [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and returns the uniform refusal, so no raw RPC below is directly petitioner-reachable. The cells define policy for any future expansion of the AI-reachable set.
 
 Severity: **HIGH** = full identifier, key material, or balance reveal; **MED** = partial identifiers, counts, patterns, or confirmable state; **LOW** = flags, booleans, or public chain data. The mitigation column tags the glossary mechanism; mechanics and caveats are defined there.
 
@@ -164,4 +164,4 @@ bitcoind is more dangerous on the wallet / key-derivation side (one `getaddressi
 
 ## 8. Reconciliation status
 
-**2026-05-24**, reconciled against `arbiter/src/bitcoin.py`, `gateway.py`, and `scale.py` (triggering commits a12b1c8 "allowlist deleted, registry IS the destination gate" and 99bcc49 "standing approvals as the WHAT gate"). The findings are now folded into the body above: the allowlist->registry rename is complete; §3.4 and §5 use scale cloaking for wallet/channel totals (not banding); §3.5/§3.6 reflect the `sendtoaddress` black box rather than a PSBT round-trip, and drop the change-address validation the arbiter never performs; §5 names standing approvals as the WHAT gate beside the registry's WHO gate; §3's lead note marks the per-RPC table as forward-looking policy beyond the live four-op surface; and §1 records the arbiter <-> bitcoind link as intentionally un-mitigated locally. None of this changed the threat model (§2-§4) or the mitigation catalogue (§5).
+**2026-05-24, updated 2026-06-12**, reconciled against `arbiter/src/bitcoin.py`, `gateway.py`, and `scale.py` (triggering commits a12b1c8 "allowlist deleted, registry IS the destination gate", 99bcc49 "standing approvals as the WHAT gate", and 9081f46 "onchain (Bitcoin-first) default mode"). The findings are folded into the body above: the allowlist->registry rename is complete; §3.4 and §5 use scale cloaking for wallet/channel totals (not banding); §3.5/§3.6 reflect the `sendtoaddress` black box rather than a PSBT round-trip, and drop the change-address validation the arbiter never performs; §5 names standing approvals as the WHAT gate beside the registry's WHO gate (wired, both branches exit-loop-validated); §3's lead note marks the per-RPC table as forward-looking policy beyond the live mode-dependent op surface; §1 records the arbiter <-> bitcoind link as intentionally un-mitigated locally; and the 2026-06-12 pass marks bitcoind as the primary surface, with `query_balance` served from the bitcoind wallet (`getbalance()` scaled to integer sats, then scale-cloaked) and the LN ops extension-gated per doc 05 §2.2. None of this changed the threat model (§2-§4) or the mitigation catalogue (§5).
