@@ -1,3 +1,3 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":53206},"ts":"2026-06-12T18:02:09Z"}
-{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-06-12T18:02:09Z"}
-{"event":"decision_refuse_mode","payload":{"op":"query_channels","reason":"advanced_extension_disabled"},"ts":"2026-06-12T18:02:09Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55533},"ts":"2026-06-18T20:11:47Z"}
+{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-06-18T20:11:47Z"}
+{"event":"decision_refuse_mode","payload":{"op":"query_channels","reason":"advanced_extension_disabled"},"ts":"2026-06-18T20:11:47Z"}

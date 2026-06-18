@@ -11,6 +11,7 @@ not through the gateway.
 Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §2.1, §3, §4.1.
 """
 import audit
+import executor
 import gateway
 import registry
 import state
@@ -24,6 +25,11 @@ import state
 # arbiter/config/destinations.yaml, not the SQLite state.db, so it
 # does not appear in this list. It is wired up via registry.configure()
 # in main() instead.
+#
+# executor (the timing-layer drainer, doc 05 §4.6) is imported above; it
+# owns no tables (it drains timing's), and it imports ecash.py / lnd.py
+# lazily inside its handlers, so importing it here does not pull in the
+# nutshell or lncli dependency (doc 07 §9).
 import results  # noqa: F401  (registers results, result_poll_floor)
 import timing  # noqa: F401  (registers pending_actions, pending_results)
 
@@ -38,6 +44,13 @@ def main(host=None, port=None, latency_target=None):
     state.configure()
     state.migrate()
     registry.configure()
+    # Start the timing-layer drainer (executor.py) before serving. It
+    # runs in a daemon thread, draining due actions against the backends
+    # and due results into the result registry (doc 05 §4.6, §4.8),
+    # entirely off the single-threaded request path. It is idle until a
+    # write is deferred, so onchain / lightning deployments pay nothing
+    # for it and it stays mint-free / LND-free in those modes.
+    executor.start_background_drainer()
     gateway.serve(host=host, port=port, latency_target=latency_target)
 
 

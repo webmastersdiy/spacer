@@ -15,10 +15,18 @@ gate.
 
 Wrapper choice: shells out to the nutshell `cashu` CLI via
 subprocess (argv list, no shell), mirroring bitcoin.py / lnd.py. The
-arbiter controls the binary path, the mint URL, the wallet name, and
-the wallet data dir explicitly so a non-AI reviewer can audit
-exactly what executes (doc 05 §2.1). nutshell sits in bin/-style
-upstream territory like lncli does (doc 07 §2).
+arbiter controls the binary path, the mint URL, and the wallet data
+dir explicitly so a non-AI reviewer can audit exactly what executes
+(doc 05 §2.1). nutshell sits in bin/-style upstream territory like
+lncli does (doc 07 §2).
+
+Wallet selection is by CASHU_DIR alone - the default nutshell wallet,
+no `--wallet NAME`. A named wallet is deliberately avoided: nutshell
+0.18.1's `receive` ignores `--wallet` and writes the swapped-in proofs
+to the default wallet's DB while `balance`/`pay` read the named one, so
+a defund would melt against an empty named wallet (verified live at
+sp-uwa0v0). One wallet per CASHU_DIR keeps every op - mint, send,
+receive, melt - on the same DB; deployment isolation is the data dir.
 
 The mint URL is operator-pinned and NEVER AI-suppliable (doc 07 §2):
 there is no default mint, and a missing CASHU_MINT_URL raises rather
@@ -29,16 +37,22 @@ swap-claim runs against the pinned mint (the wallet only talks to
 the configured mint; the mint-pin check is executor-time because
 only the wallet can decode the token's embedded mint URL).
 
-nutshell CLI surface (ASSUMED, verify at sp-2hwco4.4): the
-subcommand names and flags below model nutshell's documented wallet
-CLI (`balance`, `invoice` for mint quotes/issuance, `pay` for melt,
-`send`, `receive`, `info`). The live test-mint bead (sp-2hwco4.4)
-exercises them against a real nutshell install and the reconcile
-pass (sp-2hwco4.3) folds any corrections back into this module and
-the design doc. Until then, every function returns the raw stdout
-text: nutshell prints human-oriented text, not JSON, so structured
-parsing is deferred to the executor bead where the live surface can
-be verified rather than guessed.
+nutshell CLI surface (VERIFIED against nutshell 0.18.1 at sp-uy29gy,
+the client version matched to the cashu.mutinynet.com mint's
+advertised Nutshell/0.18.1): the subcommand names and flags below
+were exercised against a real nutshell install and the live mint.
+Confirmed: `balance`, `invoice <amt> --no-check` (request a mint
+quote: prints the bolt11 to pay and a quote id) / `invoice <amt>
+--id <quote>` (issue once the quote is paid), `pay -y <bolt11>`
+(melt), `send -y -d <amt>` (serialize a DLEQ handoff token),
+`receive <token>`, `decode <token>` (JSON), `info`. Corrections
+folded in from the originally-assumed surface: `pay` and `send` need
+-y because the arbiter has no operator at the cashu stdin (the
+prompt would block), `send` takes -d so the handoff token carries
+DLEQ proofs (doc 07 §2), and `decode` (JSON) is the executor's
+offline mint-pin check (doc 07 §2). All calls except `decode` still
+return raw human-oriented stdout; the executor parses it (the live
+formats are pinned in arbiter/src/executor.py's parse helpers).
 
 Timing discipline at the mint boundary: the mint is an EXTERNAL
 third party, outside the trusted boundary that bitcoind and LND sit
@@ -72,7 +86,6 @@ import state
 # §3, mirroring lnd/).
 DEFAULT_BIN = Path.home() / "spacer" / "arbiter" / "bin" / "cashu"
 DEFAULT_WALLET_DIR = Path.home() / "spacer" / "arbiter" / "ecash"
-DEFAULT_WALLET_NAME = "arbiter"
 
 # Hard cap on cashu wall time. Mint calls are HTTPS round-trips to an
 # external host (unlike the local-IPC daemons), and a melt waits on an
@@ -115,12 +128,6 @@ def _mint_url():
     return url
 
 
-def _wallet_name():
-    """Resolve the wallet name. Env override CASHU_WALLET takes
-    precedence, else DEFAULT_WALLET_NAME."""
-    return os.environ.get("CASHU_WALLET", DEFAULT_WALLET_NAME)
-
-
 def _wallet_dir():
     """Resolve the wallet data dir. Env override CASHU_DIR takes
     precedence, else DEFAULT_WALLET_DIR (the gitignored
@@ -143,18 +150,19 @@ def _run(*args):
     flow through without shell-metacharacter expansion. Every argv
     element is stringified explicitly.
 
-    The two connection flags (--host for the pinned mint URL,
-    --wallet for the wallet name) are always prepended in the same
-    order, and the wallet data dir is pinned via the CASHU_DIR
+    One connection flag (--host for the pinned mint URL) is always
+    prepended, and the wallet data dir is pinned via the CASHU_DIR
     environment variable nutshell reads - set explicitly on the
     subprocess so an inherited value cannot silently redirect the
-    wallet. A reviewer can read this single _run helper and know the
-    entire connection surface, exactly as with lnd.py's _run.
+    wallet. No --wallet is passed: the default nutshell wallet is used
+    (see the module docstring - a named wallet breaks `receive` in
+    nutshell 0.18.1), and CASHU_DIR alone provides isolation. A reviewer
+    can read this single _run helper and know the entire connection
+    surface, exactly as with lnd.py's _run.
     """
     cmd = [
         str(_bin_path()),
         f"--host={_mint_url()}",
-        f"--wallet={_wallet_name()}",
     ] + [str(a) for a in args]
     env = dict(os.environ)
     env["CASHU_DIR"] = str(_wallet_dir())
@@ -214,8 +222,17 @@ def mint(amount_sat, quote_id):
 def send(amount_sat):
     """Serialize amount_sat of proofs from the wallet into a V4
     cashuB token string (printed on stdout): the fund flow's handoff
-    artifact, deposited in the result registry for the petitioner."""
-    return _run("send", int(amount_sat))
+    artifact, deposited in the result registry for the petitioner.
+
+    Flags (verified against nutshell 0.18.1 at sp-uy29gy):
+    - -y: skip nutshell's interactive confirmation. The arbiter has no
+      operator at the cashu stdin (the operator-facing channel is the
+      console, not this subprocess), mirroring lnd.payinvoice's -f.
+    - -d: embed DLEQ proofs (NUT-12) in the token so the petitioner's
+      wallet can verify it offline (doc 07 §2: DLEQ mandatory in both
+      wallets). Without it a malicious mint's per-client signing could
+      tag the handoff token undetectably."""
+    return _run("send", "-y", "-d", int(amount_sat))
 
 
 def receive(token):
@@ -228,8 +245,29 @@ def receive(token):
 
 def pay(bolt11):
     """Melt wallet proofs to pay a bolt11 invoice: the defund flow's
-    exit leg, paying an invoice from the arbiter's own LND node."""
-    return _run("pay", bolt11)
+    exit leg, paying an invoice from the arbiter's own LND node.
+
+    -y skips nutshell's interactive melt confirmation (verified against
+    nutshell 0.18.1 at sp-uy29gy): the arbiter has no operator at the
+    cashu stdin, so the prompt would otherwise block forever, the
+    eCash analogue of lnd.payinvoice's -f."""
+    return _run("pay", "-y", bolt11)
+
+
+def decode(token):
+    """Decode a serialized cashuB token to nutshell's JSON form
+    (printed on stdout): amounts per proof, the embedded mint URL, and
+    DLEQ proofs. JSON, unlike the other wrapper calls' human text, so
+    the executor parses it directly.
+
+    The executor uses this at the START of a defund, before the
+    swap-claim, to enforce the operator-pinned mint (doc 07 §2): a
+    token whose embedded mint URL is not CASHU_MINT_URL is refused
+    locally, without contacting any mint - decode is offline. This is
+    the executor-time enforcement point the design names: only the
+    wallet can decode a token's embedded mint URL, and decode does it
+    without spending or swapping anything."""
+    return _run("decode", token)
 
 
 def info():
@@ -442,6 +480,9 @@ case "$1" in
   info)
     printf 'Version: nutshell/fake\\nMint URL: https://mint.example.test\\n'
     ;;
+  decode)
+    printf '{{"token": [{{"mint": "https://mint.example.test", "proofs": [{{"amount": 300}}, {{"amount": 200}}]}}], "unit": "sat"}}\\n'
+    ;;
   failboom)
     echo "mint unreachable" >&2
     exit 1
@@ -459,7 +500,6 @@ esac
     fake.chmod(0o755)
     os.environ["CASHU_BIN"] = str(fake)
     os.environ["CASHU_MINT_URL"] = "https://mint.example.test"
-    os.environ["CASHU_WALLET"] = "arbiter"
     os.environ["CASHU_DIR"] = str(work / "wallet")
     os.environ["CASHU_TIMEOUT_S"] = "1.0"
 
@@ -481,16 +521,27 @@ esac
         assert "Paid" in pay("lnbc10n1pfakeinvoice")
         assert "nutshell" in info()
 
+        # decode emits JSON (unlike the human-text wallet calls); the
+        # executor parses the embedded mint URL for the mint-pin check
+        # and the proof amounts. The -y / -d flags reach send's argv.
+        import json as _json_dec
+        parsed = _json_dec.loads(decode("cashuBfakesmokevector"))
+        assert parsed["token"][0]["mint"] == "https://mint.example.test", parsed
+        assert sum(p["amount"] for p in parsed["token"][0]["proofs"]) == 500, parsed
+
         # Argv assertion: connection flags prepended in order, the
         # wallet dir pinned via CASHU_DIR on the subprocess env, args
         # stringified and propagated without shell expansion.
         argv = argv_log.read_text()
         assert "--host=https://mint.example.test" in argv, argv
-        assert "--wallet=arbiter" in argv, argv
+        # No --wallet: the default nutshell wallet is used (a named
+        # wallet breaks `receive` in nutshell 0.18.1). CASHU_DIR alone
+        # isolates the wallet.
+        assert "--wallet" not in argv, argv
         assert f"CASHU_DIR={work / 'wallet'}" in argv, argv
         assert "invoice 1000 --no-check" in argv, argv
         assert "invoice 1000 --id q_fake01" in argv, argv
-        assert "send 500" in argv, argv
+        assert "send -y -d 500" in argv, argv
 
         # Missing mint URL must raise before any subprocess runs: the
         # mint is operator-pinned with no default.

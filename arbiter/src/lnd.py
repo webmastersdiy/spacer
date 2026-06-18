@@ -273,6 +273,15 @@ def payinvoice(payment_request):
     (the operator-facing channel is the directly-attached console,
     not lncli), so we always pass -f.
 
+    --json is REQUIRED: lncli payinvoice's DEFAULT output is a
+    human-readable status table, not JSON (verified against
+    lnd 0.20.0-beta at sp-uy29gy - the assumed-JSON wrapper failed
+    here on the first live payment). --json prints the final payment
+    as a single JSON object; without --inflight_updates it emits only
+    that final object, so _run_json parses it directly. The result's
+    `status` is SUCCEEDED on success and `fee_msat` carries the routing
+    fee (operator cost, doc 07 §10.4).
+
     Caller responsibility:
     - payment_request is the BOLT-11 invoice string the petitioner
       supplied. Per §4.7's recipient address registry, BOLT-11
@@ -281,8 +290,45 @@ def payinvoice(payment_request):
       real invoice before this function is called.
     """
     return _run_json(
-        "payinvoice", "-f", f"--pay_req={payment_request}"
+        "payinvoice", "-f", "--json", f"--pay_req={payment_request}"
     )
+
+
+def addinvoice(amount_sat, memo=None):
+    """Create a BOLT-11 invoice on this node for amount_sat satoshis.
+    Returns the payment_request string (a `lntbs...`/`lnbc...` bolt11).
+
+    This is the defund melt target (doc 07 §3): the eCash executor
+    swap-claims a token at the pinned mint, then melts the proofs to
+    pay a *fresh* invoice from our own LND node, so the value lands
+    back in the operator's Lightning wallet. The mint pays this
+    invoice; receiving it requires inbound channel liquidity, which a
+    prior fund leg creates by pushing local balance outward over the
+    same channel (doc 07 §3 double-spend / liquidity notes).
+
+    Caller responsibility:
+    - amount_sat is an integer number of satoshis. lncli's --amt takes
+      integer sats, so pass an int (or a string of digits), never a
+      float.
+    - memo is optional and stays arbiter-internal: it is attached to
+      the invoice for operator-side bookkeeping and never crosses the
+      privacy gateway. Defund invoices are short-lived and node-local.
+
+    Per §4.3, this returns only the bolt11; the preimage, r_hash, and
+    add_index stay inside lnd and are not surfaced to the caller (the
+    melt only needs the payment_request)."""
+    args = ["addinvoice", f"--amt={int(amount_sat)}"]
+    if memo is not None:
+        args.append(f"--memo={memo}")
+    out = _run_json(*args)
+    payment_request = (out.get("payment_request") or "").strip()
+    # A bolt11 is never empty; signet/mainnet invoices both start with
+    # the human-readable "ln" prefix. Shape-check defensively, mirroring
+    # sendcoins' txid validation, so a malformed lncli response fails
+    # loudly at the boundary rather than melting against a junk target.
+    if not payment_request.startswith("ln"):
+        raise LndError(f"unexpected addinvoice output: {out!r}")
+    return payment_request
 
 
 def openchannel(node_pubkey, local_amount_sat, private=True):
@@ -366,6 +412,9 @@ case "$1" in
   payinvoice)
     printf '{{"status":"SUCCEEDED","payment_preimage":"deadbeef","fee_msat":"1000"}}'
     ;;
+  addinvoice)
+    printf '{{"r_hash":"6e1d","payment_request":"lntbs50u1pexampleinvoice","add_index":"7"}}'
+    ;;
   openchannel)
     printf '{{"funding_txid":"abc","output_index":0}}'
     ;;
@@ -416,6 +465,15 @@ esac
         pay = payinvoice("lntb1pexampleinvoice")
         assert pay["status"] == "SUCCEEDED", pay
         assert pay["payment_preimage"] == "deadbeef", pay
+
+        # addinvoice returns just the bolt11 payment_request (the defund
+        # melt target); r_hash / add_index stay inside lnd. The --amt
+        # flag carries the integer sat amount.
+        pr = addinvoice(5000, memo="defund")
+        assert pr == "lntbs50u1pexampleinvoice", pr
+        argv = argv_log.read_text()
+        assert "addinvoice" in argv and "--amt=5000" in argv, argv
+        assert "--memo=defund" in argv, argv
 
         # Open channel: --private must be passed by default.
         chan = openchannel("02deadbeef", 100000)

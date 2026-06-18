@@ -64,6 +64,7 @@ structure and which are wired in behavior.
 """
 import json
 import os
+import secrets
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -74,6 +75,7 @@ import results
 import scale
 import standing_approvals
 import state
+import timing
 
 # NOTE: arbiter/src/lnd.py is deliberately NOT imported here. It is the
 # advanced Lightning extension's only dependency and is pulled in lazily
@@ -260,12 +262,14 @@ def process_request(handler):
             _hitl_park(request)
             _respond_refused(handler, deadline)
             return
-        response = _dispatch(resolved)
-        response = _hide_secrets(response)
-        response = _band_outbound(response)
-        response = _aggregate_outbound(response)
-        audit.record("decision_allow", {"op": op})
-        _respond_ok(handler, response, deadline)
+        # Both gates passed. Enqueue on the timing layer and acknowledge
+        # with an opaque handle; the executor (executor.py) drains the
+        # due action against the real backend (bitcoind / LND) and the
+        # result registry surfaces the outcome on the petitioner's poll.
+        # No synchronous dispatch, no not_implemented stub.
+        _enqueue_write_and_ack(
+            handler, op, _registry_write_params(op, resolved), deadline
+        )
         return
 
     # eCash write op in ecash mode (doc 07 §3). No recipient_token -
@@ -586,6 +590,71 @@ def _handle_poll(handler, request, deadline):
     _respond_ok(handler, response, deadline)
 
 
+def _new_handle():
+    """Mint an opaque, unpredictable acknowledgment handle for a
+    deferred write. The petitioner gets it at submit and polls the
+    result registry with it later (doc 05 §3, §4.8). Unpredictable by
+    construction: the handle is the petitioner-binding identifier, so a
+    guessable one would let another party probe for someone else's
+    result (§4.8 caveat)."""
+    return secrets.token_urlsafe(16)
+
+
+def _ecash_action_params(op, request):
+    """The minimal params the executor needs for an eCash write, so the
+    timing queue stores only what the action requires rather than the
+    whole request. fund_ecash carries amount_sats (already allowance-
+    checked); defund_ecash carries the serialized token (doc 07 §3)."""
+    if op == "fund_ecash":
+        return {"amount_sats": _request_amount_sats(request)}
+    return {"token": request.get("token")}
+
+
+def _registry_write_params(op, resolved):
+    """The minimal params the executor needs for a registry-gated write
+    (send_bitcoin / send_lightning). Both carry the registry-resolved
+    real destination - a Bitcoin address for send_bitcoin, a bolt11 for
+    send_lightning (_pseudonymize_inbound wrote it into
+    recipient_address) - and the AI's declared amount in sats
+    (informational for send_lightning, whose bolt11 carries its own
+    amount). Only what the action requires reaches the timing queue, not
+    the whole request."""
+    return {
+        "recipient_address": resolved.get("recipient_address"),
+        "amount_sats": _request_amount_sats(resolved),
+    }
+
+
+def _enqueue_write_and_ack(handler, op, params, deadline):
+    """Hand a gate-passed write to the timing layer and acknowledge it -
+    the single tail every write op shares (doc 05 §3, §4.6).
+
+    Mint an opaque handle, enqueue the action (deferred by the
+    action-delay window), and acknowledge at once with that handle. The
+    executor (executor.py) drains the due action against the real
+    backend (bitcoind / LND / the pinned mint), and the result registry
+    surfaces the outcome on the petitioner's poll (doc 05 §4.8). A known
+    write op never blocks the single-threaded request path on a backend
+    call, and the not_implemented dispatch stub is gone from the write
+    path entirely.
+
+    Production timing windows are not yet computable (doc 05 §4.6,
+    doc 07 §7: blocked on the dynamic-window work), so enqueue_action
+    raises NotImplementedError there. The safe failure mode is "does
+    not run": refuse uniformly rather than execute on an un-vetted
+    window. SPACER_TIMING_MODE=test supplies windows and reaches the
+    executor."""
+    handle = _new_handle()
+    try:
+        timing.enqueue_action(handle, op, params)
+    except NotImplementedError:
+        audit.record("decision_refuse_timing_unavailable", {"op": op})
+        _respond_refused(handler, deadline)
+        return
+    audit.record("decision_allow", {"op": op})
+    _respond_ok(handler, {"status": "received", "handle": handle}, deadline)
+
+
 def _handle_ecash_write(handler, request, deadline):
     """Run an eCash write (fund_ecash / defund_ecash) through its
     gate pipeline (doc 07 §3, §8). Only reachable in ecash mode.
@@ -613,11 +682,12 @@ def _handle_ecash_write(handler, request, deadline):
     against the pinned mint. The gate's job is mode, allowance, and
     approval - not token parsing.
 
-    Dispatch currently returns the not_implemented stub for these ops:
-    the happy-path fund/defund executor lands with the same
-    timing-layer executor that gates the other happy-path sends
-    (doc 07 §9), sleeping timing.mint_gap_s() between the mint-facing
-    steps (doc 07 §6 T1)."""
+    Once the gates pass the write is enqueued on the timing layer (an
+    opaque handle is returned synchronously) and drained by the
+    executor (executor.py) against the pinned mint + our LND; the
+    result registry surfaces the outcome on the petitioner's poll
+    (doc 07 §3; doc 05 §3, §4.6, §4.8). The mint-facing steps are
+    spaced by timing.mint_gap_s() (doc 07 §6 T1)."""
     op = request.get("op")
     amount = _request_amount_sats(request)
     if op == "fund_ecash":
@@ -654,24 +724,23 @@ def _handle_ecash_write(handler, request, deadline):
         _hitl_park(request)
         _respond_refused(handler, deadline)
         return
-    response = _dispatch(request)
-    response = _hide_secrets(response)
-    response = _band_outbound(response)
-    response = _aggregate_outbound(response)
-    audit.record("decision_allow", {"op": op})
-    _respond_ok(handler, response, deadline)
+    # Gates passed: hand the write to the timing layer + executor, which
+    # drains it against the pinned mint + our LND (doc 07 §3; doc 05 §3,
+    # §4.6, §4.8). Same enqueue-and-acknowledge tail every write shares.
+    _enqueue_write_and_ack(
+        handler, op, _ecash_action_params(op, request), deadline
+    )
 
 
 def _dispatch(request):
-    """Hand the (post-registry-resolved if write, post-routing if
-    read) request to arbiter internals.
+    """Hand a read op to arbiter internals and return its response.
 
-    Only the read-only query ops are wired in this skeleton. The
-    write-op dispatch case currently has no implementation - the
-    timing layer + bitcoind / LND executor lands in a downstream
-    bead - so a known write op resolves through the registry and
-    then falls through to the "not_implemented" fallback. Wiring is
-    mechanical when the executor lands; structure is in place.
+    Only the read-only query ops reach here now. Every write op is
+    enqueued on the timing layer and drained by executor.py
+    (_enqueue_write_and_ack), so a write never calls _dispatch and the
+    not_implemented fallback at the tail is reachable only by an
+    unrecognized read op - a defensive default, since _known_read_ops()
+    admits only query_balance / query_channels.
 
     query_balance returns the wallet's total balance, routed through
     scale.present() so the precise satoshi value AND the wallet's order

@@ -1,5 +1,5 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52925},"ts":"2026-06-12T18:02:03Z"}
-{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T18:02:03Z"}
-{"event":"registry_lookup_ok","payload":{"id":1,"token":"J3PHTV"},"ts":"2026-06-12T18:02:03Z"}
-{"event":"standing_approval_match","payload":{"op":"send_bitcoin","rationale":"exit-loop test rule"},"ts":"2026-06-12T18:02:03Z"}
-{"event":"decision_allow","payload":{"op":"send_bitcoin"},"ts":"2026-06-12T18:02:03Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54862},"ts":"2026-06-18T20:11:39Z"}
+{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-06-18T20:11:39Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"C8QFKY"},"ts":"2026-06-18T20:11:39Z"}
+{"event":"standing_approval_match","payload":{"op":"send_bitcoin","rationale":"exit-loop test rule"},"ts":"2026-06-18T20:11:39Z"}
+{"event":"decision_allow","payload":{"op":"send_bitcoin"},"ts":"2026-06-18T20:11:39Z"}

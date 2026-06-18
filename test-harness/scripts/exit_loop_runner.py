@@ -54,6 +54,7 @@ Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -587,11 +588,33 @@ def _apply_precondition(precondition):
 # verify, just before the first ecash variant runs, that both lower
 # rungs ran mint-free (doc 07 §9).
 #
-# Happy-path sends (including fund/defund) and the other registry-
-# rejection subcases (expired / used / bad checksum / anomalous)
-# become reachable once the timing-layer executor lands; their
+# The other registry-rejection subcases (expired / used / bad checksum
+# / anomalous) become reachable with their own seed preconditions; their
 # artifact directories stay absent per §10's "an empty one signals
-# not-yet-validated".
+# not-yet-validated". The happy-path sends (including fund/defund) now
+# run the real executor: in the fake-backed suite the four allowed-by-
+# standing-approval variants assert the timing-layer acknowledgment
+# (_is_received_ack), and the live executor round-trips run under --live
+# (see run_live_roundtrips).
+
+
+def _is_received_ack(r):
+    """A submit that passed every gate now returns the timing-layer
+    acknowledgment - status 'received' plus an opaque handle the
+    petitioner later polls (doc 05 §3, §4.6, §4.8) - with petcli's local
+    estimate-window stamp (§5.2) layered on. The handle is random per
+    call, so the four allowed-by-standing-approval variants assert the
+    shape, not an exact dict. This is the real executor path that
+    replaced the not_implemented dispatch stub (sp-uwa0v0)."""
+    return (
+        set(r) == {"status", "handle", "_petcli_estimate_window_s"}
+        and r.get("status") == "received"
+        and isinstance(r.get("handle"), str)
+        and bool(r.get("handle"))
+        and r.get("_petcli_estimate_window_s") == 30.0
+    )
+
+
 VARIANTS = [
     # --- estimate window: local-only, no arbiter ---
     {
@@ -799,20 +822,17 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: r == {
-            "status": "not_implemented",
-            "op": "send_bitcoin",
-            "_petcli_estimate_window_s": 30.0,
-        },
+        "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
             "send_bitcoin where the registry token resolves AND a "
-            "standing-approval rule matches (op + destination + "
-            "amount under max). The gate passes; dispatch fires; "
-            "the write executor is still a stub so dispatch returns "
-            "the not_implemented marker. The variant proves the gate "
-            "let the call through. arbiter-events.log must contain "
-            "standing_approval_match and decision_allow."
+            "standing-approval rule matches (op + destination + amount "
+            "under max). Both gates pass; the gateway enqueues the write "
+            "on the timing layer and acknowledges with an opaque handle "
+            "(status 'received') - the real executor path, no "
+            "not_implemented stub - which the petitioner later polls for "
+            "the drained on-chain result. arbiter-events.log must "
+            "contain standing_approval_match and decision_allow."
         ),
     },
     {
@@ -1217,20 +1237,17 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: r == {
-            "status": "not_implemented",
-            "op": "send_lightning",
-            "_petcli_estimate_window_s": 30.0,
-        },
+        "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
             "send_lightning analogue of submit/send-bitcoin/allowed-"
             "by-standing-approval, with the extension enabled. "
             "amount_msats=1_000_000 rounds up to 1000 sats; "
-            "max_amount_sats=50000 admits it. The gate passes; "
-            "dispatch returns the not_implemented stub. arbiter-"
-            "events.log contains standing_approval_match and "
-            "decision_allow."
+            "max_amount_sats=50000 admits it. Both gates pass; the "
+            "gateway enqueues the write and acknowledges with a handle "
+            "(status 'received') - the real executor path, no "
+            "not_implemented stub. arbiter-events.log contains "
+            "standing_approval_match and decision_allow."
         ),
     },
     # --- extension gate, eCash rung against the LIGHTNING extension:
@@ -1448,21 +1465,18 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: r == {
-            "status": "not_implemented",
-            "op": "fund_ecash",
-            "_petcli_estimate_window_s": 30.0,
-        },
+        "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
             "fund_ecash where the allowance admits the amount AND a "
             "standing-approval rule matches (op fund_ecash, "
             "destination 'mint' - the structural constant for eCash "
-            "ops, doc 07 §3 - amount under max). Both gates pass; "
-            "dispatch fires and returns the not_implemented stub "
-            "(the fund executor lands with the timing-layer "
-            "executor). arbiter-events.log contains "
-            "standing_approval_match and decision_allow."
+            "ops, doc 07 §3 - amount under max). Both gates pass; the "
+            "gateway enqueues the fund and acknowledges with a handle "
+            "(status 'received'); the executor drains it against the "
+            "pinned mint + our LND (run under --live). arbiter-"
+            "events.log contains standing_approval_match and "
+            "decision_allow."
         ),
     },
     # --- defund_ecash gate pipeline: standing approvals -> dispatch
@@ -1513,19 +1527,15 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: r == {
-            "status": "not_implemented",
-            "op": "defund_ecash",
-            "_petcli_estimate_window_s": 30.0,
-        },
+        "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
             "defund_ecash with an unbounded standing-approval rule "
             "(op defund_ecash, destination 'mint', no amount bound): "
-            "the gate passes and dispatch returns the "
-            "not_implemented stub (the defund executor - swap-claim "
-            "at the pinned mint, melt to our LND - lands with the "
-            "timing-layer executor). arbiter-events.log contains "
+            "the gate passes, the gateway enqueues the defund and "
+            "acknowledges with a handle (status 'received'); the "
+            "executor drains it - swap-claim at the pinned mint, melt "
+            "to our LND (run under --live). arbiter-events.log contains "
             "standing_approval_match and decision_allow."
         ),
     },
@@ -1909,6 +1919,273 @@ def _run_variant(variant):
                 pass
 
 
+# === Live signet round-trips (--live) ===============================
+#
+# The default suite above is fake-backed and proves the gateway hands
+# every gate-passed write to the timing layer (status 'received', not
+# the old not_implemented stub). --live adds the other half of the
+# acceptance bar: it drives the SAME executor the gateway enqueues to
+# against the real Mutinynet signet infra - the LND node and the mint -
+# and exercises all four write ops for real. The three round-trips
+# cover the four ops: an on-chain send (send_bitcoin), a Lightning pay
+# (send_lightning), and an eCash mint+melt (fund_ecash + defund_ecash).
+# Each asserts a real executor result (sent / funded / defunded), never
+# a failure or the not_implemented stub.
+#
+# No bitcoind runs in this deployment, so send_bitcoin uses the LND
+# on-chain wallet (lnd.sendcoins) under SPACER_MODE=ecash - the same
+# backend split query_balance already makes (gateway._dispatch). The
+# round-trips force-drain (now=far) past the action/result delay
+# windows; the handlers' own mint-boundary gaps (doc 07 §6 T1) still
+# run.
+
+_LIVE_LNCLI = Path.home() / "spacer" / "arbiter" / "bin" / "lncli"
+_LIVE_LND_DIR = Path.home() / "spacer" / "arbiter" / "lnd"
+_LIVE_CASHU = Path.home() / "spacer" / "arbiter" / "bin" / "cashu"
+_LIVE_RPCSERVER = "first-test.u.voltageapp.io:10009"
+_LIVE_MINT_URL = "https://cashu.mutinynet.com"
+
+
+def _live_env():
+    """Point the backend wrappers at the real signet infra, overriding
+    the fake binaries the module installed at import. Each wrapper reads
+    these per call, so setting them before driving the executor is
+    enough. SPACER_MODE=ecash selects the LND on-chain wallet for
+    send_bitcoin and arms the eCash writes; SPACER_TIMING_MODE=test
+    keeps the windows short and supplies the mint-boundary gaps. The
+    longer timeouts cover live LN pathfinding / mint round-trips.
+
+    The arbiter cashu wallet uses a FRESH temp CASHU_DIR per run, not
+    the persistent ~/spacer/arbiter/ecash: that wallet accumulates
+    stuck pending proofs across runs (the residue of any melt that does
+    not settle) which corrupt a later receive/melt, making the gate
+    flaky. A clean dir per run keeps the round-trip deterministic; the
+    real mint + LND node are still exercised - only the local wallet DB
+    is test-scoped. No CASHU_WALLET: ecash.py uses the default wallet
+    (a named wallet breaks nutshell 0.18.1 `receive`)."""
+    os.environ["LNCLI_BIN"] = str(_LIVE_LNCLI)
+    os.environ["LNCLI_RPCSERVER"] = _LIVE_RPCSERVER
+    os.environ["LNCLI_TLSCERT"] = str(_LIVE_LND_DIR / "tls.cert")
+    os.environ["LNCLI_MACAROON"] = str(_LIVE_LND_DIR / "admin.macaroon")
+    os.environ["LNCLI_NETWORK"] = "signet"
+    os.environ["LNCLI_TIMEOUT_S"] = "120"
+    os.environ["CASHU_BIN"] = str(_LIVE_CASHU)
+    os.environ["CASHU_MINT_URL"] = _LIVE_MINT_URL
+    os.environ.pop("CASHU_WALLET", None)
+    os.environ["CASHU_DIR"] = tempfile.mkdtemp(prefix="exit-loop-live-arb-")
+    os.environ["CASHU_TIMEOUT_S"] = "120"
+    os.environ["SPACER_MODE"] = "ecash"
+    os.environ["SPACER_TIMING_MODE"] = "test"
+
+
+def _ai_custody_hop(token):
+    """Pass a fund token through a separate petitioner-side cashu wallet
+    - receive, then re-send - so it returns as a fresh token whose
+    proofs the arbiter has NOT already minted.
+
+    This mirrors the doc 07 §3 custody split: the AI holds the float in
+    its own wallet, and a defund returns a token the AI re-serialized.
+    nutshell will not swap-claim a token whose proofs are already in the
+    receiving wallet, so the arbiter cannot defund its own just-minted
+    token directly; the hop is what makes the live defund a genuine
+    round-trip. Uses the default wallet in its own CASHU_DIR (named
+    wallets break `receive`)."""
+    pet_dir = tempfile.mkdtemp(prefix="exit-loop-live-pet-")
+    env = dict(os.environ, CASHU_DIR=pet_dir)
+    base = [str(_LIVE_CASHU), f"--host={_LIVE_MINT_URL}"]
+
+    def run(*a):
+        return subprocess.run(
+            base + list(a), capture_output=True, text=True, timeout=120, env=env
+        )
+
+    r = run("receive", token)
+    if r.returncode != 0:
+        raise RuntimeError(f"AI-hop receive failed: {r.stderr.strip()[:150]}")
+    m = re.search(r"Balance:\s*([0-9]+)\s*sat", run("balance").stdout)
+    amount = int(m.group(1)) if m else 0
+    if amount <= 0:
+        raise RuntimeError("AI-hop wallet empty after receive")
+    s = run("send", "-y", "-d", str(amount))
+    m2 = re.search(r"(cashu[AB][A-Za-z0-9_=-]{20,})", s.stdout)
+    if not m2:
+        raise RuntimeError(f"AI-hop send produced no token: {s.stdout.strip()[:150]}")
+    return m2.group(1)
+
+
+def _lncli_json(*args):
+    """Call the real lncli with the connection flags and parse its JSON
+    stdout. Live-test setup only (a fresh receive address); the executor
+    itself drives lnd.py, not this helper."""
+    cmd = [
+        str(_LIVE_LNCLI),
+        f"--rpcserver={_LIVE_RPCSERVER}",
+        f"--tlscertpath={_LIVE_LND_DIR / 'tls.cert'}",
+        f"--macaroonpath={_LIVE_LND_DIR / 'admin.macaroon'}",
+        "--network=signet",
+    ] + [str(a) for a in args]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(f"lncli {args}: {proc.stderr.strip()}")
+    return json.loads(proc.stdout)
+
+
+def _live_audit_field(live_dir, event, field):
+    """Best-effort: the `field` from the latest audit record of `event`
+    in the live run's log, or None. For the human-readable fee / txid
+    report lines only (audit payload, doc 05 §4.5)."""
+    log = live_dir / "audit.log"
+    if not log.exists():
+        return None
+    found = None
+    for line in log.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("event") == event:
+            found = (rec.get("payload") or {}).get(field, found)
+    return found
+
+
+def _drive_executor(handle, op, params, far):
+    """Enqueue one action and force-drain it through the real executor -
+    the production execute -> deliver -> poll path - returning
+    (poll_status, payload). now=far bypasses the action/result delay
+    windows so the live test does not wait them out; the handler's own
+    mint-boundary sleeps still run."""
+    import executor
+    timing.enqueue_action(handle, op, params)
+    executor.execute_due_actions(now=far)
+    executor.deliver_due_results(now=far)
+    status, payload, _kind = results.poll(handle)
+    return status, payload
+
+
+def run_live_roundtrips():
+    """Run the three live signet round-trips against the real LND node
+    and mint, driving the same executor the gateway enqueues to. Returns
+    True iff all three pass. Prints a PASS/FAIL line per round-trip plus
+    the operator-side fees (funded != received, doc 07 §10.4) from the
+    audit log; on any failure it dumps the live audit events so the
+    cause is debuggable."""
+    print()
+    print("--- live signet round-trips (--live) ---")
+    _live_env()
+
+    live_dir = Path(tempfile.mkdtemp(prefix="exit-loop-live-"))
+    audit.configure(live_dir / "audit.log")
+    state.configure(live_dir / "state.db")
+    state.migrate()
+    import ecash
+    import executor  # noqa: F401  (used via _drive_executor)
+    far = time.time() + 10_000.0
+
+    oks = []
+
+    # --- round-trip 1: send_bitcoin (on-chain, LND wallet) ----------
+    try:
+        addr = _lncli_json("newaddress", "p2wkh")["address"]
+        status, payload = _drive_executor(
+            "live_send_bitcoin", "send_bitcoin",
+            {"recipient_address": addr, "amount_sats": 2000}, far,
+        )
+        ok = status == "result" and payload.get("status") == "sent"
+        txid = _live_audit_field(live_dir, "send_bitcoin_executed", "txid")
+        print(f"{'PASS' if ok else 'FAIL'}  live/send_bitcoin  "
+              f"(2000 sat on-chain -> {addr}; txid={txid})")
+        if not ok:
+            print(f"      -> result={payload}")
+        oks.append(ok)
+    except Exception as e:
+        print(f"FAIL  live/send_bitcoin  -> {e}")
+        oks.append(False)
+
+    # --- round-trip 2: send_lightning (pay a bolt11 over the channel)
+    # A fresh mint quote is a real, payable bolt11 that routes over our
+    # one channel (us -> faucet -> mint), exercising lnd.payinvoice end
+    # to end; we pay it without issuing proofs (the value parks at the
+    # mint, a small deliberate test cost).
+    try:
+        bolt11, _qid = executor._parse_mint_quote(ecash.mint_quote(100))
+        status, payload = _drive_executor(
+            "live_send_lightning", "send_lightning",
+            {"recipient_address": bolt11, "amount_sats": 100}, far,
+        )
+        ok = status == "result" and payload.get("status") == "sent"
+        fee = _live_audit_field(
+            live_dir, "send_lightning_executed", "ln_routing_fee_msat"
+        )
+        print(f"{'PASS' if ok else 'FAIL'}  live/send_lightning  "
+              f"(100 sat; routing_fee_msat={fee})")
+        if not ok:
+            print(f"      -> result={payload}")
+        oks.append(ok)
+    except Exception as e:
+        print(f"FAIL  live/send_lightning  -> {e}")
+        oks.append(False)
+
+    # --- round-trip 3: eCash fund 5000 -> AI hop -> defund ----------
+    # Fund pushes 5000 outbound (creating the inbound the defund needs);
+    # the token then passes through a petitioner wallet (the AI custody
+    # hop, doc 07 §3) so the arbiter defunds a token it did not mint;
+    # defund melts back a fresh invoice sized below 5000 for the mint's
+    # melt-fee reserve, so funded (5000) != received (credited).
+    try:
+        s_fund, p_fund = _drive_executor(
+            "live_fund_ecash", "fund_ecash", {"amount_sats": 5000}, far,
+        )
+        fund_ok = (
+            s_fund == "result"
+            and p_fund.get("status") == "funded"
+            and isinstance(p_fund.get("token"), str)
+            and p_fund["token"].startswith("cashu")
+        )
+        fund_fee = _live_audit_field(
+            live_dir, "ecash_fund_executed", "ln_routing_fee_msat"
+        )
+        print(f"{'PASS' if fund_ok else 'FAIL'}  live/ecash_fund  "
+              f"(5000 sat minted; ln_routing_fee_msat={fund_fee})")
+        if not fund_ok:
+            print(f"      -> result={p_fund}")
+        defund_ok = False
+        if fund_ok:
+            defund_token = _ai_custody_hop(p_fund["token"])
+            s_def, p_def = _drive_executor(
+                "live_defund_ecash", "defund_ecash",
+                {"token": defund_token}, far,
+            )
+            defund_ok = s_def == "result" and p_def.get("status") == "defunded"
+            credited = _live_audit_field(
+                live_dir, "ecash_defund_executed", "credited_sats"
+            )
+            melt_fee = _live_audit_field(
+                live_dir, "ecash_defund_executed", "melt_fee_sat"
+            )
+            claimed = p_def.get("amount_sats") if isinstance(p_def, dict) else None
+            print(f"{'PASS' if defund_ok else 'FAIL'}  live/ecash_defund  "
+                  f"({claimed} claimed; credited={credited}, "
+                  f"melt_fee_sat={melt_fee})")
+            if not defund_ok:
+                print(f"      -> result={p_def}")
+        oks.append(fund_ok and defund_ok)
+    except Exception as e:
+        print(f"FAIL  live/ecash_roundtrip  -> {e}")
+        oks.append(False)
+
+    all_ok = len(oks) == 3 and all(oks)
+    print()
+    print(f"live round-trips: {sum(1 for o in oks if o)}/3 passed")
+    if not all_ok:
+        log = live_dir / "audit.log"
+        if log.exists():
+            print("--- live audit events ---")
+            print(log.read_text())
+    return all_ok
+
+
 # === Driver =========================================================
 
 def main(argv=None):
@@ -1919,14 +2196,21 @@ def main(argv=None):
     artifact set always reflects the current manifest run. exit-loop/
     README.md is left in place (documentation, not a run artifact).
 
-    Exit code is 0 only when every variant passes; the §10 closed
-    loop terminates only on that condition.
+    Default (no flags): exit 0 only when every fake-backed variant
+    passes; the §10 closed loop terminates only on that condition.
+
+    --live: ALSO run the three live signet round-trips against the real
+    LND node + mint (run_live_roundtrips), exercising all four write
+    ops through the real executor. Exit 0 only when the fake-backed
+    suite AND all three live round-trips pass - the sp-uwa0v0 acceptance
+    bar. If the fake-backed suite fails the live round-trips are skipped
+    (the wiring is already broken; no point spending real sats).
     """
     argv = sys.argv[1:] if argv is None else argv
-    if argv:
-        # Unknown flags fail loudly. The runner has no options today;
-        # if a future caller passes one we want to surface that rather
-        # than silently ignore.
+    live = argv == ["--live"]
+    if argv and not live:
+        # Unknown flags fail loudly. The only option is --live; anything
+        # else is surfaced rather than silently ignored.
         print(f"unknown arguments: {argv}", file=sys.stderr)
         return 2
 
@@ -2009,7 +2293,16 @@ def main(argv=None):
         print(f"failed: {len(failed)}")
         for path_str, err in failed:
             print(f"  - {path_str}: {err}")
-    return 0 if not failed else 1
+
+    if not live:
+        return 0 if not failed else 1
+
+    # --live: the fake-backed suite must pass before spending real sats.
+    if failed:
+        print()
+        print("skipping live round-trips: fake-backed suite failed")
+        return 1
+    return 0 if run_live_roundtrips() else 1
 
 
 if __name__ == "__main__":
