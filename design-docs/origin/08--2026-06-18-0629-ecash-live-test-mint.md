@@ -1,7 +1,7 @@
 # eCash live test mint: selection and Lightning round-trip flow
 
 **Date:** 2026-06-18
-**Status:** mint selected, round-trip designed; the live round-trip is **not yet executed** (the `cashu` CLI is not installed yet). Results, fees, and CLI-surface verification are tracked in the findings companion and reconciled back here when the round-trip runs, per the repo's reconciled tradition.
+**Status:** mint selected, round-trip designed AND **executed** (sp-uwa0v0): the now-landed fund/defund executor drives the live round-trip through `exit_loop_runner.py --live`, passing deterministically. Results, fees, and the verified CLI surface are in the findings companion; the binding decisions the run forced are folded back into §3-§4 below.
 **Context:** This is the live-mint doc that `07--2026-06-12-0916-ecash-extension.md` §2 and §9 promised would be "documented as its own NN doc when stood up" (the work tracked as sp-2hwco4.4). It records which [mint](../../GLOSSARY.md#mint) the operator-pinned `CASHU_MINT_URL` should point at for the test environment and the Lightning round-trip - mint -> hold -> melt - that exercises `fund_ecash` / `defund_ecash` against a real mint. The inconclusive and operational residue (un-run results, fee specifics, CLI-surface verification, local install gaps, reference-only self-host config) is split into the findings companion so this design record stays clean.
 **Companion:** [`../findings/00--2026-06-18-0629-ecash-live-test-mint-status.md`](../findings/00--2026-06-18-0629-ecash-live-test-mint-status.md) (results + gaps + reference config).
 **Related:**
@@ -44,22 +44,27 @@ The constraint that **shapes the flow** is our channel liquidity. Our only chann
 
 ## 3. The round-trip test flow
 
-1. **Install the cashu CLI.** The arbiter wrapper (`arbiter/src/ecash.py`) shells to a `cashu` binary at `~/spacer/arbiter/bin/cashu` by default (override `CASHU_BIN`); the petitioner side resolves `cashu` on `PATH` (override `PETCLI_CASHU_BIN`). Neither is installed yet (findings companion §4).
+1. **Install the cashu CLI.** The arbiter wrapper (`arbiter/src/ecash.py`) shells to a `cashu` binary at `~/spacer/arbiter/bin/cashu` by default (override `CASHU_BIN`); the petitioner side resolves `cashu` on `PATH` (override `PETCLI_CASHU_BIN`). Installed as of sp-uwa0v0 (nutshell 0.18.1; findings companion §4).
 2. **Point the wallet at the mint.** Set `CASHU_MINT_URL=https://cashu.mutinynet.com`. It has **no default** and a missing value raises before any subprocess runs (doc 07 §2; confirmed in `ecash.py`).
 3. **Mint 5,000.** Request a mint quote for 5,000 sat (the wrapper's `mint_quote`, i.e. `cashu invoice 5000 --no-check`); pay the returned bolt11 from Node A via `lncliA payinvoice`; redeem the quote to receive proofs (the wrapper's issue call, i.e. `cashu invoice 5000 --id <quote>`).
 4. **Verify.** Confirm the wallet balance is 5,000 (net of fees, step 6) and that **DLEQ verification passes** - NUT-12 is mandatory (doc 07 §2); a wallet that does not verify DLEQ is the failure doc 07 §2 calls out.
 5. **Melt 5,000.** Generate a fresh bolt11 from Node A (`lncliA addinvoice`), then melt the proofs to it (the wrapper's `pay`, i.e. `cashu pay <bolt11>`); the mint pays our invoice; confirm the sats arrive at Node A.
 6. **Record fees.** funded != received and defunded != credited: mint input fees, LN routing fees, and the melt fee reserve all apply (doc 07 §10.4). The exact figures are the round-trip's primary finding (findings companion §2).
-7. **Verify the CLI surface.** Check nutshell's real subcommands against the assumptions baked into `ecash.py` and petcli (`invoice --no-check` / `invoice --id`, `send`, `receive`, `pay`, `balance`, `info`). doc 07 §2's build caveat is explicit that this surface is modeled from nutshell's docs, not yet exercised, and that nutshell prints human-oriented text rather than JSON. Differences feed back into the wrapper and the deferred executor (findings companion §3).
+7. **Verify the CLI surface.** Done against nutshell 0.18.1 (findings companion §3): the subcommands `ecash.py`/petcli use are confirmed, with the corrections the live run forced - `pay`/`send` need `-y` (no operator at stdin), `send` needs `-d` for DLEQ, `decode` is JSON (everything else is human text), `--wallet NAME` must be avoided, and `pay`'s zero exit does not imply settlement. These are folded into the wrapper and the landed executor.
 
-## 4. What the round-trip unblocks
+## 4. What the round-trip unblocked, and the constraints it forced
 
-The flow is the manual dress rehearsal for the pieces doc 07 §11 left deferred:
+The flow was the reference behavior for the pieces doc 07 §11 left deferred; running it landed them (sp-uwa0v0) and surfaced constraints a from-docs reading would not predict:
 
-- **the fund/defund executor** - an approved `fund_ecash` / `defund_ecash` currently ends at the `not_implemented` dispatch stub in `gateway.py`; the round-trip is the executor's reference behavior;
-- **the nutshell CLI surface** assumed by `ecash.py` (doc 07 §2 build caveat);
-- **the fee surfaces** the per-op fee audit needs (doc 07 §10.4);
-- **the mint-leg micro-timing** (doc 07 §6 T1, landed as `timing.mint_gap_s()`) - observable for the first time against real mint latency.
+- **the fund/defund executor** - `gateway.py` now enqueues an approved `fund_ecash` / `defund_ecash` on the timing layer and `executor.py` drains it against the mint + Node A. No `not_implemented` stub remains for any write op (the four named write ops; only an unknown op keeps it). Binding constraints the live run forced:
+  - **Default cashu wallet, never `--wallet NAME`.** nutshell 0.18.1's `receive` ignores `--wallet`, writing swapped-in proofs to the default wallet's DB while `balance`/`pay` read the named one - so a named-wallet defund melts against an empty wallet. `ecash.py` uses the default wallet; `CASHU_DIR` alone isolates a deployment's wallet.
+  - **A settled melt, not a zero exit.** `cashu pay` exits 0 even when the mint's LN payment is only pending (our invoice unpaid, proofs reserved). The defund handler requires the actual settlement signal (preimage) before reporting `defunded`; otherwise it reports a false success while the value never returns.
+  - **`send_bitcoin` rides the LND on-chain wallet** (`lnd.sendcoins`) whenever a Lightning/eCash extension is on, falling back to bitcoind only in the onchain default - the same backend split `query_balance` already makes. This deployment has no bitcoind, so the live on-chain send is necessarily the LND path.
+- **the nutshell CLI surface** assumed by `ecash.py` - now verified against the live binary (findings §3);
+- **the fee surfaces** the per-op fee audit needs (doc 07 §10.4) - measured (findings §2): funded != credited is dominated by the deliberate melt reserve, with ~1-2 sat genuine LN/mint fee;
+- **the mint-leg micro-timing** (doc 07 §6 T1, `timing.mint_gap_s()`) - now ridden by the executor between live mint-facing steps.
+
+The live defund also depends on the doc 07 §3 custody split being real: the arbiter cannot defund a token it just minted (nutshell will not swap-claim a token whose proofs the wallet already holds), so the value must round-trip through the AI's own wallet first - which the `--live` harness simulates with a separate petitioner wallet.
 
 It does **not** change the threat model or the custody split (doc 07 §3-§5). The mint is in mitigation scope (doc 07 §1: the no-internal-mitigations rule covers the arbiter <-> local bitcoind / LND link only, not this external counterparty), so the mint-facing channels are exactly what this round-trip lets us measure rather than assume.
 

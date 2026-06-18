@@ -1,54 +1,65 @@
 # eCash live test mint: status, gaps, and reference config
 
 **Date:** 2026-06-18
-**Status:** open - the round-trip is **not yet executed**.
+**Status:** round-trip **executed** 2026-06-18 (sp-uwa0v0), driven by the now-landed executor through the `--live` gate; results below.
 **Supports:** [`../origin/08--2026-06-18-0629-ecash-live-test-mint.md`](../origin/08--2026-06-18-0629-ecash-live-test-mint.md) (the decision and the flow).
 **Context:** the inconclusive and operational residue split out of doc 08 per the standing split rule (see [`README.md`](README.md)). Decision-grade content is in doc 08; this file holds what is un-run, unverified, volatile, or reference-only.
 
 ---
 
-## 1. Round-trip results - NOT YET RUN
+## 1. Round-trip results - RUN (2026-06-18)
 
-As of 2026-06-18 the `cashu` CLI is not installed (§4), so the doc 08 §3 round-trip has not been executed. This section is the destination for its results. To record when run:
+The doc 08 §3 round-trip ran via `exit_loop_runner.py --live`, driving the real executor against Node A and `cashu.mutinynet.com`. It passes deterministically across back-to-back runs (amounts/handles/preimages differ per run, as expected).
 
-| Leg | To capture |
+| Leg | Observed |
 |---|---|
-| Mint quote | quote id, funding bolt11, requested 5,000 vs sats actually paid |
-| Issue | proofs received, wallet balance after, DLEQ verification result |
-| Melt | melt quote/fee reserve, fresh Node A invoice, sats credited at Node A |
-| Timings | quote -> pay -> issue gaps (doc 07 §6 T1); issue -> melt interval |
+| Mint quote + pay | 5,000-sat quote, paid from Node A; LN routing fee ~1 sat (1,005 msat) |
+| Issue | 5,000 proofs received into the wallet; melt later revealed a valid preimage, so DLEQ-bearing proofs were spendable |
+| Melt | fresh Node A invoice for 4,900 sat (5,000 minus the 100-sat / 2% melt reserve); the mint paid it, invoice **SETTLED**, ~4,900 sat credited at Node A |
+| The mint-first liquidity property (doc 08 §2) held in practice: minting created the inbound the melt then consumed |
 
-## 2. Fee specifics - pending
+**Two non-obvious findings the live run forced (now folded into doc 08 §3/§4 and the wrappers):**
 
-doc 07 §10.4's trio makes funded != received and defunded != credited:
+1. **Named wallets break `receive`.** nutshell 0.18.1's `cashu receive` ignores `--wallet NAME`: it writes the swapped-in proofs to the *default* wallet's DB while `balance`/`pay` read the named one, so a named-wallet defund melts against an empty wallet and the round-trip silently fails. Fix: `ecash.py` drops `--wallet` and uses the default wallet, isolating by `CASHU_DIR` alone.
+2. **A pending melt exits 0.** `cashu pay` returns success even when the mint's LN payment is only *pending* (proofs reserved, our invoice unpaid). The defund handler must confirm a real settlement (the "Invoice paid"/preimage line) before reporting `defunded`, or it reports a false success while the value never returns.
 
-- **mint input fees** (charged at swap/melt),
-- **LN routing fees** (paying the mint quote; the mint paying our melt invoice),
-- **the melt fee reserve** (held, partially refunded).
+## 2. Fee specifics - measured
 
-The numbers are unknown until the round-trip runs, and nutshell's actual fee surfaces are themselves unverified (doc 07 §10.4 build status: the ledger records gross amounts per the proposal, but the real fee surfaces were never exercised). Record gross-vs-net at both mint and melt, and confirm which surface each fee shows up on so the deferred per-op fee audit can be wired into the executor.
+doc 07 §10.4's trio makes funded != received and defunded != credited. Observed on the 5,000-sat round-trip:
 
-## 3. CLI-surface verification status - pending
+- **mint input fees** - not charged by this mint on the mint or melt legs (issue credited the full 5,000; the melt consumed ~2 sat beyond the invoice amount).
+- **LN routing fees** - ~1 sat paying the mint quote (1,005 msat); the mint's payment back to us is its cost, invisible to our ledger beyond the credited amount.
+- **the melt fee reserve** - the dominant gap: the defund sizes the melt invoice at claimed minus `max(2, ceil(2% * claimed))` (executor `_melt_fee_reserve`), so 5,000 claimed -> 4,900 invoice. The reserve is a conservative pre-estimate of the mint's actual melt fee; the unspent remainder is the mint's, not refunded to a held proof in this flow.
 
-The wrapper subcommand surface is modeled from nutshell's documented CLI, **not yet exercised against a live mint** (doc 07 §2 build caveat). nutshell prints human-oriented text, not JSON, so structured parsing is deferred to the executor until this surface is confirmed. Assumed surface:
+So funded 5,000 != credited ~4,900, ~98% of which is the deliberate reserve, ~1-2 sat genuine LN/mint fee. The per-op fee audit (deferred, doc 07 §10.4) can read `ln_routing_fee_msat` / `credited_sats` from the executor's `ecash_fund_executed` / `ecash_defund_executed` audit events.
 
-| Purpose | arbiter `ecash.py` call | petcli surface |
+## 3. CLI-surface verification status - verified (nutshell 0.18.1)
+
+Exercised against the live mint at sp-uy29gy/sp-uwa0v0. nutshell prints human-oriented text (not JSON) for every call except `decode` (JSON), so the executor parses stdout. Confirmed surface:
+
+| Purpose | arbiter `ecash.py` call | note |
 |---|---|---|
-| balance | `cashu balance` | `advanced ecash balance` (local) |
-| mint quote | `cashu invoice <amt> --no-check` | (arbiter-side `fund_ecash`) |
-| issue / redeem | `cashu invoice <amt> --id <quote>` | (arbiter-side `fund_ecash`) |
-| melt / pay | `cashu pay <bolt11>` | (arbiter-side `defund_ecash`) |
-| send | `cashu send <amt>` | `advanced ecash send` (local) |
-| receive | `cashu receive <token>` | `advanced ecash receive` (local) |
-| info | `cashu info` | `advanced ecash info` (local) |
+| balance | `cashu balance` | "Balance: N sat" |
+| mint quote | `cashu invoice <amt> --no-check` | prints the bolt11 + a `--id <quote>` hint |
+| issue / redeem | `cashu invoice <amt> --id <quote>` | after the quote bolt11 is paid |
+| melt / pay | `cashu pay -y <bolt11>` | `-y` skips the prompt (no operator at stdin); prints "Invoice paid. (Preimage: ...)" only on real settlement |
+| send | `cashu send -y -d <amt>` | `-d` embeds DLEQ (doc 07 §2 mandatory); `-y` skips the prompt |
+| receive | `cashu receive <token>` | swap-claims; see the `--wallet` caveat below |
+| decode | `cashu decode <token>` | JSON; the executor's offline mint-pin check (doc 07 §2) |
+| info | `cashu info` | version, mint URL |
 
-To verify against the live binary: exact flag names (`--no-check`, `--id`), whether any output is machine-parseable or all of it is human text, exit-code conventions on failure, and whether DLEQ verification is on by default or needs a flag (doc 07 §2 requires it on).
+Surface gotchas the live run forced (also §1):
 
-## 4. Local install gaps (as of 2026-06-18)
+- **`--wallet NAME` must NOT be used.** `receive` ignores it and writes proofs to the default wallet's DB while `balance`/`pay` read the named one. `ecash.py` uses the default wallet, isolating by `CASHU_DIR` (one wallet per dir; every op then shares one DB).
+- **`cashu pay` exits 0 on a pending melt.** Success requires the "Invoice paid"/preimage line, not exit code; the executor checks for it.
+- **DLEQ** is embedded via `send -d`; verification at receive is on by default (no flag needed) for a DLEQ-bearing token.
 
-- **cashu CLI not installed.** Arbiter `ecash.py` `DEFAULT_BIN = ~/spacer/arbiter/bin/cashu` (override `CASHU_BIN`); petitioner `DEFAULT_CASHU_BIN = "cashu"` resolved on `PATH` (override `PETCLI_CASHU_BIN`). Both absent.
-- **`CASHU_MINT_URL` has no default.** Must be set to `https://cashu.mutinynet.com`; a missing value raises before any subprocess runs (confirmed in `ecash.py`).
-- **The arbiter fund/defund executor is a stub.** An approved `fund_ecash` / `defund_ecash` ends at dispatch's `{"status": "not_implemented"}` in `gateway.py`. Until the executor lands (doc 07 §11 deferred), the round-trip is driven manually through the CLIs.
+## 4. Local install gaps - resolved (2026-06-18)
+
+- **cashu CLI installed** at `~/spacer/arbiter/bin/cashu` (nutshell 0.18.1, the test-harness venv); `CASHU_BIN` / `PETCLI_CASHU_BIN` point here.
+- **`CASHU_MINT_URL` has no default** (by design): set to `https://cashu.mutinynet.com`; a missing value raises before any subprocess runs.
+- **The fund/defund executor LANDED** (sp-uwa0v0): `gateway.py` enqueues an approved `fund_ecash`/`defund_ecash` on the timing layer and `executor.py` drains it against the mint + Node A. No `not_implemented` stub for any of the four write ops; only an unknown op keeps it.
+- **No live bitcoind in this deployment.** `send_bitcoin` therefore uses the LND on-chain wallet (`lnd.sendcoins`) under `SPACER_MODE=ecash`, the same backend split `query_balance` makes; bitcoind is only the onchain-default path.
 
 ## 5. Self-host config - reference only
 
