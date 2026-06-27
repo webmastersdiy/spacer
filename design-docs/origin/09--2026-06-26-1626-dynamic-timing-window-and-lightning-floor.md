@@ -29,9 +29,14 @@ glossary's ~12h the *onchain rail's* floor rather than a universal constant. Wha
 what this doc supplies:
 
 1. **The dynamic window calculation** (doc 05 §7): the algorithm that turns "observed activity for
-   similar actions" into a concrete `[floor_rail, high]` window and samples a delay from it,
-   bounded so the *window itself does not become a fingerprint*. Doc 07 §7 said this "becomes
-   per-rail: same mechanism, per-rail activity sources and floors" and pointed here.
+   similar actions" into a concrete `[floor_rail, high]` window and samples each action's delay from
+   it. The non-obvious part - and the reason this is an algorithm, not just a random draw - is that
+   randomizing any *single* delay hides nothing on its own. The leak is statistical: an observer who
+   collects the delays of *many* similar actions sees their **distribution**, and a distribution no
+   organic process would produce announces "a delay-injecting proxy is here" (and can sometimes be
+   subtracted back off to recover the true timing). So the window must be **shaped** to look organic,
+   not merely bounded (§4.4). Doc 07 §7 said this "becomes per-rail: same mechanism, per-rail activity
+   sources and floors" and pointed here.
 2. **The per-rail timing-channel reasoning** the floor table rests on: *why* the floors differ is a
    difference in the timing *channel* per rail, not merely rail speed (§3). This is what justifies
    a lightning floor far below the onchain one.
@@ -131,22 +136,46 @@ possible:
 - **eCash:** estimate at the mint boundary; the mint's swap volume is not publicly observable
   (doc 07 §10.1). Detail and fallbacks belong to doc 07.
 
-### 4.4 Keeping the window from becoming the fingerprint
+### 4.4 Keeping the window from becoming a fingerprint
 
-The failure mode flagged by doc 05 §7 and both delay glossary entries ("the distribution itself
-becomes a fingerprint"). Three defenses, all required together:
+This is the failure mode flagged by doc 05 §7 and both delay glossary entries ("the distribution
+itself becomes a fingerprint"), and it is the one most easily misread. **Sampling each action's
+delay at random is necessary but not sufficient.** A single delay reveals little; the leak shows up
+only in aggregate, once an observer has collected the delays of a few hundred similar actions and
+looks at their *distribution*. Two distinct properties of that distribution can betray the proxy,
+and both must be defended.
 
-1. **Shape-match, don't box-randomize.** Sample from a distribution whose *shape* approximates the
-   natural inter-arrival distribution of the bucket (heavy-tailed, not uniform), so a realized delay
-   is statistically indistinguishable from an organic same-shape action. A uniform `[floor, high]`
-   draw is itself a tell - it must not be separable from organic timing by a KS test at p<0.05
-   (doc 01 §6).
-2. **Per-arbiter secret entropy.** Fold a per-deployment secret seed into the sampling so two
-   arbiters seeing the *same* public activity do not emit the *same* window (otherwise the window is
-   a deterministic function of public inputs an observer can replay). Rotate the seed on a schedule.
-3. **Bounded, audited parameters.** `floor_rail`, cap, `k`, and the distribution family are policy,
-   audit-logged, and changed deliberately - never auto-tuned into a spike. The calculation is part
-   of the **security surface**, not a tuning knob.
+1. **Shape (primary): random does not mean organic.** The natural choice - draw the delay uniformly
+   from `[floor, high]` - is the trap. Over many actions a uniform draw produces a **flat histogram**:
+   every value across the window equally likely. No organic process produces that. Real action timing
+   is bursty and **heavy-tailed** - the same families (log-normal, Weibull with shape < 1, Pareto)
+   that model organic network inter-arrival times - clustered near the low end with a long thin tail.
+   A flat band is therefore *instantly* recognizable: an observer fits our few-hundred delays against
+   the organic distribution, a Kolmogorov-Smirnov (or similar goodness-of-fit) test rejects "organic"
+   at high confidence, and the proxy is outed - worse, a known padding shape can be partially
+   subtracted to recover the true timing underneath.
+
+   *Concrete before/after.* **Before:** uniform `[12h, 36h]`. Plot 500 of our delays and you get a
+   flat slab from 12h to 36h - a shape no natural sender emits; the KS test separates it from organic
+   timing within a few hundred samples. **After:** sample from a distribution **fitted to the bucket's
+   own observed organic timing** (heavy-tailed, peaked just above the floor, thinning toward the cap).
+   Plot 500 of our delays and the histogram sits *inside* the organic crowd's; the KS test fails to
+   separate them (the p < 0.05 target of doc 01 §6). The defense is not "a random delay" - it is a
+   delay drawn from the *right curve*.
+
+2. **Predictability.** A correctly-shaped distribution still leaks if the *specific* window for a
+   given action is a deterministic function of inputs the observer also holds. For the onchain rail
+   the activity estimate (§4.3) is mempool + blocks - **public** data the observer sees too. If the
+   arbiter computes `window = f(public_activity)` with no secret, an observer recomputes the same `f`,
+   predicts our window, and narrows or removes the randomization it was meant to buy. Fold a
+   **per-arbiter secret seed** into the sampling so `window = f(public_activity, secret)`: two arbiters
+   on identical public inputs draw different windows, and no outside observer can reproduce the
+   mapping. Rotate the seed on a schedule so a long observation cannot regress it.
+
+3. **Bounded, audited parameters.** `floor_rail`, cap, `k`, the distribution family, and the seed
+   policy are policy, audit-logged, and changed deliberately - never auto-tuned into a spike (a
+   degenerate distribution is just a constant delay in a costume). The calculation is part of the
+   **security surface**, not a tuning knob.
 
 Until this lands, production timing stays `NotImplementedError`-gated and test mode uses the fixed
 5-15 s windows (doc 07 §7) - the safe failure mode is per-rail.
@@ -184,6 +213,13 @@ the two docs do not diverge.
 - **Distribution-as-fingerprint (primary).** Addressed by §4.4, never fully closed: if our
   sampled-delay distribution is separable from organic same-shape timing, the proxy's presence and
   parameters leak. Validate continuously with the KS-style test (doc 01 §6).
+- **The floor is a public lower bound - and that is intended.** Because `floor_rail` is hard, an
+  observer learns "delay >= floor_rail" (">= 12h onchain, >= 1h lightning"). This is *by design* and
+  is **not** what §4.4 defends. The defense was never about hiding the delay *numbers* - the floors
+  are public knowledge and the rail is already known to the petitioner (rail-distinguishability,
+  below). What must not leak is the distribution's **shape** looking machine-generated. A known lower
+  bound on a delay drawn from an organic-looking curve reveals nothing an organic same-rail action
+  would not.
 - **Rail-distinguishability via delay.** Per-rail floors/caps mean delay magnitude correlates with
   rail. The petitioner already knows the rail it chose, so this is moot against the primary
   adversary; against the AI<->gateway network observer it is a secondary leak (it already sees
