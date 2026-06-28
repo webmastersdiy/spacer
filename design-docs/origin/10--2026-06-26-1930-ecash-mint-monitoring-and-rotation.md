@@ -40,12 +40,33 @@ if we *react*. The failure modes, worst first:
 |---|---|---|---|
 | **Rug / insolvency** | stops honoring melts - proofs no longer redeem to LN | the float cannot be drained; outstanding becomes a realized loss | allowance (§8); detection speed limits how much new float is added first |
 | **Equivocation** | issues proofs that fail DLEQ; double-issues against a keyset | the float is counterfeit / unprovable; value is illusory | DLEQ verification at receive (doc 07 §2); detection halts further funding |
-| **Censorship / freeze** | selectively refuses *our* quotes/melts while serving others | targeted denial; may precede a rug | allowance + rotation |
+| **Censorship / freeze** (metadata-only) | selectively refuses *our* melts/quotes - targeted **only via metadata**, chiefly the defund/melt bolt11 that names our LND node (doc 07 §5.1) + caller IP/timing; **not** via the tokens (BDHKE blinding makes them unlinkable - see the note below) | targeted denial; may precede a rug | allowance + rotation; defund hygiene (doc 07 §6 T4) |
 | **Economic degradation** | introduces or raises input/melt fees | the float bleeds on every cycle; funded != credited widens | allowance; operator cost visibility (doc 07 §10.4) |
 | **Instability** | erratic keyset rotation, version churn, intermittent downtime | shrinks the anonymity set toward 1 (doc 07 §6 T6); breaks ops | mint choice (§2); rotation |
 
 Detection turns each into "halt funding + drain what we can + alert the operator to rotate" before
 the allowance is fully spent.
+
+**No token-level censorship; rug and censorship collapse to one response.** Two clarifications the
+rows above rest on (verified against the NUT specs and doc 07):
+
+- *Censorship is metadata-only, never token-level.* In Chaumian eCash the mint **cannot** censor a
+  specific holder through the tokens: BDHKE blinding makes issuance and redemption cryptographically
+  unlinkable (doc 07 §2), so the mint cannot tell whose proofs it is seeing. This holds **because
+  DLEQ verification (NUT-12) is mandatory** (doc 07 §2; signal M2) - without it a malicious mint
+  could sign per-client and tag tokens, the one way to defeat blinding, which is exactly what M2
+  catches. Our tokens are plain bearer - no NUT-11 P2PK lock (rejected in doc 07 §10.3) - so there
+  is no pubkey for the mint to single out either; and a mint can refuse a whole *keyset*, but that
+  hits every holder, not us. The only targeted vector left is **metadata**: the melt bolt11 names
+  our LND node (doc 07 §5.1 - "defund is the only op that names our node to the mint") plus caller
+  IP / timing, already blunted by keeping defunds infrequent, amount- and window-randomized
+  (doc 07 §6 T4).
+- *Rug and targeted censorship are indistinguishable to us, and share one response.* They are
+  distinct **causes**, but from our vantage they collapse: both surface as **M1** (our melts fail to
+  settle), we **cannot** observe whether the mint still serves others (mint traffic is not
+  observable, doc 07 §10.1), and both trigger the **same** action (halt + drain + rotate, §5). So
+  the rows stay separate (the cause differs) while the operational treatment is unified. We cannot
+  confirm targeting - we observe only that *our* melts fail.
 
 ---
 
