@@ -29,6 +29,24 @@ reintroduce it, §8); the single-mint rationale, threat model, and allowance the
 world-facing observers. Adversary is the mint (doc 07 §4), plus the AI insofar as it might try to
 *induce* rotation churn (§9). Measurement references are signet / Mutinynet / test-mint; no mainnet.
 
+**Authority and cross-references (read first).** This doc is authoritative **only over eCash mint
+monitoring and rotation**. Everything it touches outside those two areas it **cross-references, never
+overrides**:
+
+- the [allowance ledger](07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius) and the
+  blast-radius bound -> **doc 07 §8** (the authority; this doc records *what* monitoring / rotation
+  cost against it, not how the ledger works);
+- the action / result-delay machinery and the per-rail timing windows -> **doc 07 §6 / doc 09**;
+- world-facing timing of the mint's own activity (the mint is part of "the world") -> **doc 04**
+  (this doc owns only the *probe cadence* it originates, §4, and defers the rationale);
+- the single-mint choice, the mint threat model, and the allowance itself -> **doc 07** (§2 / §4 / §8).
+
+The operator-alerting **TUI is a general arbiter-visibility surface, not eCash-specific**, so its
+authoritative design lives in its own doc, not here (§9, "Operator alerting"); this doc only states
+that monitoring and rotation alerts surface there. Implementation nuances (parsing contracts, probe
+mechanics, rotation / self-test wiring) live in the companion implementation doc, which reconciles to
+this one within monitoring + rotation only (§10).
+
 ---
 
 ## 2. What a bad mint does (the failure modes to detect)
@@ -39,7 +57,8 @@ if we *react*. The failure modes, worst first:
 | Mode | What the mint does | Why it matters | Bounded by |
 |---|---|---|---|
 | **Rug / insolvency** | stops honoring melts - proofs no longer redeem to LN | the float cannot be drained; outstanding becomes a realized loss | allowance (§8); detection speed limits how much new float is added first |
-| **Equivocation** | issues proofs that fail DLEQ; double-issues against a keyset | the float is counterfeit / unprovable; value is illusory | DLEQ verification at receive (doc 07 §2); detection halts further funding |
+| **Equivocation / per-client tagging** | issues proofs that fail DLEQ, or signs *per client* to tag tokens (the one cryptographic way to defeat blinding) | the float is counterfeit / unprovable, or our tokens become linkable to us | **DLEQ verification (NUT-12) at receive (doc 07 §2) - signal M2**; detection halts further funding (DLEQ proves each proof is well-formed against the keyset) |
+| **Over-issuance / insolvency** | signs *more* tokens than its reserves back (each individually DLEQ-valid), or double-issues against a keyset | the float is unbacked; melts fail once the unbacked float is presented - a **solvency** failure DLEQ cannot see | **M1 (melt non-settlement), not DLEQ-bounded**; allowance caps the loss (§8). Surfaces like a rug (row 1), since a solvent mint honors melts and an over-issued one cannot |
 | **Censorship / freeze** (metadata-only) | selectively refuses *our* melts/quotes - targeted **only via metadata**, chiefly the defund/melt bolt11 that names our LND node (doc 07 §5.1) + caller IP/timing; **not** via the tokens (BDHKE blinding makes them unlinkable - see the note below) | targeted denial; may precede a rug | allowance + rotation; defund hygiene (doc 07 §6 T4) |
 | **Economic degradation** | introduces or raises input/melt fees | the float bleeds on every cycle; funded != credited widens | allowance; operator cost visibility (doc 07 §10.4) |
 | **Instability** | erratic keyset rotation, version churn, intermittent downtime | shrinks the anonymity set toward 1 (doc 07 §6 T6); breaks ops | mint choice (§2); rotation |
@@ -89,22 +108,34 @@ traffic data (doc 07 §10.1). Solvency is inferred only *indirectly* from M1 (a 
 melts; repeated melt failure is the solvency proxy). This doc does not pretend to a direct solvency
 oracle a bearer-ecash mint does not provide.
 
+**Parsing contract (build-time, not runtime).** M1 depends on parsing the cashu CLI's stdout - the
+"Invoice paid" / preimage line that distinguishes a settled melt from the pending-exit-0 trap - and
+M2 depends on DLEQ verification being **on** in the wallet. Both are silent-failure surfaces: a CLI
+output-format change breaks M1's parse, and a DLEQ-verification regression blinds M2, with no runtime
+error in either case. This doc therefore **requires a build-time contract test**: the arbiter build
+compiles the pinned cashu CLI and asserts (a) it still emits the exact strings M1 parses and (b) DLEQ
+verification is enabled (the §8 keystone). Drift or a DLEQ regression then fails the **build**, not
+M1 / M2 silently at runtime. The test *mechanics* live in the implementation doc (§10); the
+*requirement* is load-bearing design and lives here.
+
 ---
 
-## 4. Where monitoring runs (and the probe-as-fingerprint tension)
+## 4. Where monitoring runs (passive in-band + randomized active probing)
 
 - **Passive (in-band) is primary.** M1/M2/M4 ride the fund/defund ops the rail already performs;
   the arbiter records outcomes (settled vs pending, DLEQ pass/fail, fees, latency) into arbiter-local
   state and the [audit log](../../GLOSSARY.md#audit-log). No new mint-facing traffic, so no new
   correlation surface.
-- **Active probes (M3/M5/M6) are the tension.** A periodic `/v1/info` poll or a tiny melt "canary"
-  gives liveness/keyset signal when the rail is idle - but a *fixed* probe cadence is itself a
-  mint-observable fingerprint (doc 07 §6 T5: metronomic calls mark automation) and, for a canary, a
-  recurring micro-transaction pattern. Constraints if active probing is used: **jittered** (not
+- **Active probes (M3/M5/M6): periodic, with randomized timing.** A periodic `/v1/info` poll (or, only
+  where M1 cannot be trusted from organic traffic, a tiny melt "canary") gives liveness / keyset signal
+  when the rail is idle. A *fixed* cadence would itself be a mint-observable fingerprint (doc 07 §6 T5:
+  metronomic calls mark automation), so probing is **periodic but randomized**: **jittered** (not
   metronomic), **minimal** (info-only by default; a value-moving canary only if M1 cannot be trusted
-  from organic traffic), and **indistinguishable** from an organic op where possible. Default lean:
-  **passive-only**, with `/v1/info` checks piggybacked on the times the rail is already talking to
-  the mint, and active canaries left as an operator-enabled option for idle deployments.
+  from organic traffic), and piggybacked on organic mint traffic whenever the rail is already active.
+  **This doc owns the probe cadence** (monitoring originates it); the broader rationale and mechanics of
+  randomized *world-facing* timing - the mint is part of "the world" - are **doc 04's**, cross-referenced
+  here, not restated. This resolves the earlier passive-vs-active question (§9) in favor of **active
+  periodic monitoring**.
 
 Monitoring state (counts, thresholds, last-good keyset) is **arbiter-local and never AI-readable**,
 same posture as the audit log - otherwise the AI learns the mint's health and the detection
@@ -119,17 +150,24 @@ The arbiter acts **autonomously up to the fail-closed line**; it never chooses a
 | Tier | Triggers | Automatic arbiter action | Operator action |
 |---|---|---|---|
 | **Notice** | M4 fee drift, M6 version bump, mild M3 latency | audit-log + console surface; no behavior change | review; no action required |
-| **Suspect** | repeated M3, M5 cadence anomaly, isolated M1/M2 | **raise alert severity**; optionally throttle the effective funding rate (slow the bleed) | decide whether to rotate |
-| **Halt** | confirmed M1 (melt non-settlement) or any M2 (DLEQ failure) past threshold | **fail closed: refuse new `fund_ecash`** (uniform refusal, audit-logged - same shape as the missing-allowance default in doc 07 §8); **attempt to drain** existing float while the mint still melts | rotate (§6) |
+| **Suspect** | repeated M3, M5 cadence anomaly | **raise alert severity**; *optionally* throttle the effective funding rate (slow the bleed - the throttle-before-halt policy is still open, §9) | decide whether to rotate |
+| **Halt** | confirmed M1 (melt non-settlement, after the pending-vs-settled check + one bounded retry) or **any** M2 (DLEQ failure) - CRITICAL, no tunable threshold (§9) | **fail closed: refuse new `fund_ecash`** (uniform refusal, audit-logged - same shape as the missing-allowance default in doc 07 §8); **attempt to drain** existing float on a fast path (skip the action-delay; see invariants) while the mint still melts | rotate (§6) |
 
 Key invariants:
 - The arbiter may **halt funding** and **attempt drain** on its own (fail-closed is safe - it only
   *stops* adding exposure and tries to *reduce* it). It may **not auto-rotate**: choosing the next
   mint is an operator-only act (doc 07 §2 - an automatically- or AI-chosen mint is a colluding
   counterparty / exfiltration channel).
-- "Attempt to drain" reuses the normal defund pipeline and its standard
-  [action/result delay](../../GLOSSARY.md#action-delay) windows; a rugging mint simply fails the
-  melts (M1), which the operator already sees - no special fast-path that would itself be a signal.
+- **Emergency drain runs on a fast path.** On a confirmed rug (Halt), the drain **skips the standard
+  [action delay](../../GLOSSARY.md#action-delay)** and moves the float as fast as the defund pipeline
+  allows - the goal is to recover value *before the mint completes the rug*. This does **not** weaken
+  AI-facing privacy: privacy is preserved at the **disclosure** layer, not by throttling execution.
+  What the petitioner learns about the drain (that it happened, its result) is **deferred and released
+  only when safe**, on the normal [result delay](../../GLOSSARY.md#result-delay) schedule (doc 07 §6 /
+  doc 09 own that machinery; this doc defers to it). **Mint-facing** cadence privacy is moot mid-rug -
+  the mint is the adversary already rugging, so hiding our drain cadence from it buys nothing. (Normal,
+  non-emergency defunds keep the standard action / result-delay windows; the fast path is the
+  rug-response exception only.)
 
 ---
 
@@ -139,17 +177,34 @@ Rotation is a **drain-then-repin handover**, never a concurrent two-mint state:
 
 1. **Choose** a new mint off-band by the doc 07 §2 criteria (busy, public, unaffiliated). Never the
    AI; never a default.
-2. **Drain** the float from the old mint: defund outstanding back to LN to the extent the old mint
-   still honors melts. The [allowance ledger](07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius)
-   tracks `outstanding` down toward 0.
+2. **Drain** the float from the old mint - **a single binary pass**: defund outstanding back to LN to
+   the extent the old mint honors melts *in that pass*; whatever it does not honor is declared
+   **stranded** then and there (run / no-run, no graduated or time-tiered drain policy - see §9). If
+   the drain is rug-triggered it runs on the §5 fast path. The
+   [allowance ledger](07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius) (doc 07 §8,
+   the authority) tracks `outstanding` down toward 0.
 3. **Repin**: change `CASHU_MINT_URL` to the new mint - a console config edit, the same operator
-   gesture as editing the allowance or the recipient registry. Funding resumes against the new mint
-   only after the repin.
+   gesture as editing the allowance or the recipient registry.
+4. **Self-test before resume.** Before the rail serves the petitioner against the new pin, run a
+   **mint -> melt round-trip self-test**: a small canary fund + defund that must settle (M1 clean) and
+   verify DLEQ (M2 clean). **Pass -> resume** funding and serving; **fail -> do not resume** - Halt on
+   the new pin and alert the operator, because the rotation landed on another bad mint. This closes the
+   rotate-into-another-bad-mint gap: funding resumes only after a passing self-test, never on the bare
+   repin.
 
 **Stranded float** (old mint rugged, cannot be drained): abandoned, an allowance-bounded loss (no
 clawback - doc 07 §8: bearer means bearer). Repin proceeds; the stranded value was already written
 off by the petty-cash allowance framing. The arbiter does not block rotation waiting on a mint that
 will never pay.
+
+**Accounting across monitoring and rotation.** Monitoring and rotation must keep value **accounted
+across their own stages** - the drain outcome (settled vs stranded), the stranded-float write-off, the
+repin, and any melt / routing fees - so the
+[allowance ledger](07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius) reflects
+reality after a rotation. The **ledger itself is doc 07 §8's authority**; this doc records only *what*
+monitoring / rotation post to it, not how it works. Changes are communicated to the petitioner as
+**only the privacy-safe subset**, and **only when safe to disclose** - the disclosure-timing mechanics
+are doc 07 §6 / doc 09's (result delay), cross-referenced here, not redefined.
 
 ---
 
@@ -175,16 +230,19 @@ running multiple mints.
 
 ## 8. Threat model and residual leaks
 
-- **Probe-as-fingerprint** (§4): active monitoring is a mint-observable cadence. Mitigated by
-  passive-first + jitter; never fully closed if active canaries run. Prefer passive.
+- **Probe-as-fingerprint** (§4): active periodic probing is a mint-observable cadence. Mitigated by
+  **randomized (jittered) timing**, keeping probes minimal (info-only by default), and piggybacking on
+  organic traffic; never fully closed while active canaries run. The residual is accepted as the cost
+  of monitoring an otherwise-idle mint (the world-facing-timing rationale is doc 04's).
 - **AI-induced rotation churn (DoS):** the AI could try to provoke alerts (e.g. patterns that look
   like M-signals) to force costly rotations. Bounded three ways: the AI's float ops are
   allowance-capped; it cannot itself rotate (operator-gated); and the costly signals (M1/M2) are
   *mint* behaviors the AI cannot forge through the gateway. AI-side noise reaches at most the
   "Suspect" tier, which requires an operator to act.
 - **DLEQ-detection dependency:** M2 relies on the wallet (nutshell) verifying DLEQ at receive. If
-  that verification regresses, equivocation goes undetected. The dependency is load-bearing and
-  should be asserted in the rail's own checks, not assumed.
+  that verification regresses, equivocation goes undetected. This dependency is load-bearing, so it is
+  **asserted at build time, not assumed** - the build-time contract test (§3) fails the build if DLEQ
+  verification is off, the same gate that pins M1's stdout-parsing contract. (Mechanics: impl doc, §10.)
 - **Threshold leakage:** if monitoring state or thresholds become AI-readable, the AI (or a
   colluding mint) tunes behavior to stay just under them. Keep monitoring state arbiter-local (§4).
 - **Detection latency vs allowance:** the loss on a rug is (new float funded between the mint going
@@ -193,29 +251,75 @@ running multiple mints.
 
 ---
 
-## 9. Open questions
+## 9. Decisions and open questions
 
-1. **Concrete thresholds.** How many M1 non-settlements, what M2 count, what M3 rate, what M5 cadence
-   delta move a mint Notice -> Suspect -> Halt. Needs live-mint data; gated on sp-2hwco4.4 (live test
-   env, operator-assisted).
-2. **Active-probe design vs passive-only.** Whether idle deployments run a canary at all, and if so
-   its size, cadence distribution, and jitter - the §4 fingerprint tension. Default proposal:
-   passive-only + piggybacked `/v1/info`.
-3. **Throttle-before-halt.** Whether the "Suspect" tier should auto-lower the *effective* allowance
-   (slow the bleed) before a full funding halt, and how that interacts with the §8 hard cap.
-4. **Operator alerting channel.** How alerts surface (audit-log severity, console banner, out-of-band
-   notify) so the operator actually sees a Halt promptly - detection is worthless if unread.
-5. **Drain-time policy under a partial rug.** If the old mint honors *some* melts slowly, how long to
-   keep draining before declaring the remainder stranded and repinning.
+Most questions this doc opened are now resolved; provisional defaults are set where live data is still
+owed, and one item stays genuinely open.
+
+**Resolved.**
+
+- **Monitoring mode (was the active-vs-passive question): active.** Periodic, randomized probing is the
+  default (§4), not passive-only. Removed from the open list.
+- **Operator alerting: the two-column TUI.** Alerts surface in an operator TUI with two side-by-side,
+  **color-coded columns** - column 1, events the petitioner **already knows**; column 2, things the
+  petitioner **must never learn**. The split keeps the operator's at-a-glance view from ever leaking a
+  column-2 item into anything petitioner-facing. **Scope:** this TUI is a **general arbiter-visibility
+  surface, not eCash-specific**, so its authoritative design does **not** belong here - it belongs in
+  its own doc (or doc 06, arb auditability). *Flagged to the human.* This doc states only that
+  monitoring / rotation alerts surface there, tagged petitioner-known vs petitioner-never-known.
+- **Partial-rug drain: binary.** If the old mint honors only some melts, the policy is a simple
+  **run / no-run**: drain in one pass (§6 step 2), then declare the remainder **stranded**. No
+  graduated, time-tiered draining for now.
+
+**Provisional (defaults set now; empirically-TBD, confirmed at sp-2hwco4.4 live test).**
+
+Favor a **small number of shared defaults**; keep the configurable-parameter count minimal
+(configurable only where genuinely needed):
+
+- **CRITICAL signals halt immediately, no tunable.** A confirmed M1 (melt non-settlement, *after* the
+  mandatory pending-vs-settled check plus one bounded retry) or **any** M2 (DLEQ failure) -> **Halt**.
+  The cost of a false Halt is low (fail-closed only *stops* funding; the operator can clear or rotate),
+  so these need no threshold knob.
+- **Non-critical signals share one count and one window.** M3 (quote / mint-leg failure) and M5 (keyset
+  cadence anomaly) -> **Suspect** after a shared default of **K = 3** occurrences within a shared window
+  **W = 24 h** (plus: any pubkey change -> at least Notice). One `K`, one `W`, reused across signals
+  rather than a per-signal matrix.
+- **Active-probe cadence (§4).** One knob: a randomized interval with a **~30 min mean, full jitter**,
+  only while the rail is idle. Exact distribution deferred to the live mint.
+
+All numbers above are provisional and marked empirically-TBD; they are confirmed / tuned against live
+data at sp-2hwco4.4.
+
+**Open.**
+
+- **Throttle-before-halt.** Whether the **Suspect** tier should auto-lower the *effective* allowance
+  (slow the bleed) before a full funding Halt, and how that composes with the §8 hard cap.
+  **Deferred - TBD after more testing and live experience.**
 
 ---
 
-## 10. What is NOT in this doc
+## 10. Scope boundaries and the implementation companion
+
+This doc is **design**, authoritative only over monitoring and rotation. The **mechanics** that
+implement it live in the companion implementation doc
+(`design-docs/implementation/00--2026-06-28-0944-ecash-mint-monitoring-rotation-impl.md`), which
+reconciles to this doc **within monitoring + rotation only** - the build-time contract test (§3), the
+active-probe jitter / canary mechanics (§4), the signal -> action wiring and where monitoring state
+lives (§4 / §5), and the rotation + self-test round-trip wiring (§6).
+
+Owned by other docs, referenced and not restated here:
 
 - The single-mint choice and its rationale (doc 07 §2), the mint threat model (doc 07 §4), and the
-  allowance / blast-radius bound (doc 07 §8) - referenced, not restated.
-- The mint-correlation timing channels (doc 07 §6) and the per-rail timing windows (doc 09).
-- Concrete fee-accounting surface (doc 07 §10.4) and checkstate-cadence jitter (doc 07 §10.7),
-  except where a fee change is a monitoring signal (M4).
-- Wire formats, `petcli` / executor code structure, and the exact `/v1/info` schema.
-- World-facing observers of the mint (chain/LN correlation of the mint's own activity).
+  **allowance ledger / blast-radius bound (doc 07 §8, the authority)** - this doc records *what*
+  monitoring / rotation post to the ledger (§6 accounting), not how the ledger works.
+- The mint-correlation timing channels (doc 07 §6) and the per-rail timing windows (doc 09), including
+  the result-delay schedule this doc defers disclosure to (§5 / §6).
+- The **world-facing-timing rationale (doc 04)** - the mint is part of "the world"; this doc owns only
+  the *probe cadence* it originates (§4) and lightly cross-references doc 04 for the why / how, rather
+  than scoping world-facing timing fully out.
+- The **operator-visibility TUI** (the two-column surface, §9) - a general arbiter feature, its own doc
+  (or doc 06), not this one.
+- Concrete fee-accounting surface (doc 07 §10.4) and checkstate-cadence jitter (doc 07 §10.7), except
+  where a fee change is a monitoring signal (M4).
+- Wire formats, `petcli` / executor code structure, and the exact `/v1/info` schema - all in the
+  implementation doc.
