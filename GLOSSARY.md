@@ -519,19 +519,22 @@ across wallets and across shifts.
 
 The allowlist of **operator-owned internal endpoints** for
 state-changing BTC/LN calls. The arbiter holds a hand-curated list of
-physical destinations (Bitcoin addresses, LN node pubkeys, BOLT-11 /
-BOLT-12 invoices) - all **operator-controlled** (the operator's own
-wallets / nodes) - that a `send_bitcoin` / `send_lightning` call may
-target. **External recipients are not a possibility:** BTC/LN make no
+**operator-owned output descriptors / extended public keys** (xpub +
+script type + derivation path) - **never raw addresses**, so the
+arbiter derives a *fresh unused address per send* and never reuses one
+(see *Fresh-address derivation* below) - all **operator-controlled**
+(the operator's own wallets / nodes) that a `send_bitcoin` /
+`send_lightning` call may target. **External recipients are not a possibility:** BTC/LN make no
 external payments (any external payee that can see a UTXO is inside
 the adversary's observability set, which would break UTXO privacy), so
 all external value movement is eCash-only (the external-value reframe;
 see the foundational-posture doc and the eCash extension doc). The
 registry's role is therefore *internal fund management* - it bounds
 the AI to moving value only among the operator's own endpoints - not
-gating external sends. The petitioner never sees the real endpoints,
-only opaque single-use tokens that resolve back to them inside the
-arbiter. (History: this list previously modeled approved *external*
+gating external sends. The petitioner never sees a descriptor or any
+derived address - only an opaque single-use token naming the receiver
+identity, which resolves inside the arbiter. (History: this list
+previously modeled approved *external*
 send targets; the 2026-06-27 external-value reframe recast it as the
 operator-owned-internal allowlist.)
 
@@ -548,9 +551,32 @@ next milestone in this chain.)
 
 **Entry shape.** Each entry has a local-only numeric id (for
 operator notes), a public-facing token the petitioner sees, the
-real destination, a format tag, a created_at / expires_at pair
-(default 7-day expiry), and a used / consumed_by pair tracking
-one-time-use.
+operator-owned **output descriptor** (xpub + script type +
+derivation path), a per-descriptor **next-derivation index** and
+gap-limit (the no-reuse / no-gaps bookkeeping), a created_at /
+expires_at pair (default 7-day expiry), and a used / consumed_by
+pair tracking one-time-use.
+
+**Fresh-address derivation (no reuse).** The registry holds
+*descriptors, not addresses*, so address reuse - which would erode
+on-chain and UTXO privacy - is structurally avoided. On each internal
+`send_bitcoin` the arbiter derives the **next unused address** from
+the registered descriptor by standard BIP32 HD derivation (advancing
+the entry's next-index; the gap-limit guards against derivation racing
+ahead of the operator's watching wallet). Three properties follow:
+(1) **no-redirect** - every derived address provably belongs to the
+operator's descriptor (only the operator holds the matching private
+keys), so the AI cannot point a send at itself or a third party;
+(2) **operator-verifiability** - the operator can deterministically
+check that any derived address belongs to their descriptor, so the
+derivation is auditable from the console; (3) **AI-free and
+address-blind** - registering the descriptor and deriving each address
+both happen without the AI, which never supplies, generates, or sees a
+raw address, reinforcing endpoint privacy (the PET never observes a
+UTXO or address). *Lightning analog (the lighter case):* LN invoices
+are already single-use and fresh, so an internal LN target is the
+operator's own node issuing a fresh invoice per transfer; no
+descriptor derivation is needed.
 
 **Token format.** 5 random Crockford-base32 characters plus 1
 Damm32 check character. Crockford-base32 omits visually ambiguous
