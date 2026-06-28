@@ -418,6 +418,24 @@ holding the money. Reference implementation: nutshell (Python mint
 and CLI wallet). See the eCash extension design doc
 (`design-docs/origin/07--2026-06-12-0916-ecash-extension.md`).
 
+### Melt
+
+The [Cashu](#chaumian-ecash-cashu) operation that redeems eCash
+proofs back to Lightning sats - the reverse of [Mint](#mint). The
+wallet presents its proofs to the mint; the mint burns them and pays
+out a [bolt11](#bolt11-encodes-destination) Lightning invoice. In
+spacer, melt is the execution leg of `defund_ecash` (eCash float ->
+the operator's own LND node). It is the **only** op whose bolt11
+names our LND node to the mint (design doc 07 §5.1) - the metadata
+leak and the one targeted-censorship vector (the proofs themselves
+are unlinkable by blinding, so the mint cannot censor a holder
+through the tokens) - so defunds are kept infrequent, amount- and
+window-randomized (doc 07 §6 T4). A melt that does not truly settle
+(`cashu pay` can exit 0 on a still-*pending* payment) is monitoring
+signal **M1** in the mint-monitoring design (doc 10): the shared
+rug / insolvency / targeted-censorship indicator. Counterpart:
+[Mint](#mint).
+
 ### Mint
 
 The external party that backs [Cashu eCash](#chaumian-ecash-cashu):
