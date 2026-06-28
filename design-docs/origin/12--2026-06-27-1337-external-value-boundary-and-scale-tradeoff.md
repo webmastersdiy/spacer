@@ -1,10 +1,10 @@
 # Foundational Privacy Posture: Internal-Only BTC/LN, eCash-Only External Value, and the Amount-Scale Tradeoff
 
 **Date:** 2026-06-27
-**Status:** DRAFT - states a foundational posture **and a reframe of the payment model**. The
-posture (the two guarantees + the eCash exception) is the human's call, confirmed. The reframe's
-cross-doc edits (to docs 01 / 05 / 07, the recipient registry, the exit-loop) are **mapped here but
-NOT yet applied** - they await the human's decisions in §8.
+**Status:** states a foundational posture **and a reframe of the payment model**. The posture (the
+two guarantees + the eCash exception) is the human's call, confirmed. The §8 decisions are now
+**made** (mail bl-wisp-x3a67, 2026-06-28) and the cross-doc edits to docs 01 / 05 / 07 + the
+GLOSSARY registry are **applied in PR #6** (companion to this PR). §8 records the resolutions.
 **Context:** A foundational privacy principle the human gave by voice (mail thread bl-wisp-gvi3s,
 corrected by bl-wisp-nmwb0). It is not just additive: it changes what the BTC/LN write ops *are*.
 **Related:**
@@ -112,12 +112,12 @@ amount-scale privacy for the PET's ability to make real external payments.
 
 ---
 
-## 6. Implications - the reframe this forces (mapped, not yet applied)
+## 6. Implications - the reframe this forces (mapped; applied in PR #6)
 
-The current docs expose `send_bitcoin` / `send_lightning` as AI-requestable **external** write ops
-gated by the recipient registry (doc 05 §4.1/§4.7, doc 07 §9, the exit-loop). The root rule (§2)
-means they no longer make external-recipient payments. Each consequence below is **flagged, not
-silently edited**; the open ones are §8.
+Before the reframe the docs exposed `send_bitcoin` / `send_lightning` as AI-requestable **external**
+write ops gated by the recipient registry (doc 05 §4.1/§4.7, doc 07 §9, the exit-loop). The root
+rule (§2) means they no longer make external-recipient payments. Each consequence below was mapped
+here first and then **applied in PR #6** (per the §8 decisions); none was silently edited.
 
 - **Write-op set splits internal vs external.** `send_bitcoin`, `send_lightning` (and
   `payinvoice` / `openchannel`) become **internal-management-only** - destinations are
@@ -155,9 +155,15 @@ are now one design, not three.
 
 ---
 
-## 8. Open decisions for the human (flagged, blocking the cross-doc edits)
+## 8. Decisions (RESOLVED 2026-06-28, mail bl-wisp-x3a67; applied in PR #6)
 
-I did **not** rewrite docs 01/05/07. These calls shape how:
+**Resolved:** (1) recipient registry **recast** as the operator-owned-internal-endpoint allowlist
+(not shelved); (2) `send_bitcoin` / `send_lightning` **stay AI-requestable, internal-only** (operator
+endpoints only); (3) the recast registry **is** the internal gate - the AI may send only to
+allowlisted operator-owned endpoints; (4) **keep the names**, document internal-only (no `manage_*`
+rename). Applied to docs 01/05/07 + the GLOSSARY registry in PR #6.
+
+The original questions, kept as the record of what was decided:
 
 1. **Recipient registry.** Recast as the operator-owned-internal-endpoint allowlist, or shelve as
    deferred-until-external-LN? (If recast: does an internal-management `send_*` still resolve a token,
