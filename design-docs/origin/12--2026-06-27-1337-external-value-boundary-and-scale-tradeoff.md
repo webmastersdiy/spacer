@@ -119,10 +119,11 @@ write ops gated by the recipient registry (doc 05 §4.1/§4.7, doc 07 §9, the e
 rule (§2) means they no longer make external-recipient payments. Each consequence below was mapped
 here first and then **applied in PR #6** (per the §8 decisions); none was silently edited.
 
-- **Write-op set splits internal vs external.** `send_bitcoin`, `send_lightning` (and
-  `payinvoice` / `openchannel`) become **internal-management-only** - destinations are
+- **Write-op set splits internal vs external.** `manage_bitcoin`, `manage_lightning` (renamed from
+  `send_*`; and `payinvoice` / `openchannel`) become **internal-management-only** - destinations are
   operator-controlled. `fund_ecash` / `defund_ecash` become the **only** external value path. The
-  ops keep their names but change meaning.
+  ops change meaning *and* name (decision #4, §8) - `manage_*` so the internal-only nature is
+  explicit and "send"/concerning wording stays calibrated.
 - **Recipient registry's role collapses (biggest reconciliation).** Today the registry is the
   destination gate for external `send_*` (doc 05 §4.7); eCash already skips it (pinned mint). With no
   external BTC/LN payments, the registry has no external destinations to resolve. It must either be
@@ -138,7 +139,7 @@ here first and then **applied in PR #6** (per the §8 decisions); none was silen
   exit), even if the manifests stay byte-identical.
 - **Lightning floor (doc 07 §7 / doc 09).** Its live role becomes the **eCash funding leg** (the LN
   payment to the mint quote; doc 07 §7 already says "the LN floor governs" the ecash boundary) plus
-  the deferred external-LN. `send_lightning`-as-external is not a current consumer of it. This is a
+  the deferred external-LN. `manage_lightning`-as-external is not a current consumer of it. This is a
   clarification of doc 09, not a contradiction - doc 09 already argued the LN action delay carries
   little anonymity-set load.
 
@@ -158,10 +159,13 @@ are now one design, not three.
 ## 8. Decisions (RESOLVED 2026-06-28, mail bl-wisp-x3a67; applied in PR #6)
 
 **Resolved:** (1) recipient registry **recast** as the operator-owned-internal-endpoint allowlist
-(not shelved); (2) `send_bitcoin` / `send_lightning` **stay AI-requestable, internal-only** (operator
-endpoints only); (3) the recast registry **is** the internal gate - the AI may send only to
-allowlisted operator-owned endpoints; (4) **keep the names**, document internal-only (no `manage_*`
-rename). Applied to docs 01/05/07 + the GLOSSARY registry in PR #6.
+(not shelved); (2) the BTC/LN write ops **stay AI-requestable, internal-only** (operator endpoints
+only); (3) the recast registry **is** the internal gate - the AI may send only to allowlisted
+operator-owned endpoints; (4) **RENAME them to a `manage_*` family** - `manage_bitcoin` /
+`manage_lightning` (decision #4 **reversed** 2026-06-28, mail bl-wisp-5dqzs; the earlier "keep the
+names" call is superseded - the rename makes internal-only explicit and keeps "send"/concerning
+wording calibrated). Applied to docs 01/03/05/07/08 + the GLOSSARY in PR #6; the **code** rename
+(executor / gateway routing / petcli / exit-loop scenario names) is the tracked follow-up **sp-3mm**.
 
 The original questions, kept as the record of what was decided:
 
