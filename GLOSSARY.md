@@ -541,8 +541,8 @@ state-changing BTC/LN calls. The arbiter holds a hand-curated list of
 script type + derivation path) - **never raw addresses**, so the
 arbiter derives a *fresh unused address per send* and never reuses one
 (see *Fresh-address derivation* below) - all **operator-controlled**
-(the operator's own wallets / nodes) that a `send_bitcoin` /
-`send_lightning` call may target. **External recipients are not a possibility:** BTC/LN make no
+(the operator's own wallets / nodes) that a `manage_bitcoin` /
+`manage_lightning` call may target. **External recipients are not a possibility:** BTC/LN make no
 external payments (any external payee that can see a UTXO is inside
 the adversary's observability set, which would break UTXO privacy), so
 all external value movement is eCash-only (the external-value reframe;
@@ -578,7 +578,7 @@ pair tracking one-time-use.
 **Fresh-address derivation (no reuse).** The registry holds
 *descriptors, not addresses*, so address reuse - which would erode
 on-chain and UTXO privacy - is structurally avoided. On each internal
-`send_bitcoin` the arbiter derives the **next unused address** from
+`manage_bitcoin` the arbiter derives the **next unused address** from
 the registered descriptor by standard BIP32 HD derivation (advancing
 the entry's next-index; the gap-limit guards against derivation racing
 ahead of the operator's watching wallet). Three properties follow:
@@ -688,7 +688,7 @@ free-text rationale the operator wrote for their own future self.
 Schema details land with the implementation.
 
 **Scope.** Standing approvals apply to state-changing ops
-(`send_bitcoin`, `send_lightning`). Read-only ops (`query_balance`,
+(`manage_bitcoin`, `manage_lightning`). Read-only ops (`query_balance`,
 `query_channels`) dispatch unconditionally - they are protected by
 other mechanisms ([banding](#banding-numeric-value-banding),
 [scale cloaking](#scale-cloaking),
@@ -709,7 +709,7 @@ arbiter, the gateway pauses the call and surfaces it to the
 operator (a human) on a fully out-of-band channel. The call only
 proceeds on explicit human assent. Unknown ops - anything outside
 the recognized read set (`query_balance`, `query_channels`) and
-write set (`send_bitcoin`, `send_lightning`) - also trip HITL by
+write set (`manage_bitcoin`, `manage_lightning`) - also trip HITL by
 default, regardless of standing approvals.
 
 Out-of-band means: the request and response never travel on the
