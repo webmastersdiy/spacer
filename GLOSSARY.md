@@ -517,12 +517,23 @@ across wallets and across shifts.
 
 ### Recipient address registry
 
-The destination universe for state-changing calls. The arbiter holds
-a hand-curated list of physical destinations (Bitcoin addresses, LN
-node pubkeys, BOLT-11 / BOLT-12 invoices) the operator has approved
-as send targets; the petitioner never sees the real destinations,
+The allowlist of **operator-owned internal endpoints** for
+state-changing BTC/LN calls. The arbiter holds a hand-curated list of
+physical destinations (Bitcoin addresses, LN node pubkeys, BOLT-11 /
+BOLT-12 invoices) - all **operator-controlled** (the operator's own
+wallets / nodes) - that a `send_bitcoin` / `send_lightning` call may
+target. **External recipients are not a possibility:** BTC/LN make no
+external payments (any external payee that can see a UTXO is inside
+the adversary's observability set, which would break UTXO privacy), so
+all external value movement is eCash-only (the external-value reframe;
+see the foundational-posture doc and the eCash extension doc). The
+registry's role is therefore *internal fund management* - it bounds
+the AI to moving value only among the operator's own endpoints - not
+gating external sends. The petitioner never sees the real endpoints,
 only opaque single-use tokens that resolve back to them inside the
-arbiter.
+arbiter. (History: this list previously modeled approved *external*
+send targets; the 2026-06-27 external-value reframe recast it as the
+operator-owned-internal allowlist.)
 
 **Storage substrate.** A YAML file at a known path on the arbiter,
 hand-edited by the operator at the directly-attached console. The
@@ -547,14 +558,18 @@ glyphs (no I, L, O, U); operator-typed I or L normalize to 1 and O
 to 0 before validation. Damm32 catches every single-character
 mutation and every adjacent transposition of distinct characters.
 
-**Destination gate (who).** The registry gates *who* can be a
-destination. A state-changing call carries a `recipient_token`;
-the privacy gateway calls `registry.lookup()` during
-pseudonymize-inbound; any outcome other than `ok` (bad checksum,
-unknown, expired, already used, anomalous) collapses to the
-uniform "destination unavailable" refusal. The audit log
-differentiates the cause for operator triage. *Which* actions to a
-resolved destination flow through without a HITL pause is a
+**Internal-endpoint gate (who).** The registry gates that a BTC/LN
+send targets *only an operator-owned internal endpoint*. A
+state-changing call carries a `recipient_token`; the privacy gateway
+calls `registry.lookup()` during pseudonymize-inbound; any outcome
+other than `ok` (bad checksum, unknown, expired, already used,
+anomalous) collapses to the uniform "destination unavailable"
+refusal. Because every valid token resolves to an operator-owned
+endpoint, a non-`ok` result means the AI tried to send off the
+operator's allowlist - which, post-reframe, is the only way it could
+attempt an external recipient, and is refused like any other miss.
+The audit log differentiates the cause for operator triage. *Which*
+actions to a resolved endpoint flow through without a HITL pause is a
 separate gate - see [standing approvals](#standing-approvals).
 
 **Probing infeasibility.** An AI cannot map the destination
