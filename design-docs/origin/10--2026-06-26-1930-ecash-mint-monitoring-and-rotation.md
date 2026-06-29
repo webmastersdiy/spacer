@@ -37,7 +37,8 @@ overrides**:
   blast-radius bound -> **doc 07 §8** (the authority; this doc records *what* monitoring / rotation
   cost against it, not how the ledger works);
 - the action / result-delay machinery and the per-rail timing windows -> **doc 07 §6 / doc 09**;
-- world-facing timing of the mint's own activity (the mint is part of "the world") -> **doc 04**
+- world-facing timing of the mint's own activity (the mint is part of "the world") -> the archived
+  [node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) notes
   (this doc owns only the *probe cadence* it originates, §4, and defers the rationale);
 - the single-mint choice, the mint threat model, and the allowance itself -> **doc 07** (§2 / §4 / §8).
 
@@ -133,8 +134,9 @@ M1 / M2 silently at runtime. The test *mechanics* live in the implementation doc
   metronomic), **minimal** (info-only by default; a value-moving canary only if M1 cannot be trusted
   from organic traffic), and piggybacked on organic mint traffic whenever the rail is already active.
   **This doc owns the probe cadence** (monitoring originates it); the broader rationale and mechanics of
-  randomized *world-facing* timing - the mint is part of "the world" - are **doc 04's**, cross-referenced
-  here, not restated. This resolves the earlier passive-vs-active question (§9) in favor of **active
+  randomized *world-facing* timing - the mint is part of "the world" - live in the archived
+  [node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) notes,
+  cross-referenced here, not restated. This resolves the earlier passive-vs-active question (§9) in favor of **active
   periodic monitoring**.
 
 Monitoring state (counts, thresholds, last-good keyset) is **arbiter-local and never AI-readable**,
@@ -233,7 +235,8 @@ running multiple mints.
 - **Probe-as-fingerprint** (§4): active periodic probing is a mint-observable cadence. Mitigated by
   **randomized (jittered) timing**, keeping probes minimal (info-only by default), and piggybacking on
   organic traffic; never fully closed while active canaries run. The residual is accepted as the cost
-  of monitoring an otherwise-idle mint (the world-facing-timing rationale is doc 04's).
+  of monitoring an otherwise-idle mint (the world-facing-timing rationale lives in the archived
+  [node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) notes).
 - **AI-induced rotation churn (DoS):** the AI could try to provoke alerts (e.g. patterns that look
   like M-signals) to force costly rotations. Bounded three ways: the AI's float ops are
   allowance-capped; it cannot itself rotate (operator-gated); and the costly signals (M1/M2) are
@@ -265,8 +268,9 @@ owed, and one item stays genuinely open.
   petitioner **must never learn**. The split keeps the operator's at-a-glance view from ever leaking a
   column-2 item into anything petitioner-facing. **Scope:** this TUI is a **general arbiter-visibility
   surface, not eCash-specific**, so its authoritative design does **not** belong here - it belongs in
-  its own doc (or doc 06, arb auditability). *Flagged to the human.* This doc states only that
-  monitoring / rotation alerts surface there, tagged petitioner-known vs petitioner-never-known.
+  **its own dedicated doc** (a follow-up). This doc states only that monitoring / rotation alerts
+  surface there, tagged petitioner-known vs petitioner-never-known; the concrete cross-ref lands once
+  that doc does.
 - **Partial-rug drain: binary.** If the old mint honors only some melts, the policy is a simple
   **run / no-run**: drain in one pass (§6 step 2), then declare the remainder **stranded**. No
   graduated, time-tiered draining for now.
@@ -314,11 +318,12 @@ Owned by other docs, referenced and not restated here:
   monitoring / rotation post to the ledger (§6 accounting), not how the ledger works.
 - The mint-correlation timing channels (doc 07 §6) and the per-rail timing windows (doc 09), including
   the result-delay schedule this doc defers disclosure to (§5 / §6).
-- The **world-facing-timing rationale (doc 04)** - the mint is part of "the world"; this doc owns only
-  the *probe cadence* it originates (§4) and lightly cross-references doc 04 for the why / how, rather
-  than scoping world-facing timing fully out.
-- The **operator-visibility TUI** (the two-column surface, §9) - a general arbiter feature, its own doc
-  (or doc 06), not this one.
+- The **world-facing-timing rationale** - the mint is part of "the world"; it lives in the archived
+  [node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) notes,
+  cross-referenced from §4. This doc owns only the *probe cadence* it originates (§4), rather than
+  scoping world-facing timing fully out.
+- The **operator-visibility TUI** (the two-column surface, §9) - a general arbiter feature, its own
+  dedicated doc (a follow-up), not this one.
 - Concrete fee-accounting surface (doc 07 §10.4) and checkstate-cadence jitter (doc 07 §10.7), except
   where a fee change is a monitoring signal (M4).
 - Wire formats, `petcli` / executor code structure, and the exact `/v1/info` schema - all in the
