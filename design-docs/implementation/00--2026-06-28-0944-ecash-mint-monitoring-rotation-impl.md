@@ -7,7 +7,7 @@
 authority** over eCash mint monitoring and rotation; this spec says *how* to build and run it, and is
 authoritative only within those same two areas. Where doc 10 defers, so does this spec: the allowance
 ledger -> doc 07 §8; the action / result-delay machinery -> doc 07 §6 / doc 09; world-facing timing ->
-doc 04; the operator-visibility TUI -> its own doc.
+the archived node-privacy-from-the-world doc; the operator-visibility TUI -> its own dedicated doc.
 **Related:**
 - `../origin/10--2026-06-26-1930-ecash-mint-monitoring-and-rotation.md` - the design this reconciles to (signals M1-M6, the Notice/Suspect/Halt ladder §5, the rotation procedure §6). Referenced by section; not yet on `main` (PR #3).
 - [`08--2026-06-18-0629-ecash-live-test-mint.md`](../origin/08--2026-06-18-0629-ecash-live-test-mint.md) and its findings companion - the live round-trip that grounds the cashu-CLI behavior this spec pins (the pending-exit-0 melt trap, DLEQ-bearing proofs, fee shape).
@@ -25,7 +25,9 @@ over *how* those are implemented. It does **not** restate or extend doc 10's des
 every one of doc 10's cross-reference boundaries: the
 [allowance ledger](../origin/07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius) is
 doc 07 §8's (this spec only names the hooks that post to it), the delay machinery is doc 07 §6 /
-doc 09's, world-facing timing is doc 04's, and the operator-visibility TUI belongs in its own doc.
+doc 09's, world-facing timing is owned by the archived
+[node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) notes, and
+the operator-visibility TUI belongs in its own dedicated doc.
 Measurement references are signet / Mutinynet / test-mint; no mainnet.
 
 ## 2. Build-time contract test (doc 10 §3, §8)
@@ -65,7 +67,8 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
   rail is already talking to the mint, `/v1/info` is piggybacked on that organic call instead. A
   value-moving canary is built but **disabled by default**, enabled only where M1 cannot be trusted from
   organic traffic (doc 10 §4). The jitter distribution is the one tunable here; the world-facing
-  rationale for why a randomized cadence defeats observation is doc 04's, not restated.
+  rationale for why a randomized cadence defeats observation lives in the archived
+  node-privacy-from-the-world doc, not restated.
 
 ## 4. Signal -> action wiring (doc 10 §5, §9)
 
@@ -114,6 +117,6 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
 ## 7. Reconciliation boundary
 
 This spec stops where doc 10 stops. It does **not** define: the allowance-ledger schema (doc 07 §8),
-the action / result-delay windows (doc 07 §6 / doc 09), the world-facing-timing rationale (doc 04), or
-the operator-visibility TUI (its own doc). If any of those needs a change to support monitoring /
+the action / result-delay windows (doc 07 §6 / doc 09), the world-facing-timing rationale (the archived
+node-privacy-from-the-world doc), or the operator-visibility TUI (its own dedicated doc). If any of those needs a change to support monitoring /
 rotation, that change is filed against the owning doc, not added here.
