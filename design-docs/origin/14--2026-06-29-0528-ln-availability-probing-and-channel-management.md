@@ -110,8 +110,11 @@ fail-closed line, never choose the counterparty":
 - **It may not** choose a *new* counterparty freely: the replacement comes from the operator-approved
   [registry](../../GLOSSARY.md#recipient-address-registry), never AI-named, never a fresh AI-supplied
   node (doc 01 §3.5 "resolve counterparty via the registry"; doc 10 §5 "never chooses the mint").
-  **Closing is a policy decision, not an AI choice** (doc 01 §3.5); a **force-close needs elevated
-  authorization** (§3.5). New channels default
+  Among eligible registry peers the arbiter prefers a **representative / average** one - selection
+  criterion = availability **and** representativeness - so the heal carries no distinctive
+  counterparty-selection signature and the ambient fee / health signal it yields is representative
+  (feeding the anonymity-set-aware fee feedback, §9). **Closing is a policy decision, not an AI choice**
+  (doc 01 §3.5); a **force-close needs elevated authorization** (§3.5). New channels default
   [--private](../../GLOSSARY.md#default---private-channels), banded size (§3.5).
 - **The AI sees only aggregate health** - e.g. "liquidity healthy: yes", or a banded / relative
   indicator (doc 12 G2) - **never** the per-channel open / close events or their timing. This closes
@@ -170,6 +173,10 @@ of active design scope) - its mitigations are pulled in only as bounds on how pr
 5. **Probe vs passive inference.** Whether availability can be read from organic traffic the rail
    already produces (cheaper, no new footprint) before an active probe is ever sent - the passive-first
    preference of doc 10 §4.
+6. **Anonymity-set-aware fee feedback.** Whether representative-peer probing (§6) can yield useful
+   **AI-facing fee feedback** - LN feedback banded (doc 01 / doc 12), on-chain ambient from public data
+   (doc 03) - without leaking specifics. This is the doc 11 §7.3 tail that replaces an operator
+   fee-alarm; the cross-doc design is tracked separately.
 
 ## 10. What is NOT in this doc
 
