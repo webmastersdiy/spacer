@@ -2,9 +2,9 @@
 
 **Date:** 2026-06-27
 **Status:** states a foundational posture **and a reframe of the payment model**. The posture (the
-two guarantees + the eCash exception) is the human's call, confirmed. The §8 decisions are now
-**made** (mail bl-wisp-x3a67, 2026-06-28) and the cross-doc edits to docs 01 / 05 / 07 + the
-GLOSSARY registry are **applied in PR #6** (companion to this PR). §8 records the resolutions.
+two guardrails + the eCash exception) is the human's call, confirmed. The §8 decisions are now
+**made** (mail bl-wisp-x3a67, 2026-06-28) and the cross-doc edits to docs 01 / 03 / 05 / 07 / 08 +
+the GLOSSARY are **applied in PR #6** (companion to this PR). §8 records the resolutions.
 **Context:** A foundational privacy principle the human gave by voice (mail thread bl-wisp-gvi3s,
 corrected by bl-wisp-nmwb0). It is not just additive: it changes what the BTC/LN write ops *are*.
 **Related:**
@@ -17,10 +17,11 @@ PET = petitioner / the AI, the adversary (docs 01 §2).
 
 ---
 
-## 1. Two guarantees and one exception
+## 1. Two guardrails and one exception
 
-The AI-facing design provides two system-level privacy guarantees, and eCash is the single
-deliberate exception to the second:
+The AI-facing design provides two system-level privacy guardrails - guardrails, not guarantees;
+nothing in privacy is absolute certainty - and eCash is the single deliberate exception to the
+second:
 
 - **G1 - Endpoint privacy.** The PET never learns the operator's fund **endpoints** - source UTXOs,
   change outputs, channel topology/balances, funding txids. So it cannot reconstruct the operator's
@@ -37,7 +38,7 @@ extent of the float (§4). G1 is never loosened.
 ## 2. The root rule: no external BTC/LN payments
 
 **At the BTC/LN level the arbiter makes no external payments at all.** This is the rule from which
-both guarantees follow.
+both guardrails follow.
 
 *Why.* In the threat model, **any external payee that can see a UTXO is counted as the PET seeing
 it** - the payee is inside the adversary's observability set. An on-chain payment inherently reveals
@@ -66,16 +67,22 @@ With no external BTC/LN payments, G1 reduces to: the PET never learns the operat
 endpoints. The existing AI-facing mitigations already enforce this and need only be re-read as
 serving G1: `listunspent` never surfaced; coin selection + change kept inside bitcoind/LND (PSBTs
 never leave); balances banded/scale-cloaked; channels aggregated; `payinvoice` route / `chan_out` /
-preimage hidden; funding txids held internally (docs 01/03/05). This doc *names* the guarantee these
+preimage hidden; funding txids held internally (docs 01/03/05). This doc *names* the guardrail these
 mitigations jointly provide; it adds no new mechanism.
 
 *Tension, stated not papered over.* The root rule (§2) is what makes G1 robust: because there is no
 external on-chain payment, there is no public tx exposing operator inputs+change to a colluding
 recipient, and the on-chain colluding-recipient correlation vector (docs 01/09) is **eliminated for
 BTC/LN**. It re-concentrates on the eCash boundary - the melt names our LND node to the *mint*
-(doc 07 §5.1, §6), which is mint-facing, handled by docs 07/10, not a PET-facing G1 break. The only
-residual G1 exposure is therefore the deferred external-LN option (§2), which must clear this bar
-before adoption.
+(doc 07 §5.1, §6), which is mint-facing, handled by docs 07/10, not a PET-facing G1 break. One bounded
+carve-out belongs in the same honesty: a **channel open to an operator-approved peer** (doc 00's
+faucet channel today; doc 14's self-healing tomorrow) publishes a funding tx whose inputs and change
+that counterparty can inspect - an external party does see operator UTXOs. It is bounded rather than
+eliminated: the operator chose the peer (registry-approved, never AI-named), channels default
+`--private`, sizes are banded, and no value leaves operator control (the 2-of-2 funds stay ours);
+still, it is a real G1 cost of having channels at all, accepted as such (the approved-peer registry
+entry class is doc 14 §9.7's open reconciliation). The remaining residual G1 exposure is the deferred
+external-LN option (§2), which must clear this bar before adoption.
 
 ---
 
@@ -119,9 +126,9 @@ write ops gated by the recipient registry (doc 05 §4.1/§4.7, doc 07 §9, the e
 rule (§2) means they no longer make external-recipient payments. Each consequence below was mapped
 here first and then **applied in PR #6** (per the §8 decisions); none was silently edited.
 
-- **Write-op set splits internal vs external.** `manage_bitcoin`, `manage_lightning` (renamed from
-  `send_*`; and `payinvoice` / `openchannel`) become **internal-management-only** - destinations are
-  operator-controlled. `fund_ecash` / `defund_ecash` become the **only** external value path. The
+- **Write-op set splits internal vs external.** `manage_bitcoin` / `manage_lightning` (renamed
+  from `send_*`), and the `payinvoice` / `openchannel` calls beneath them, become
+  **internal-management-only** - destinations are operator-controlled. `fund_ecash` / `defund_ecash` become the **only** external value path. The
   ops change meaning *and* name (decision #4, §8) - `manage_*` so the internal-only nature is
   explicit and "send"/concerning wording stays calibrated.
 - **Recipient registry's role collapses (biggest reconciliation).** Today the registry is the
@@ -151,7 +158,7 @@ The correction (no external BTC/LN, not merely "hide the endpoints") is what mak
 single root. Because external value moves **only** as bearer eCash: (a) no operator UTXO is ever
 shown to an external party → G1 holds without relying on chain-analysis-resistance; and (b) the PET
 only ever handles real, absolutely-scaled value on the eCash rail → G2's loosening is *isolated* to
-eCash by construction, not by a mitigation that could slip. The two guarantees and the one exception
+eCash by construction, not by a mitigation that could slip. The two guardrails and the one exception
 are now one design, not three.
 
 ---
