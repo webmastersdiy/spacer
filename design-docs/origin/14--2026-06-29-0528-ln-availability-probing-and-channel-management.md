@@ -13,8 +13,8 @@ availability probing while *living inside* those defenses, never relaxing them.
 - [`01--2026-05-02-1601-privacy-and-timing-leaks.md`](01--2026-05-02-1601-privacy-and-timing-leaks.md) - the AI-facing LN leak map and timing-channel defenses this capability lives inside: §3.3 (per-peer / channel aggregation), §3.5 (channel open / close), §4.1 (payment-path latency -> hop-count -> graph distance), §4.2 (polling cadence), §4.6 (channel open / close sequence leak), §4.7 (retry-timing route discovery), §3.6 (`export_pathfinding_scores` - blocked), OQ3 (private-close balance inference), OQ4 (binary-search balance probing), OQ5 (pathfinding-score fingerprint). The defensive envelope; this doc reconciles against it, does not re-derive it.
 - [`10--2026-06-26-1930-ecash-mint-monitoring-and-rotation.md`](10--2026-06-26-1930-ecash-mint-monitoring-and-rotation.md) §4 / §5 - the active-probe-with-randomized-timing, idle-only, arbiter-local pattern, and the "arbiter acts autonomously up to the fail-closed line, never chooses the counterparty" autonomy bound, both reused here.
 - [archived: node privacy from the world](../../archive/2026-05-02-1700-node-privacy-from-the-world.md) - the **world-facing** threat model for the probing traffic itself (gossip, routing-node HTLC timing, on-chain channel funding / close, esplora polling) and its mitigation menu (Tor, private channels, multi-peer broadcast, local esplora). Cited as the privacy spine for the outward direction; stays archived (world-facing is out of active design scope), its applicable mitigations adopted here as constraints.
-- doc 11 (PR #4, cross-rail fee accounting) - cost: probes, rebalances, and channel open / close incur fees (LN routing fee §3; channel open / close are on-chain mining fees §3), booked exact in the arbiter cost ledger (§4), banded / often-0 to the petitioner (§2). This doc owns the *capability + privacy bounds*; doc 11 owns the *cost*.
-- doc 12 (PR #5, external-value boundary) - `manage_lightning` is internal-management-only (§2 / §6); the petitioner sees only cloaked proportions, never absolute amounts (G2, §1 / §4).
+- doc 11 (cross-rail fee accounting) - cost: probes, rebalances, and channel open / close incur fees (LN routing fee §3; channel open / close are on-chain mining fees §3), booked exact in the arbiter cost ledger (§4), banded / often-0 to the petitioner (§2). This doc owns the *capability + privacy bounds*; doc 11 owns the *cost*.
+- doc 12 (external-value boundary) - `manage_lightning` is internal-management-only (§2 / §6); the petitioner sees only cloaked proportions, never absolute amounts (G2, §1 / §4).
 - doc 07 §5-§6 - the eCash fund / defund legs ride this LN surface; their mint-facing leak map and timing are doc 07's.
 - GLOSSARY: [recipient address registry](../../GLOSSARY.md#recipient-address-registry), [action delay](../../GLOSSARY.md#action-delay), [result delay](../../GLOSSARY.md#result-delay), [default --private channels](../../GLOSSARY.md#default---private-channels), [privacy gateway](../../GLOSSARY.md#privacy-gateway), [audit log](../../GLOSSARY.md#audit-log), [JIT-liquidity](../../GLOSSARY.md#jit-liquidity)
 
@@ -78,7 +78,8 @@ Two directions must **both** be bounded, or the capability becomes a deanonymiza
 - **Targets are registry-gated.** The AI may probe only nodes / pairs already in the operator-approved
   [recipient address registry](../../GLOSSARY.md#recipient-address-registry) (our peers, our intended
   counterparties) - the same gate that governs `connect` (doc 01 §3.1) and `openchannel` counterparties
-  (§3.5). A probe naming a node outside the registry is **uniformly refused** (the refusal shape of the
+  (§3.5). (The registry's entry *shape* for LN peers is an open reconciliation with the doc 12
+  recast - §9.7.) A probe naming a node outside the registry is **uniformly refused** (the refusal shape of the
   mode gate, doc 01 §1, and the missing-allowance default, doc 10 §5). So the AI learns up / down only
   of nodes the operator already chose - it cannot **discover** or **map** new ones. Availability of an
   operator's known peer is not network position.
@@ -177,6 +178,15 @@ of active design scope) - its mitigations are pulled in only as bounds on how pr
    **AI-facing fee feedback** - LN feedback banded (doc 01 / doc 12), on-chain ambient from public data
    (doc 03) - without leaking specifics. This is the doc 11 §7.3 tail that replaces an operator
    fee-alarm; the cross-doc design is tracked separately.
+7. **Registry entry class for LN peers.** The doc 12 recast defines registry entries as
+   operator-owned output descriptors - endpoints the operator *controls*. This doc's probe targets and
+   channel counterparties (§4, §6) are operator-*approved* but not operator-*owned*: a routing peer is
+   external infrastructure, even though the funds in a 2-of-2 channel with it stay the operator's.
+   Reconcile the entry shape: either the registry gains a second, explicitly-tagged entry class
+   (approved-peer: node pubkey, no descriptor, no fresh-address machinery), or peer approval becomes
+   its own small allowlist beside the registry. Either way the doc 12 posture is untouched - no
+   external value payment: a channel open parks operator funds with an approved peer; it does not pay
+   them away.
 
 ## 10. What is NOT in this doc
 
