@@ -3,10 +3,10 @@
 **Date:** 2026-05-02 (reconciled 2026-06-12)
 **Context:** AI-facing leak map for the LND surface - what each `lncli` call exposes and which arbiter mitigation covers it. This surface ships as the **advanced Lightning extension** (`SPACER_MODE=lightning|full`, and equally under `SPACER_MODE=ecash` - ecash implies lightning, doc 07 §9; doc 05 §2.2); the default onchain deployment exposes none of it, and doc 03 (bitcoind) is the primary surface. In the rail ladder this is the middle rail: Bitcoin on-chain (primary) -> Lightning (advanced) -> eCash (advanced, atop Lightning). Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-call inventory.
 **Related:**
-- `2026-05-02-1600-lnd-mutinynet-test-flow.md` - the run these calls came from.
-- `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - the primary (default onchain) surface; read together for the gateway policy layer.
+- `00--2026-05-02-1600-lnd-mutinynet-test-flow.md` - the run these calls came from.
+- `03--2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` - the primary (default onchain) surface; read together for the gateway policy layer.
 - `07--2026-06-12-0916-ecash-extension.md` - the eCash extension one rail up: its fund/defund legs are LN payments from this surface, and the mint observes them (doc 07 §5-§6 own that leak map).
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (archived; separate concern).
+- `../../archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing privacy (archived; separate concern).
 
 ---
 

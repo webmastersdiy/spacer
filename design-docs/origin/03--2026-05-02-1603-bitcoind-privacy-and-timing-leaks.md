@@ -3,10 +3,10 @@
 **Date:** 2026-05-02 (reconciled 2026-06-12)
 **Context:** AI-facing leak map for the bitcoind RPC surface - what each `bitcoin-cli` call exposes and which arbiter mitigation covers it. **bitcoind is the primary surface**: the default deployment mode (onchain, doc 05 §2.2) serves everything from it, with the opt-in advanced extensions stacking above it as the doc 07 rail ladder - Lightning (doc 01), then eCash atop Lightning (doc 07). Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-RPC inventory. Read together with the LND doc for the gateway policy layer.
 **Related:**
-- `2026-05-02-1601-privacy-and-timing-leaks.md` - the LND surface (advanced extension).
+- `01--2026-05-02-1601-privacy-and-timing-leaks.md` - the LND surface (advanced extension).
 - `07--2026-06-12-0916-ecash-extension.md` - the eCash extension two rails up (advanced, atop Lightning).
-- `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
+- `02--2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
+- `../../archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
 
 ---
 

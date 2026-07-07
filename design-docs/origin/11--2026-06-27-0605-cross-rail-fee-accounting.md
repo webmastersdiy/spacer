@@ -128,7 +128,7 @@ Stating the limits honestly, in the spirit of doc 07 §8's "what the ledger can 
   is paid as one lump, and the split between genuine mint fee and remainder is not observable at melt
   time (doc 07 findings §2). Component (c) therefore **stops being booked as a cost**: the ledger
   records the **actual** melt fee `F` exactly, and the **reclaimed unspent remainder as a recovery /
-  credit** (the reclaim *mechanism* is doc 07 / PART B; doc 11 records only the accounting). A *real*
+  credit** (the reclaim *mechanism* is doc 07's and its implementation follow-up's; doc 11 records only the accounting). A *real*
   mint input fee appearing is still noted separately (doc 10 M4).
 - **AI-direct eCash spends: the AI's own domain (by design).** The AI-direct eCash bearer float is
   **the AI's to use**: once the AI holds it, its own mint swaps / sends incur mint fees the arbiter
@@ -176,20 +176,21 @@ other docs are referenced, not duplicated.
    position - a fingerprint. Doc 11 therefore **reflects** onchain fees only; there is no bump
    component. Reintroduce only if (1) there is real demand **and** (2) it fits the anonymity set without
    exposing UTXOs / txs / mempool. **CPFP is not a privacy-free substitute.** (The op-surface deny lives
-   in docs 03 / 05 -> PART B.)
+   in docs 03 / 05; wiring the deny is implementation follow-up.)
 3. **Fee-budget alarm.** **No arbiter-side fee-budget alarm.** A worried operator would use the AI to
    fix fees, turning the operator into a **side-channel** that leaks exact cost state. The need is met
    instead by **anonymity-set-aware AI-facing feedback** - an AI-facing mechanism, so out of doc 11
-   (-> PART B). Doc 11 closes this with the reasoning, nothing more.
+   (picked up by doc 14, LN availability probing, as its open question 6). Doc 11 closes this with the reasoning, nothing more.
 4. **Reserve-remainder reclaim.** The unspent melt reserve is **reclaimed into the arbiter's own eCash
    float** - **not** returned to the mint, **not** paid to the petitioner (returning it would leak the
    actual fee `F`, since the reserve `R` is publicly computable). It is recycled as fungible eCash to
    fund later petitioner withdrawals. Doc 11 records the **accounting flip** (§5, §3 component (c)); the
-   **reclaim mechanism** lives in doc 07 / the impl companion (-> PART B).
+   **reclaim mechanism** lives in doc 07 / the impl companion (implementation follow-up).
 5. **Executor symmetry.** The LN and eCash executors already emit their fee fields; the **onchain**
-   executor (`send_bitcoin_executed`) does **not** yet emit `mining_fee_sat` - a wiring dependency,
-   which is why §4's cross-rail shape is a **target** until it lands (build task -> PART B, coordinated
-   with the `manage_bitcoin` rename).
+   executor (`manage_bitcoin_executed`) does **not** yet emit `mining_fee_sat` - a wiring dependency,
+   which is why §4's cross-rail shape is a **target** until it lands (build task, part of the doc 11
+   implementation thrust, sp-ob0; the `manage_bitcoin` rename it was to coordinate with has landed,
+   sp-3mm).
 
 ---
 

@@ -10,6 +10,30 @@ directory under `design-docs/`.
 See the top-level [`design-docs/README.md`](../README.md) for the
 filename convention.
 
+## Index
+
+One line per doc; the parenthetical names what the doc is the
+**authority** over, where that matters (other docs cross-reference,
+never override).
+
+| Doc | What it is |
+|---|---|
+| 00 | LND Mutinynet end-to-end test flow - the founding bring-up record |
+| 01 | LND per-call leak map + timing channels (authority: the AI-facing LN surface) |
+| 02 | Local bitcoind bring-up record (the onchain-default backend) |
+| 03 | bitcoind per-RPC leak map (authority: the AI-facing bitcoind surface) |
+| 04 | - (the world-facing node-privacy doc; archived, see `../../archive/`) |
+| 05 | Architecture overview: components, trust boundary, data flow, modes, exit criteria (authority: the logical architecture) |
+| 06 | Arb-auditability: continuous git snapshot + operator audit scripts |
+| 07 | eCash extension: custody split, mint threat model (authority: delay-scaling principle + per-rail floor table §7, allowance §8) |
+| 08 | eCash live test mint: selection + round-trip flow (results in `../findings/00--...`) |
+| 09 | Dynamic timing window (authority: the window algorithm; floors stay doc 07 §7's) |
+| 10 | eCash mint monitoring + rotation (authority: monitoring + rotation only; mechanics in `../implementation/00--...`) |
+| 11 | Cross-rail fee accounting - the operator-only cost ledger (authority: operator-facing fees; AI-facing fee banding stays docs 01/03) |
+| 12 | Foundational privacy posture: internal-only BTC/LN, eCash-only external value (PR open as of 2026-07-07) |
+| 13 | Operator-visibility TUI: the two-column console (PR open as of 2026-07-07) |
+| 14 | LN availability probing + autonomous channel management (PR open as of 2026-07-07) |
+
 ## Rule: AI-facing vs world-facing privacy
 
 Spacer's primary goal is to keep the AI client from learning anything about
