@@ -29,6 +29,13 @@ Files:
   approvals so no approval can exceed it. Ships absent (missing file =
   allowance 0 = every fund refused); copy `ecash.yaml.example` and
   edit. Only consulted in ecash mode (`SPACER_MODE=ecash`).
+- `cashu-pin.yaml` - the pinned nutshell (cashu) CLI version the
+  eCash parse contract was verified against (design doc 10 §3). The
+  one exception to "operator-editable" in this directory: it is
+  repo-tracked and consumed by the build-time contract test
+  (`../ops/mint_contract_test.py`), which fails the build when the
+  installed CLI reports any other version. Bump it only together
+  with a contract-test rerun against the new CLI.
 
 This README exists so `config/` is tracked in git even before any YAML
 lands; without a file the empty directory would not appear in the

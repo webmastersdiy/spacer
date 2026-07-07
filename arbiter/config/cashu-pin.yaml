@@ -1,0 +1,17 @@
+# Pinned nutshell (cashu) CLI version for the eCash extension.
+#
+# The arbiter parses this CLI's human-oriented stdout at two
+# load-bearing points (design doc 10 §3): the melt-settlement line
+# that distinguishes a settled defund from the pending-exit-0 trap
+# (M1, executor._melt_settled), and DLEQ verification at receive
+# (M2). Both were verified against exactly this version (doc 08
+# findings, sp-uwa0v0 / sp-uy29gy).
+#
+# The build-time contract test (../ops/mint_contract_test.py) fails
+# the build when the installed CLI reports any other version, so a
+# CLI upgrade is forced through a reviewed pin bump here - and the
+# same test then re-verifies the new CLI's output against the
+# parsers. Unlike the operator-local YAML in this directory, this
+# file is repo-tracked: the pin is part of the parse contract, not
+# deployment-site configuration.
+cashu_pin_version: 0.18.1
