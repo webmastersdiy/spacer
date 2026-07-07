@@ -16,3 +16,17 @@ without wading through design rationale.
 Same [filename convention](../README.md) as the rest of `design-docs/`:
 `NN--YYYY-MM-DD-HHMM-<name>.md`, the index chronological within this
 directory.
+
+## Lifecycle: specs collapse when the code lands
+
+An implementation spec is a **pre-build artifact**: it exists so the
+mechanics can be designed and reviewed before they are code. Once the
+mechanics land, the code is the authority (inline-documented per the
+arbiter discipline, architecture overview §2.1), and the spec
+**collapses**: the implemented sections are replaced by a summary of at
+most ~100 words plus pointers to the code that now carries the
+mechanics. Leave no residue - no "alternatives considered", no
+superseded mechanics; anything still load-bearing belongs in the owning
+design doc, not here. Partial landings collapse section by section; a
+spec whose every section has landed shrinks to its title, the ~100-word
+summary, and the pointers.

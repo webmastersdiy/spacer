@@ -1,7 +1,7 @@
 # eCash Mint Monitoring and Rotation - Implementation
 
 **Date:** 2026-06-28
-**Status:** DRAFT (implementation spec; reconciles to design doc 10, monitoring + rotation only)
+**Status:** partially landed - §2 is collapsed to pointers (the build gate landed, sp-xha); §§3-6 are the live pre-build spec and collapse per the [README lifecycle](README.md) as they land
 **Context:** The build-time and runtime mechanics for the monitoring and rotation design in
 `../origin/10--2026-06-26-1930-ecash-mint-monitoring-and-rotation.md`. Doc 10 is the **design
 authority** over eCash mint monitoring and rotation; this spec says *how* to build and run it, and is
@@ -30,26 +30,16 @@ doc 09's, world-facing timing is owned by the archived
 the operator-visibility TUI belongs in its own dedicated doc.
 Measurement references are signet / Mutinynet / test-mint; no mainnet.
 
-## 2. Build-time contract test (doc 10 §3, §8)
+## 2. Build-time contract test (doc 10 §3, §8) - landed
 
-doc 10 requires that a cashu-CLI output drift or a DLEQ-verification regression fail the **build**, not
-M1 / M2 silently at runtime. Mechanics:
-
-- **Pin the CLI.** The arbiter build installs the cashu (nutshell) CLI at a pinned version / commit;
-  the pin lives in `config/` (doc 06 §3) so a bump is an audited, reviewable change, not a silent drift.
-- **Two assertions, run on every build:**
-  1. **M1 stdout contract.** Drive a melt that settles (against an ephemeral local test mint, or a
-     recorded fixture of a known-good run per doc 08 findings) and assert stdout contains the exact
-     "Invoice paid" / preimage line M1 parses - *and* that a still-pending melt does **not** emit it
-     (the pending-exit-0 trap, doc 08 findings §1.2). If the strings move, the build fails with a diff.
-  2. **DLEQ-on contract.** Receive a DLEQ-bearing proof and assert verification runs and passes; feed a
-     proof with a corrupted DLEQ and assert it is **rejected** at receive. If verification is silently
-     off (the corrupt proof is accepted), the build fails.
-- **Home.** A build / CI target under `arbiter/ops/` (doc 06 §3 tracks `ops/`), wired so it runs on
-  every arbiter build - an unreviewed CLI upgrade cannot land green.
-
-This makes M1's parser and M2's DLEQ dependency (doc 10 §8) load-bearing *at build time*, where the
-failure is loud, rather than at runtime, where doc 10 showed both fail silently.
+Landed as `arbiter/ops/mint_contract_test.py` (sp-xha), pinned via
+`config/cashu-pin.yaml`; **the module docstring is the spec**. Three
+layers: parser fixtures (always run), a version pin (`cashu info` must
+equal the pinned version, so an unreviewed CLI bump fails the build),
+and a live ephemeral FakeWallet nutshell mint driven through the
+arbiter's own `ecash.py` - covering the pending-exit-0 melt trap and
+DLEQ (presence asserted on send; bit-flipped proofs rejected, the
+intact original accepted as the control). Runs on every arbiter build.
 
 ## 3. Monitoring runtime (doc 10 §3, §4)
 
@@ -66,7 +56,10 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
   the cadence carries no metronomic signature (doc 07 §6 T5) - and only while the rail is idle; when the
   rail is already talking to the mint, `/v1/info` is piggybacked on that organic call instead. A
   value-moving canary is built but **disabled by default**, enabled only where M1 cannot be trusted from
-  organic traffic (doc 10 §4). The jitter distribution is the one tunable here; the world-facing
+  organic traffic (doc 10 §4). The scheduler runs **in the arbiter process** (a jittered timer
+  thread), not an external cron: idle-awareness and organic-traffic piggybacking need in-process
+  visibility of rail activity and monitoring state, and the whole probe surface then sits in the one
+  tree the manual-audit pass reads (doc 05 §2.1). The jitter distribution is the one tunable here; the world-facing
   rationale for why a randomized cadence defeats observation lives in the archived
   node-privacy-from-the-world doc, not restated.
 
@@ -83,6 +76,11 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
   indistinguishable "unavailable", never a mint-health oracle.
 - **Fast-path drain (doc 10 §5).** The rug-response drain calls the normal defund pipeline with the
   [action delay](../../GLOSSARY.md#action-delay) **bypassed**, to move float before the rug completes.
+  What it operates on, stated plainly: the outstanding float is **petitioner-held bearer value**, so
+  the arbiter cannot pull it back unilaterally - the fast path covers (a) defunds the petitioner
+  submits, and (b) the arbiter's own remnant float (transient custody plus reclaimed melt-reserve
+  remainders, doc 11 §7.4). And because mint health is never petitioner-readable (§3), the petitioner
+  will not know to defund on its own - prompting it is an **operator act**.
   Petitioner-facing disclosure of the drain still flows through the normal
   [result delay](../../GLOSSARY.md#result-delay) (doc 07 §6 / doc 09): the fast path changes *execution*
   timing, not *disclosure* timing. Only the rug-response path takes the bypass; ordinary defunds keep
@@ -97,7 +95,11 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
 - **Self-test before resume.** After repin, run a canary **fund -> melt round-trip** against the new pin
   and require M1-clean settlement *and* M2-clean DLEQ before clearing the fail-closed flag. Pass ->
   serve the petitioner; fail -> stay Halted on the new pin and alert the operator (the rotation landed
-  on another bad mint). Funding never resumes on the bare repin (doc 10 §6 step 4).
+  on another bad mint). Funding never resumes on the bare repin (doc 10 §6 step 4). The self-test is
+  **arbiter/operator-initiated and never petitioner-triggerable**, and it runs while Halt is still
+  set - the flag gates the *petitioner-facing* `fund_ecash`, not this internal path (otherwise the
+  test that clears the flag could never run). Its canary fund/defund post to the allowance ledger
+  like any other executed ops.
 - **Accounting hooks.** Drain outcome (settled vs stranded), the stranded write-off, and melt / routing
   fees post to the
   [allowance ledger](../origin/07--2026-06-12-0916-ecash-extension.md#8-allowance-and-blast-radius);
@@ -110,7 +112,12 @@ failure is loud, rather than at runtime, where doc 10 showed both fail silently.
 - **Build-time:** the two contract assertions of §2, run on every build.
 - **Exit-loop / integration** (signet / Mutinynet / test-mint, per doc 08; no mainnet): a forced M1
   (melt left pending) trips Halt + a uniformly-refusing `fund_ecash`; a corrupted-DLEQ proof trips M2;
-  a repin + passing self-test clears Halt; a repin + failing self-test stays Halted.
+  a repin + passing self-test clears Halt; a repin + failing self-test stays Halted. These variants
+  need an arbiter-side mint that misbehaves on demand - which collides with the recorded
+  no-arbiter-side-cashu-fake stance (doc 05 §10 / doc 07 §9), whose rationale ("no variant can reach
+  the wrapper") is obsolete now that the executor runs. Resolution: reuse the §2 ephemeral FakeWallet
+  mint harness (pending-forever backend, corrupted-DLEQ tokens) as the misbehaving mint, and amend the
+  stance sentence in docs 05 / 07 when these variants land.
 - **Privacy:** assert monitoring state is unreachable through the gateway - no response field exposes
   tier, counts, or keyset health to the AI.
 
