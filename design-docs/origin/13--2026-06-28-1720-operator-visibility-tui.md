@@ -11,7 +11,7 @@ petitioner-facing channel. General to the arbiter; doc 10 and any other subsyste
 **Related:**
 - [`05--2026-05-05-0948-architecture-overview.md`](05--2026-05-05-0948-architecture-overview.md) §2.1 (arbiter implementation discipline - small enough for a human to read every line), §4.5 (the runtime [audit log](../../GLOSSARY.md#audit-log) - the append-only record this live view complements).
 - [`06--2026-05-24-0623-arb-auditability.md`](06--2026-05-24-0623-arb-auditability.md) - the other operator-console primitive (continuous git snapshot); same console (KVM), same operator-only posture.
-- doc 10 §9 - the first producer (eCash monitoring / rotation alerts, tagged petitioner-known vs petitioner-never-known). Referenced by section; on PR #3, not yet on `main`.
+- doc 10 §9 - the first producer (eCash monitoring / rotation alerts, tagged petitioner-known vs petitioner-never-known). On `main`.
 - [`README.md`](README.md) "AI-facing vs world-facing" split - this doc is squarely **AI-facing** (the petitioner / AI is the adversary the column split defends against).
 - GLOSSARY: [arbiter](../../GLOSSARY.md#arbiter), [audit log](../../GLOSSARY.md#audit-log), [HITL approval](../../GLOSSARY.md#human-in-the-loop-hitl-approval), [recipient address registry](../../GLOSSARY.md#recipient-address-registry)
 
