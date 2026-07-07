@@ -157,8 +157,8 @@ _ECASH_ALLOWANCE_PATH = _ECASH_ALLOWANCE_DIR / "ecash.yaml"
 os.environ["SPACER_ECASH_ALLOWANCE_PATH"] = str(_ECASH_ALLOWANCE_PATH)
 
 # Pre-computed valid recipient token + a real testnet address. Used
-# by the seed_registry precondition so the new send-bitcoin /
-# send-lightning variants can exercise the post-registry path
+# by the seed_registry precondition so the new manage-bitcoin /
+# manage-lightning variants can exercise the post-registry path
 # (registry resolves -> standing-approvals gate fires). Generated
 # once at module load so the petcli_args and the precondition agree
 # on the same token string. The address is BIP-173's testnet P2WPKH
@@ -430,7 +430,7 @@ def _apply_precondition(precondition):
         per-variant destinations.yaml. Bypasses registry.add()'s
         operator-side validation and token generation so a variant
         can stage a known-good token (the petcli_args reference it
-        verbatim). Used by the send-bitcoin / send-lightning
+        verbatim). Used by the manage-bitcoin / manage-lightning
         variants that exercise the post-registry path (the registry
         resolves; the standing-approvals gate decides). created_at
         = now, expires_at = now + 7d, used = False. Reaches into
@@ -560,13 +560,13 @@ def _apply_precondition(precondition):
 #
 # - onchain (default, SPACER_MODE unset): query_balance dispatches
 #   through arbiter/src/bitcoin.py against a fake bitcoin-cli the
-#   runner installs at module-import time; send_bitcoin exercises the
+#   runner installs at module-import time; manage_bitcoin exercises the
 #   registry-miss refusal and both standing-approvals branches. The
-#   extension ops (query_channels / send_lightning / fund_ecash /
+#   extension ops (query_channels / manage_lightning / fund_ecash /
 #   defund_ecash) are extension-gated: recognized but refused
 #   uniformly (decision_refuse_mode).
 # - advanced (SPACER_MODE=lightning|full): the Lightning extension
-#   layers query_channels / send_lightning back on, and query_balance
+#   layers query_channels / manage_lightning back on, and query_balance
 #   reads the LND wallet instead of bitcoind - all through
 #   arbiter/src/lnd.py against the fake lncli. The eCash ops remain
 #   extension-gated (doc 07 §9: full is frozen at onchain+lightning).
@@ -736,19 +736,19 @@ VARIANTS = [
             "wire."
         ),
     },
-    # --- submit send-bitcoin: the primary (onchain) write op. State-
+    # --- submit manage-bitcoin: the primary (onchain) write op. State-
     # changing ops resolve through the recipient address registry
     # (§4.7). Sending with a token that is not in the registry (here,
     # the made-up 'ABCDEF') refuses uniformly at the registry gate.
     # The wire shape is the standard refusal body; the audit log
     # carries decision_refuse_registry so the operator can see *which*
-    # token failed and why. The advanced-extension send_lightning
+    # token failed and why. The advanced-extension manage_lightning
     # analogues live in the advanced-mode group at the end of the
     # manifest.
     {
-        "path": ("submit", "send-bitcoin", "refused-unknown-token"),
+        "path": ("submit", "manage-bitcoin", "refused-unknown-token"),
         "petcli_args": [
-            "submit", "send-bitcoin",
+            "submit", "manage-bitcoin",
             "--to-token", "ABCDEF",
             "--amount-sats", "1000",
         ],
@@ -759,7 +759,7 @@ VARIANTS = [
             and r.get("_petcli_estimate_window_s") == 30.0
         ),
         "description": (
-            "send_bitcoin is a known write op; the gateway calls "
+            "manage_bitcoin is a known write op; the gateway calls "
             "registry.lookup() on recipient_token=ABCDEF, which "
             "fails (bad checksum or unknown - either way non-`ok`), "
             "and the gateway refuses uniformly. petcli stamps the "
@@ -778,9 +778,9 @@ VARIANTS = [
     # variants together prove the standing-approvals gate fires
     # AFTER the registry and is distinct from the unknown-op HITL.
     {
-        "path": ("submit", "send-bitcoin", "parked-no-standing-approval"),
+        "path": ("submit", "manage-bitcoin", "parked-no-standing-approval"),
         "petcli_args": [
-            "submit", "send-bitcoin",
+            "submit", "manage-bitcoin",
             "--to-token", _VALID_TOKEN,
             "--amount-sats", "1000",
         ],
@@ -795,7 +795,7 @@ VARIANTS = [
         ),
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
-            "send_bitcoin with a valid (registry-resolved) recipient "
+            "manage_bitcoin with a valid (registry-resolved) recipient "
             "token but NO matching standing-approval rule. The "
             "registry resolves; the standing-approvals check fails "
             "(default-pause = empty config); the gateway HITL-parks "
@@ -806,9 +806,9 @@ VARIANTS = [
         ),
     },
     {
-        "path": ("submit", "send-bitcoin", "allowed-by-standing-approval"),
+        "path": ("submit", "manage-bitcoin", "allowed-by-standing-approval"),
         "petcli_args": [
-            "submit", "send-bitcoin",
+            "submit", "manage-bitcoin",
             "--to-token", _VALID_TOKEN,
             "--amount-sats", "1000",
         ],
@@ -816,7 +816,7 @@ VARIANTS = [
         "preconditions": [
             ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
             ("seed_standing_approvals", [
-                {"op": "send_bitcoin",
+                {"op": "manage_bitcoin",
                  "destination": _VALID_TOKEN,
                  "max_amount_sats": 50000,
                  "rationale": "exit-loop test rule"},
@@ -825,7 +825,7 @@ VARIANTS = [
         "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
-            "send_bitcoin where the registry token resolves AND a "
+            "manage_bitcoin where the registry token resolves AND a "
             "standing-approval rule matches (op + destination + amount "
             "under max). Both gates pass; the gateway enqueues the write "
             "on the timing layer and acknowledges with an opaque handle "
@@ -999,9 +999,9 @@ VARIANTS = [
     # approval rule to prove the mode gate wins over an otherwise-
     # allowable call.
     {
-        "path": ("advanced", "send-lightning", "refused-onchain-mode"),
+        "path": ("advanced", "manage-lightning", "refused-onchain-mode"),
         "petcli_args": [
-            "advanced", "send-lightning",
+            "advanced", "manage-lightning",
             "--to-token", _VALID_TOKEN,
             "--amount-msats", "1000000",
         ],
@@ -1009,7 +1009,7 @@ VARIANTS = [
         "preconditions": [
             ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
             ("seed_standing_approvals", [
-                {"op": "send_lightning",
+                {"op": "manage_lightning",
                  "destination": _VALID_TOKEN,
                  "max_amount_sats": 50000,
                  "rationale": "exit-loop test rule"},
@@ -1021,10 +1021,10 @@ VARIANTS = [
         ),
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
-            "send_lightning against an onchain (default) arbiter. The "
+            "manage_lightning against an onchain (default) arbiter. The "
             "registry token resolves and a standing-approval rule "
             "matches - in advanced mode this exact call dispatches "
-            "(advanced/send-lightning/allowed-by-standing-approval) - "
+            "(advanced/manage-lightning/allowed-by-standing-approval) - "
             "but the mode gate refuses first: the op belongs to the "
             "disabled Lightning extension. Wire shape is the standard "
             "uniform refusal; arbiter-events.log carries "
@@ -1173,9 +1173,9 @@ VARIANTS = [
         ),
     },
     {
-        "path": ("advanced", "send-lightning", "refused-unknown-token"),
+        "path": ("advanced", "manage-lightning", "refused-unknown-token"),
         "petcli_args": [
-            "advanced", "send-lightning",
+            "advanced", "manage-lightning",
             "--to-token", "ABCDEF",
             "--amount-msats", "1000",
         ],
@@ -1188,15 +1188,15 @@ VARIANTS = [
         ),
         "expected_audit_events": ["decision_refuse_registry"],
         "description": (
-            "Same registry-miss path as submit/send-bitcoin/refused-"
+            "Same registry-miss path as submit/manage-bitcoin/refused-"
             "unknown-token, but for the Lightning send op with the "
             "extension enabled. Audit logs decision_refuse_registry."
         ),
     },
     {
-        "path": ("advanced", "send-lightning", "parked-no-standing-approval"),
+        "path": ("advanced", "manage-lightning", "parked-no-standing-approval"),
         "petcli_args": [
-            "advanced", "send-lightning",
+            "advanced", "manage-lightning",
             "--to-token", _VALID_TOKEN,
             "--amount-msats", "1000000",
         ],
@@ -1211,7 +1211,7 @@ VARIANTS = [
         ),
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
-            "Same default-pause path as submit/send-bitcoin/parked-no-"
+            "Same default-pause path as submit/manage-bitcoin/parked-no-"
             "standing-approval but for the Lightning send op with the "
             "extension enabled. amount_msats=1_000_000 (= 1000 sats "
             "post-ceiling) is irrelevant here because no rule exists; "
@@ -1220,9 +1220,9 @@ VARIANTS = [
         ),
     },
     {
-        "path": ("advanced", "send-lightning", "allowed-by-standing-approval"),
+        "path": ("advanced", "manage-lightning", "allowed-by-standing-approval"),
         "petcli_args": [
-            "advanced", "send-lightning",
+            "advanced", "manage-lightning",
             "--to-token", _VALID_TOKEN,
             "--amount-msats", "1000000",
         ],
@@ -1231,7 +1231,7 @@ VARIANTS = [
         "preconditions": [
             ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
             ("seed_standing_approvals", [
-                {"op": "send_lightning",
+                {"op": "manage_lightning",
                  "destination": _VALID_TOKEN,
                  "max_amount_sats": 50000,
                  "rationale": "exit-loop test rule"},
@@ -1240,7 +1240,7 @@ VARIANTS = [
         "expected": _is_received_ack,
         "expected_audit_events": ["standing_approval_match", "decision_allow"],
         "description": (
-            "send_lightning analogue of submit/send-bitcoin/allowed-"
+            "manage_lightning analogue of submit/manage-bitcoin/allowed-"
             "by-standing-approval, with the extension enabled. "
             "amount_msats=1_000_000 rounds up to 1000 sats; "
             "max_amount_sats=50000 admits it. Both gates pass; the "
@@ -1927,12 +1927,12 @@ def _run_variant(variant):
 # acceptance bar: it drives the SAME executor the gateway enqueues to
 # against the real Mutinynet signet infra - the LND node and the mint -
 # and exercises all four write ops for real. The three round-trips
-# cover the four ops: an on-chain send (send_bitcoin), a Lightning pay
-# (send_lightning), and an eCash mint+melt (fund_ecash + defund_ecash).
+# cover the four ops: an on-chain send (manage_bitcoin), a Lightning pay
+# (manage_lightning), and an eCash mint+melt (fund_ecash + defund_ecash).
 # Each asserts a real executor result (sent / funded / defunded), never
 # a failure or the not_implemented stub.
 #
-# No bitcoind runs in this deployment, so send_bitcoin uses the LND
+# No bitcoind runs in this deployment, so manage_bitcoin uses the LND
 # on-chain wallet (lnd.sendcoins) under SPACER_MODE=ecash - the same
 # backend split query_balance already makes (gateway._dispatch). The
 # round-trips force-drain (now=far) past the action/result delay
@@ -1951,7 +1951,7 @@ def _live_env():
     the fake binaries the module installed at import. Each wrapper reads
     these per call, so setting them before driving the executor is
     enough. SPACER_MODE=ecash selects the LND on-chain wallet for
-    send_bitcoin and arms the eCash writes; SPACER_TIMING_MODE=test
+    manage_bitcoin and arms the eCash writes; SPACER_TIMING_MODE=test
     keeps the windows short and supplies the mint-boundary gaps. The
     longer timeouts cover live LN pathfinding / mint round-trips.
 
@@ -2085,25 +2085,25 @@ def run_live_roundtrips():
 
     oks = []
 
-    # --- round-trip 1: send_bitcoin (on-chain, LND wallet) ----------
+    # --- round-trip 1: manage_bitcoin (on-chain, LND wallet) ----------
     try:
         addr = _lncli_json("newaddress", "p2wkh")["address"]
         status, payload = _drive_executor(
-            "live_send_bitcoin", "send_bitcoin",
+            "live_manage_bitcoin", "manage_bitcoin",
             {"recipient_address": addr, "amount_sats": 2000}, far,
         )
         ok = status == "result" and payload.get("status") == "sent"
-        txid = _live_audit_field(live_dir, "send_bitcoin_executed", "txid")
-        print(f"{'PASS' if ok else 'FAIL'}  live/send_bitcoin  "
+        txid = _live_audit_field(live_dir, "manage_bitcoin_executed", "txid")
+        print(f"{'PASS' if ok else 'FAIL'}  live/manage_bitcoin  "
               f"(2000 sat on-chain -> {addr}; txid={txid})")
         if not ok:
             print(f"      -> result={payload}")
         oks.append(ok)
     except Exception as e:
-        print(f"FAIL  live/send_bitcoin  -> {e}")
+        print(f"FAIL  live/manage_bitcoin  -> {e}")
         oks.append(False)
 
-    # --- round-trip 2: send_lightning (pay a bolt11 over the channel)
+    # --- round-trip 2: manage_lightning (pay a bolt11 over the channel)
     # A fresh mint quote is a real, payable bolt11 that routes over our
     # one channel (us -> faucet -> mint), exercising lnd.payinvoice end
     # to end; we pay it without issuing proofs (the value parks at the
@@ -2111,20 +2111,20 @@ def run_live_roundtrips():
     try:
         bolt11, _qid = executor._parse_mint_quote(ecash.mint_quote(100))
         status, payload = _drive_executor(
-            "live_send_lightning", "send_lightning",
+            "live_manage_lightning", "manage_lightning",
             {"recipient_address": bolt11, "amount_sats": 100}, far,
         )
         ok = status == "result" and payload.get("status") == "sent"
         fee = _live_audit_field(
-            live_dir, "send_lightning_executed", "ln_routing_fee_msat"
+            live_dir, "manage_lightning_executed", "ln_routing_fee_msat"
         )
-        print(f"{'PASS' if ok else 'FAIL'}  live/send_lightning  "
+        print(f"{'PASS' if ok else 'FAIL'}  live/manage_lightning  "
               f"(100 sat; routing_fee_msat={fee})")
         if not ok:
             print(f"      -> result={payload}")
         oks.append(ok)
     except Exception as e:
-        print(f"FAIL  live/send_lightning  -> {e}")
+        print(f"FAIL  live/manage_lightning  -> {e}")
         oks.append(False)
 
     # --- round-trip 3: eCash fund 5000 -> AI hop -> defund ----------
@@ -2285,6 +2285,46 @@ def main(argv=None):
             failed.append((path_str, err))
             # Print error on its own line for readability.
             print(f"      -> {err}")
+
+    # The mint-contract gate (design doc 10 §3; impl companion §2):
+    # the build-time cashu CLI contract test under arbiter/ops/. Its
+    # parser fixtures run everywhere; the live layer (version pin +
+    # ephemeral loopback mint + settled/pending melt + DLEQ-at-
+    # receive) runs when the pinned nutshell CLI is installed and
+    # self-SKIPs otherwise, so this suite stays hermetic on mint-less
+    # checkouts while a checkout with the CLI cannot land green on a
+    # drifted or DLEQ-regressed nutshell. A subprocess, not an
+    # import: the contract test re-execs into the nutshell python and
+    # spawns a mint, none of which may perturb this runner's
+    # in-process arbiter (or its no-ecash-import bookkeeping).
+    checks_total += 1
+    gate_name = "mint-contract gate (build-time cashu CLI contract)"
+    contract_script = (
+        REPO_ROOT / "arbiter" / "ops" / "mint_contract_test.py"
+    )
+    try:
+        gate_proc = subprocess.run(
+            [sys.executable, str(contract_script)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        gate_ok = gate_proc.returncode == 0
+        gate_err = "" if gate_ok else " | ".join(
+            line for line in (
+                gate_proc.stdout + gate_proc.stderr
+            ).strip().splitlines()[-12:] if line.strip()
+        )
+    except subprocess.TimeoutExpired:
+        gate_ok = False
+        gate_err = "mint contract test timed out after 300s"
+    if gate_ok:
+        print(f"PASS  {gate_name}")
+        passed_paths.append(gate_name)
+    else:
+        print(f"FAIL  {gate_name}")
+        failed.append((gate_name, gate_err))
+        print(f"      -> {gate_err}")
 
     print()
     print(f"--- exit-loop summary ---")

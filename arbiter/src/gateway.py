@@ -8,11 +8,11 @@ _ecash_mode) along the rail ladder of design doc 07: Bitcoin on-chain
 Lightning):
 
 - onchain (default): Bitcoin on-chain is the primary surface. The read
-  is query_balance (bitcoind wallet); the write is send_bitcoin. The
+  is query_balance (bitcoind wallet); the write is manage_bitcoin. The
   gateway runs with NO LND dependency in this mode - lnd.py is never
   imported (see _lnd).
 - advanced (SPACER_MODE=lightning|full): the Lightning extension layers
-  query_channels (read) and send_lightning (write) back on, reading the
+  query_channels (read) and manage_lightning (write) back on, reading the
   LND node via arbiter/src/lnd.py.
 - ecash (SPACER_MODE=ecash): the eCash extension layers fund_ecash /
   defund_ecash (writes, doc 07 §3) on top of the full Lightning
@@ -420,17 +420,17 @@ _SATS_PER_BTC = 100_000_000
 # Outbound filters (hide-secrets / band / aggregate) still apply.
 _ONCHAIN_READ_OPS = frozenset({"query_balance"})
 
-# Write op exposed in onchain (default) mode. send_bitcoin resolves its
+# Write op exposed in onchain (default) mode. manage_bitcoin resolves its
 # recipient_token through the recipient address registry (§4.7), the
 # same WHO-gate every write passes. New onchain write ops added here
 # MUST also be handled in _dispatch and require a recipient_token.
-_ONCHAIN_WRITE_OPS = frozenset({"send_bitcoin"})
+_ONCHAIN_WRITE_OPS = frozenset({"manage_bitcoin"})
 
 # Ops the advanced Lightning extension layers back on. query_channels
-# (read) and send_lightning (write) require the LND module and node; in
+# (read) and manage_lightning (write) require the LND module and node; in
 # onchain mode they are gated (refused uniformly, decision_refuse_mode).
 _ADVANCED_READ_OPS = frozenset({"query_channels"})
-_ADVANCED_WRITE_OPS = frozenset({"send_lightning"})
+_ADVANCED_WRITE_OPS = frozenset({"manage_lightning"})
 
 # Ops the eCash extension layers on (ecash mode only; doc 07 §9).
 # These are writes WITHOUT a recipient_token - the destination is
@@ -498,7 +498,7 @@ def _request_amount_sats(request):
     """Pull the request's amount in satoshis for the standing-
     approvals gate.
 
-    send_bitcoin carries `amount_sats` directly. send_lightning
+    manage_bitcoin carries `amount_sats` directly. manage_lightning
     carries `amount_msats`; we round UP to sats so a max_amount_sats
     bound rejects a borderline request rather than slipping through
     on a sub-sat fraction. Returns None if neither field is present
@@ -612,11 +612,11 @@ def _ecash_action_params(op, request):
 
 def _registry_write_params(op, resolved):
     """The minimal params the executor needs for a registry-gated write
-    (send_bitcoin / send_lightning). Both carry the registry-resolved
-    real destination - a Bitcoin address for send_bitcoin, a bolt11 for
-    send_lightning (_pseudonymize_inbound wrote it into
+    (manage_bitcoin / manage_lightning). Both carry the registry-resolved
+    real destination - a Bitcoin address for manage_bitcoin, a bolt11 for
+    manage_lightning (_pseudonymize_inbound wrote it into
     recipient_address) - and the AI's declared amount in sats
-    (informational for send_lightning, whose bolt11 carries its own
+    (informational for manage_lightning, whose bolt11 carries its own
     amount). Only what the action requires reaches the timing queue, not
     the whole request."""
     return {

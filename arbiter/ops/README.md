@@ -1,9 +1,11 @@
 # arbiter/ops/
 
-Operational scaffolding for the deployed arbiter. Reference only;
-nothing here is active until the operator installs and enables it.
+Operational scaffolding for the deployed arbiter. The snapshot and
+audit pieces are reference-only until the operator installs them;
+the mint contract test is active in every build via the exit-loop
+suite.
 
-Two concerns live here:
+Three concerns live here:
 
 - **Continuous git snapshot** (this directory): the per-minute cron
   loop that commits the arbiter tree, plus reference deployment
@@ -12,6 +14,9 @@ Two concerns live here:
 - **Manual audit scripts** (`audit/`): operator-facing wrappers that
   translate the snapshot history into plain English. See §8 of the
   same design doc.
+- **Build-time mint contract test** (`mint_contract_test.py`): fails
+  the build when the cashu (nutshell) CLI drifts from the parse
+  contract the eCash rail depends on. See below.
 
 ## Files in this directory
 
@@ -22,6 +27,27 @@ Two concerns live here:
 | `snapshot.service` | Linux systemd service unit. Type=oneshot; paired with the timer. |
 | `snapshot.timer` | Linux systemd timer driving snapshot.service every minute. |
 | `audit/` | Manual audit scripts (`arb-today`, `arb-since`, ...). See `audit/README.md`. |
+| `mint_contract_test.py` | Build-time cashu CLI contract gate (design doc 10 §3). Run by the exit-loop suite. |
+
+## Build-time mint contract test
+
+Design doc 10 §3 requires that a cashu CLI output drift or a DLEQ
+verification regression fail the **build**, not the M1/M2 monitoring
+signals silently at runtime. `mint_contract_test.py` is that gate:
+it pins the CLI version to `../config/cashu-pin.yaml`, asserts the
+arbiter's melt-settlement parser against a settled AND a pending
+melt driven through the real CLI (the pending-exit-0 trap), and
+asserts a corrupted-DLEQ proof is rejected at receive. Mechanics,
+layers, and environment knobs are in the script's docstring.
+
+It runs on every exit-loop suite invocation
+(`test-harness/scripts/exit_loop_runner.py`). Checkouts without the
+pinned CLI installed run the parser-fixture layer and skip the live
+layer; an eCash deployment build sets `MINT_CONTRACT_REQUIRE_CLI=1`
+so a missing CLI is itself a failure. Bumping the nutshell version
+is therefore always a reviewed change: install the new CLI, update
+the pin, and let this test re-verify the parse contract before
+anything lands.
 
 ## First-deploy bootstrap
 

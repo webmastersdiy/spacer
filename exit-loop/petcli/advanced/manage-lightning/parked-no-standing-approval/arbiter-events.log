@@ -1,0 +1,4 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61915},"ts":"2026-07-07T03:54:45Z"}
+{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:45Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"KTCZKP"},"ts":"2026-07-07T03:54:45Z"}
+{"event":"decision_defer_hitl","payload":{"op":"manage_lightning","reason":"no_standing_approval"},"ts":"2026-07-07T03:54:45Z"}

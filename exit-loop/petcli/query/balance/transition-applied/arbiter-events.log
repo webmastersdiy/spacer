@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55335},"ts":"2026-06-18T20:11:45Z"}
-{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-06-18T20:11:45Z"}
-{"event":"scale_tier_shift_applied","payload":{"delta":-135000,"new_scale":0.1,"new_tier":1,"presented_after":15000,"presented_before":150000,"prev_scale":1.0,"prev_tier":0,"real_sats":150000},"ts":"2026-06-18T20:11:45Z"}
-{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-06-18T20:11:45Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61721},"ts":"2026-07-07T03:54:37Z"}
+{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-07-07T03:54:37Z"}
+{"event":"scale_tier_shift_applied","payload":{"delta":-135000,"new_scale":0.1,"new_tier":1,"presented_after":15000,"presented_before":150000,"prev_scale":1.0,"prev_tier":0,"real_sats":150000},"ts":"2026-07-07T03:54:37Z"}
+{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-07-07T03:54:37Z"}

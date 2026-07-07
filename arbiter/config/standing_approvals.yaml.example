@@ -1,7 +1,7 @@
 # Standing approvals: the WHAT gate.
 #
 # Read by arbiter/src/standing_approvals.py. The privacy gateway
-# checks every state-changing op (send_bitcoin, send_lightning,
+# checks every state-changing op (manage_bitcoin, manage_lightning,
 # fund_ecash, defund_ecash) against the rules below AFTER the
 # recipient address registry (§4.7) resolves the destination - or,
 # for the eCash ops, after the allowance gate (design doc 07 §8;
@@ -17,7 +17,7 @@
 # trust by adding them here.
 #
 # Schema:
-#   - op:                 send_bitcoin | send_lightning |
+#   - op:                 manage_bitcoin | manage_lightning |
 #                         fund_ecash | defund_ecash
 #     destination:        a registry token (5 Crockford-base32 + 1
 #                         Damm32 check char, e.g. ABCDE4); or the
@@ -68,7 +68,7 @@ approvals: []
 # Pre-approve small Lightning sends to one specific recipient:
 #
 # approvals:
-#   - op: send_lightning
+#   - op: manage_lightning
 #     destination: ABCDE4
 #     max_amount_sats: 5000
 #     rationale: Coffee shop, approved 2026-05-15 after 3 HITL reviews
@@ -77,12 +77,12 @@ approvals: []
 # The narrow rule is listed first because first-match wins:
 #
 # approvals:
-#   - op: send_bitcoin
+#   - op: manage_bitcoin
 #     destination: FGHJK7
 #     max_amount_sats: 100000
 #     rationale: Monthly rent UTXO, approved 2026-05-20
 #
-#   - op: send_lightning
+#   - op: manage_lightning
 #     destination: any
 #     max_amount_sats: 1000
 #     rationale: Sub-1k-sat test payments to any registered dest
