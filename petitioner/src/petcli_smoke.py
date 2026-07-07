@@ -53,16 +53,16 @@ def _expected_command_tree():
     without updating this map - the AI's discovery surface (`--help`
     walking) depends on these names."""
     return {
-        # Bitcoin on-chain is the primary surface: send-bitcoin and
+        # Bitcoin on-chain is the primary surface: manage-bitcoin and
         # balance sit at the top of the tree. The Lightning and eCash
         # commands live under `advanced` (the opt-in extension
         # namespace); the eCash leaves nest one level deeper and are
         # checked separately in main().
-        "submit": {"send-bitcoin"},
+        "submit": {"manage-bitcoin"},
         "query": {"balance"},
         "result": {"poll"},
         "estimate": {"window"},
-        "advanced": {"send-lightning", "channels", "ecash"},
+        "advanced": {"manage-lightning", "channels", "ecash"},
     }
 
 
@@ -126,9 +126,9 @@ def main():
     assert "submit" in out and "query" in out, out
 
     out = _capture_help(parser, ["submit", "--help"])
-    assert "send-bitcoin" in out, out
+    assert "manage-bitcoin" in out, out
 
-    out = _capture_help(parser, ["submit", "send-bitcoin", "--help"])
+    out = _capture_help(parser, ["submit", "manage-bitcoin", "--help"])
     assert "to-token" in out and "amount-sats" in out, out
 
     out = _capture_help(parser, ["query", "--help"])
@@ -137,9 +137,9 @@ def main():
     # The Lightning commands moved under the `advanced` extension
     # namespace; the group and its leaves must be discoverable there.
     out = _capture_help(parser, ["advanced", "--help"])
-    assert "send-lightning" in out and "channels" in out, out
+    assert "manage-lightning" in out and "channels" in out, out
 
-    out = _capture_help(parser, ["advanced", "send-lightning", "--help"])
+    out = _capture_help(parser, ["advanced", "manage-lightning", "--help"])
     assert "to-token" in out and "amount-msats" in out, out
 
     # The eCash extension namespace and its custody split must be
@@ -210,7 +210,7 @@ def main():
         common = ["--host", "127.0.0.1", "--port", str(bind_port), "--timeout-s", "5"]
 
         out = _capture_main(
-            ["submit", "send-bitcoin", "--to-token", "tok_X", "--amount-sats", "1000"]
+            ["submit", "manage-bitcoin", "--to-token", "tok_X", "--amount-sats", "1000"]
             + common
         ).strip()
         decoded = json.loads(out)
@@ -219,22 +219,22 @@ def main():
         # returned. The CLI flag is --to-token for operator brevity,
         # but the wire field is `recipient_token` per §4.7 / gateway
         # (petcli renames at the wire boundary in _do_submit_*).
-        assert decoded["op"] == "send_bitcoin", decoded
+        assert decoded["op"] == "manage_bitcoin", decoded
         assert decoded["recipient_token"] == "tok_X", decoded
         assert decoded["amount_sats"] == 1000, decoded
         assert "_petcli_estimate_window_s" in decoded, decoded
         assert captured_requests[-1] == {
-            "op": "send_bitcoin",
+            "op": "manage_bitcoin",
             "recipient_token": "tok_X",
             "amount_sats": 1000,
         }, captured_requests[-1]
 
         # Lightning send now lives under `advanced`; the wire op is
-        # still send_lightning (only the command path moved).
+        # still manage_lightning (only the command path moved).
         out = _capture_main(
             [
                 "advanced",
-                "send-lightning",
+                "manage-lightning",
                 "--to-token",
                 "tok_Y",
                 "--amount-msats",
@@ -243,7 +243,7 @@ def main():
             + common
         ).strip()
         decoded = json.loads(out)
-        assert decoded["op"] == "send_lightning", decoded
+        assert decoded["op"] == "manage_lightning", decoded
         assert decoded["amount_msats"] == 12345, decoded
         assert "_petcli_estimate_window_s" in decoded, decoded
 

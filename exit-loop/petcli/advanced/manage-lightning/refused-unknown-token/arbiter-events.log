@@ -1,0 +1,4 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61895},"ts":"2026-07-07T03:54:44Z"}
+{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:44Z"}
+{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-07-07T03:54:44Z"}
+{"event":"decision_refuse_registry","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:44Z"}
