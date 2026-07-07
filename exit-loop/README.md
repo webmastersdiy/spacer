@@ -12,8 +12,8 @@ end-to-end against the current arbiter; an absent or empty one signals
 not-yet-validated.
 
 Variants currently absent from the manifest correspond to code paths
-that are not yet reachable end-to-end (happy-path send-bitcoin /
-send-lightning / fund-ecash / defund-ecash, registry-rejection
+that are not yet reachable end-to-end (happy-path manage-bitcoin /
+manage-lightning / fund-ecash / defund-ecash, registry-rejection
 subcases beyond the bare miss). They will be added once the
 timing-layer executor wires the arbiter's send pipeline through to
 bitcoin.py / lnd.py / ecash.py; the runner can already seed registry
@@ -25,13 +25,13 @@ recognized ops, and the exposed set depends on the deployment mode
 (`SPACER_MODE`; onchain is the default) along the design doc 07 rail
 ladder: query_balance (known read - the bitcoind wallet in onchain
 mode, the LND wallet under the advanced Lightning extension AND in
-ecash mode), send_bitcoin (known write - the recipient_token
+ecash mode), manage_bitcoin (known write - the recipient_token
 resolves through the recipient address registry per §4.7, miss =
 uniform refusal, then the
 [standing approvals](../GLOSSARY.md#standing-approvals) gate decides
 default-pause vs dispatch), poll (the result-registry fast path),
 under `SPACER_MODE=lightning|full` the Lightning ops query_channels
-/ send_lightning, and under `SPACER_MODE=ecash` the full ladder plus
+/ manage_lightning, and under `SPACER_MODE=ecash` the full ladder plus
 the eCash writes fund_ecash / defund_ecash (no recipient_token - the
 destination is structurally the pinned mint - so the pipeline is the
 [allowance](../GLOSSARY.md#ecash-allowance) cap on fund, then
@@ -42,10 +42,15 @@ and lightning/full modes - `full` is frozen at onchain+lightning and
 never silently arms ecash). `arbiter/src/lnd.py` is never imported
 in onchain mode and `arbiter/src/ecash.py` is never imported outside
 ecash mode; the runner asserts all of it via the no-lnd-import and
-no-ecash-import gates. Unknown ops HITL-park.
+no-ecash-import gates. Unknown ops HITL-park. The runner also runs
+the build-time mint-contract gate (`arbiter/ops/mint_contract_test.py`,
+design doc 10 §3) as a subprocess: the cashu CLI version pin plus the
+melt-settlement and DLEQ-at-receive parse contracts, live against an
+ephemeral loopback mint when the pinned CLI is installed, parser
+fixtures alone otherwise. It leaves no artifacts under `petcli/`.
 
 Artifact paths mirror the petcli command tree: Bitcoin on-chain
-commands are the primary surface (`submit/send-bitcoin`,
+commands are the primary surface (`submit/manage-bitcoin`,
 `query/balance`) and the Lightning and eCash commands live under the
 opt-in `advanced` namespace, so their artifacts live under
 `petcli/advanced/`. Read-only queries are validated end-to-end via
