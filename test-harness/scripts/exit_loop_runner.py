@@ -2286,6 +2286,46 @@ def main(argv=None):
             # Print error on its own line for readability.
             print(f"      -> {err}")
 
+    # The mint-contract gate (design doc 10 §3; impl companion §2):
+    # the build-time cashu CLI contract test under arbiter/ops/. Its
+    # parser fixtures run everywhere; the live layer (version pin +
+    # ephemeral loopback mint + settled/pending melt + DLEQ-at-
+    # receive) runs when the pinned nutshell CLI is installed and
+    # self-SKIPs otherwise, so this suite stays hermetic on mint-less
+    # checkouts while a checkout with the CLI cannot land green on a
+    # drifted or DLEQ-regressed nutshell. A subprocess, not an
+    # import: the contract test re-execs into the nutshell python and
+    # spawns a mint, none of which may perturb this runner's
+    # in-process arbiter (or its no-ecash-import bookkeeping).
+    checks_total += 1
+    gate_name = "mint-contract gate (build-time cashu CLI contract)"
+    contract_script = (
+        REPO_ROOT / "arbiter" / "ops" / "mint_contract_test.py"
+    )
+    try:
+        gate_proc = subprocess.run(
+            [sys.executable, str(contract_script)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        gate_ok = gate_proc.returncode == 0
+        gate_err = "" if gate_ok else " | ".join(
+            line for line in (
+                gate_proc.stdout + gate_proc.stderr
+            ).strip().splitlines()[-12:] if line.strip()
+        )
+    except subprocess.TimeoutExpired:
+        gate_ok = False
+        gate_err = "mint contract test timed out after 300s"
+    if gate_ok:
+        print(f"PASS  {gate_name}")
+        passed_paths.append(gate_name)
+    else:
+        print(f"FAIL  {gate_name}")
+        failed.append((gate_name, gate_err))
+        print(f"      -> {gate_err}")
+
     print()
     print(f"--- exit-loop summary ---")
     print(f"passed: {len(passed_paths)}/{checks_total}")

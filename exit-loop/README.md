@@ -42,7 +42,12 @@ and lightning/full modes - `full` is frozen at onchain+lightning and
 never silently arms ecash). `arbiter/src/lnd.py` is never imported
 in onchain mode and `arbiter/src/ecash.py` is never imported outside
 ecash mode; the runner asserts all of it via the no-lnd-import and
-no-ecash-import gates. Unknown ops HITL-park.
+no-ecash-import gates. Unknown ops HITL-park. The runner also runs
+the build-time mint-contract gate (`arbiter/ops/mint_contract_test.py`,
+design doc 10 §3) as a subprocess: the cashu CLI version pin plus the
+melt-settlement and DLEQ-at-receive parse contracts, live against an
+ephemeral loopback mint when the pinned CLI is installed, parser
+fixtures alone otherwise. It leaves no artifacts under `petcli/`.
 
 Artifact paths mirror the petcli command tree: Bitcoin on-chain
 commands are the primary surface (`submit/manage-bitcoin`,
