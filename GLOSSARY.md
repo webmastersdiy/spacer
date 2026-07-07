@@ -411,6 +411,24 @@ holding the money. Reference implementation: nutshell (Python mint
 and CLI wallet). See the eCash extension design doc
 (`design-docs/origin/07--2026-06-12-0916-ecash-extension.md`).
 
+### Melt
+
+The [Cashu](#chaumian-ecash-cashu) operation that redeems eCash
+proofs back to Lightning sats - the reverse of [Mint](#mint). The
+wallet presents its proofs to the mint; the mint burns them and pays
+out a [bolt11](#bolt11-encodes-destination) Lightning invoice. In
+spacer, melt is the execution leg of `defund_ecash` (eCash float ->
+the operator's own LND node). It is the **only** op whose bolt11
+names our LND node to the mint (design doc 07 §5.1) - the metadata
+leak and the one targeted-censorship vector (the proofs themselves
+are unlinkable by blinding, so the mint cannot censor a holder
+through the tokens) - so defunds are kept infrequent, amount- and
+window-randomized (doc 07 §6 T4). A melt that does not truly settle
+(`cashu pay` can exit 0 on a still-*pending* payment) is monitoring
+signal **M1** in the mint-monitoring design (doc 10): the shared
+rug / insolvency / targeted-censorship indicator. Counterpart:
+[Mint](#mint).
+
 ### Mint
 
 The external party that backs [Cashu eCash](#chaumian-ecash-cashu):
@@ -510,12 +528,26 @@ across wallets and across shifts.
 
 ### Recipient address registry
 
-The destination universe for state-changing calls. The arbiter holds
-a hand-curated list of physical destinations (Bitcoin addresses, LN
-node pubkeys, BOLT-11 / BOLT-12 invoices) the operator has approved
-as send targets; the petitioner never sees the real destinations,
-only opaque single-use tokens that resolve back to them inside the
-arbiter.
+The allowlist of **operator-owned internal endpoints** for
+state-changing BTC/LN calls. The arbiter holds a hand-curated list of
+**operator-owned output descriptors / extended public keys** (xpub +
+script type + derivation path) - **never raw addresses**, so the
+arbiter derives a *fresh unused address per send* and never reuses one
+(see *Fresh-address derivation* below) - all **operator-controlled**
+(the operator's own wallets / nodes) that a `manage_bitcoin` /
+`manage_lightning` call may target. **External recipients are not a possibility:** BTC/LN make no
+external payments (any external payee that can see a UTXO is inside
+the adversary's observability set, which would break UTXO privacy), so
+all external value movement is eCash-only (the external-value reframe;
+see the foundational-posture doc and the eCash extension doc). The
+registry's role is therefore *internal fund management* - it bounds
+the AI to moving value only among the operator's own endpoints - not
+gating external sends. The petitioner never sees a descriptor or any
+derived address - only an opaque single-use token naming the receiver
+identity, which resolves inside the arbiter. (History: this list
+previously modeled approved *external*
+send targets; the 2026-06-27 external-value reframe recast it as the
+operator-owned-internal allowlist.)
 
 **Storage substrate.** A YAML file at a known path on the arbiter,
 hand-edited by the operator at the directly-attached console. The
@@ -524,15 +556,49 @@ overview §2.1); adding a destination, retiring one, or auditing
 what is in the universe should be one open-file / edit / save
 round-trip, not a tool invocation against a SQL schema. The
 registry module reads the YAML; the operator owns the file.
-(Migration note: as of this writing the registry is backed by a
-SQLite table in arbiter local state; the YAML migration is the
-next milestone in this chain.)
+(Landed: `arbiter/config/destinations.yaml`, stdlib-parsed;
+bl-2lbqu4.)
 
 **Entry shape.** Each entry has a local-only numeric id (for
 operator notes), a public-facing token the petitioner sees, the
-real destination, a format tag, a created_at / expires_at pair
-(default 7-day expiry), and a used / consumed_by pair tracking
-one-time-use.
+operator-owned **output descriptor** (xpub + script type +
+derivation path), a per-descriptor **next-derivation index** and
+gap-limit (the no-reuse / no-gaps bookkeeping), a created_at /
+expires_at pair (default 7-day expiry), and a used / consumed_by
+pair tracking one-time-use.
+
+**Fresh-address derivation (no reuse).** The registry holds
+*descriptors, not addresses*, so address reuse - which would erode
+on-chain and UTXO privacy - is structurally avoided. On each internal
+`manage_bitcoin` the arbiter derives the **next unused address** from
+the registered descriptor by standard BIP32 HD derivation (advancing
+the entry's next-index; the gap-limit guards against derivation racing
+ahead of the operator's watching wallet). Three properties follow:
+(1) **no-redirect** - every derived address provably belongs to the
+operator's descriptor (only the operator holds the matching private
+keys), so the AI cannot point a send at itself or a third party;
+(2) **operator-verifiability** - the operator can deterministically
+check that any derived address belongs to their descriptor, so the
+derivation is auditable from the console; (3) **AI-free and
+address-blind** - registering the descriptor and deriving each address
+both happen without the AI, which never supplies, generates, or sees a
+raw address, reinforcing endpoint privacy (the PET never observes a
+UTXO or address). *Lightning analog (the lighter case):* LN invoices
+are already single-use and fresh, so an internal LN target is the
+operator's own node issuing a fresh invoice per transfer; no
+descriptor derivation is needed.
+
+*Doc-vs-code gap:* the descriptor entry shape and fresh-address
+derivation above are the **target design** of the recast;
+`arbiter/src/registry.py` still stores plain destination addresses.
+The code recast is the tracked follow-up **sp-pj3** (the sequel to
+sp-3mm, which closed the op-naming half of the reframe). The
+no-mainnet add-time check moves with it: with no address to inspect
+at add time, the gate becomes refusing mainnet-prefixed extended
+keys at registration (`xpub`/`zpub`; testnet/signet serialize as
+`tpub`/`vpub`), plus an HRP re-check of each derived address at
+derive time - in sp-pj3's scope, so the gate cannot silently fall
+out of the descriptor design.
 
 **Token format.** 5 random Crockford-base32 characters plus 1
 Damm32 check character. Crockford-base32 omits visually ambiguous
@@ -540,14 +606,18 @@ glyphs (no I, L, O, U); operator-typed I or L normalize to 1 and O
 to 0 before validation. Damm32 catches every single-character
 mutation and every adjacent transposition of distinct characters.
 
-**Destination gate (who).** The registry gates *who* can be a
-destination. A state-changing call carries a `recipient_token`;
-the privacy gateway calls `registry.lookup()` during
-pseudonymize-inbound; any outcome other than `ok` (bad checksum,
-unknown, expired, already used, anomalous) collapses to the
-uniform "destination unavailable" refusal. The audit log
-differentiates the cause for operator triage. *Which* actions to a
-resolved destination flow through without a HITL pause is a
+**Internal-endpoint gate (who).** The registry gates that a BTC/LN
+send targets *only an operator-owned internal endpoint*. A
+state-changing call carries a `recipient_token`; the privacy gateway
+calls `registry.lookup()` during pseudonymize-inbound; any outcome
+other than `ok` (bad checksum, unknown, expired, already used,
+anomalous) collapses to the uniform "destination unavailable"
+refusal. Because every valid token resolves to an operator-owned
+endpoint, a non-`ok` result means the AI tried to send off the
+operator's allowlist - which, post-reframe, is the only way it could
+attempt an external recipient, and is refused like any other miss.
+The audit log differentiates the cause for operator triage. *Which*
+actions to a resolved endpoint flow through without a HITL pause is a
 separate gate - see [standing approvals](#standing-approvals).
 
 **Probing infeasibility.** An AI cannot map the destination
