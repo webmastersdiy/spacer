@@ -165,7 +165,9 @@ operator-owned endpoints; (4) **RENAME them to a `manage_*` family** - `manage_b
 `manage_lightning` (decision #4 **reversed** 2026-06-28, mail bl-wisp-5dqzs; the earlier "keep the
 names" call is superseded - the rename makes internal-only explicit and keeps "send"/concerning
 wording calibrated). Applied to docs 01/03/05/07/08 + the GLOSSARY in PR #6; the **code** rename
-(executor / gateway routing / petcli / exit-loop scenario names) is the tracked follow-up **sp-3mm**.
+**landed on main as sp-3mm** - executor / gateway routing / petcli commands (`submit
+manage-bitcoin`, `advanced manage-lightning`) and the exit-loop tree are `manage_*` throughout, so
+there is no doc-vs-code naming gap left.
 
 The original questions, kept as the record of what was decided:
 
