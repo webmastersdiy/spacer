@@ -30,7 +30,7 @@ never override).
 | 09 | Dynamic timing window (authority: the window algorithm; floors stay doc 07 §7's) |
 | 10 | eCash mint monitoring + rotation (authority: monitoring + rotation only; mechanics in `../implementation/00--...`) |
 | 11 | Cross-rail fee accounting - the operator-only cost ledger (authority: operator-facing fees; AI-facing fee banding stays docs 01/03) |
-| 12 | Foundational privacy posture: internal-only BTC/LN, eCash-only external value (PR open as of 2026-07-07) |
+| 12 | Foundational privacy posture: internal-only BTC/LN, eCash-only external value - the two guardrails (G1/G2) and the eCash exception |
 | 13 | Operator-visibility TUI: the two-column console (PR open as of 2026-07-07) |
 | 14 | LN availability probing + autonomous channel management (PR open as of 2026-07-07) |
 
