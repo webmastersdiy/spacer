@@ -563,9 +563,8 @@ overview §2.1); adding a destination, retiring one, or auditing
 what is in the universe should be one open-file / edit / save
 round-trip, not a tool invocation against a SQL schema. The
 registry module reads the YAML; the operator owns the file.
-(Migration note: as of this writing the registry is backed by a
-SQLite table in arbiter local state; the YAML migration is the
-next milestone in this chain.)
+(Landed: `arbiter/config/destinations.yaml`, stdlib-parsed;
+bl-2lbqu4.)
 
 **Entry shape.** Each entry has a local-only numeric id (for
 operator notes), a public-facing token the petitioner sees, the
@@ -595,6 +594,12 @@ UTXO or address). *Lightning analog (the lighter case):* LN invoices
 are already single-use and fresh, so an internal LN target is the
 operator's own node issuing a fresh invoice per transfer; no
 descriptor derivation is needed.
+
+*Doc-vs-code gap:* the descriptor entry shape and fresh-address
+derivation above are the **target design** of the recast;
+`arbiter/src/registry.py` still stores plain destination addresses.
+The code recast is the tracked follow-up **sp-pj3** (the sequel to
+sp-3mm, which closed the op-naming half of the reframe).
 
 **Token format.** 5 random Crockford-base32 characters plus 1
 Damm32 check character. Crockford-base32 omits visually ambiguous
