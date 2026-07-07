@@ -27,8 +27,10 @@ on top of the one below it:
 | `lightning` | + LND | internal management |
 | `ecash` | + Cashu mint | the sole external-value rail |
 
-**No mainnet, ever.** Everything runs signet / Mutinynet / test-mint;
-the registry refuses mainnet addresses at add time.
+**No mainnet yet.** Spacer is developed and live-tested entirely on
+signet / Mutinynet / test-mint, and the registry refuses mainnet
+addresses at add time - a development-phase gate, lifted only by a
+deliberate future decision.
 
 ## Repository map
 
