@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":57200},"ts":"2026-06-18T20:12:05Z"}
-{"event":"request_received","payload":{"op":"fund_ecash"},"ts":"2026-06-18T20:12:05Z"}
-{"event":"standing_approval_match","payload":{"op":"fund_ecash","rationale":"exit-loop test rule"},"ts":"2026-06-18T20:12:05Z"}
-{"event":"decision_allow","payload":{"op":"fund_ecash"},"ts":"2026-06-18T20:12:05Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":62044},"ts":"2026-07-07T03:54:52Z"}
+{"event":"request_received","payload":{"op":"fund_ecash"},"ts":"2026-07-07T03:54:52Z"}
+{"event":"standing_approval_match","payload":{"op":"fund_ecash","rationale":"exit-loop test rule"},"ts":"2026-07-07T03:54:52Z"}
+{"event":"decision_allow","payload":{"op":"fund_ecash"},"ts":"2026-07-07T03:54:52Z"}

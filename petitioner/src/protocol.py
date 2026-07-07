@@ -122,14 +122,14 @@ if __name__ == "__main__":
 
         # Param-bearing request: arbitrary fields merged into the body.
         r = submit(
-            "send_bitcoin",
+            "manage_bitcoin",
             params={"to_token": "abc", "amount_sats": 1000},
             host="127.0.0.1",
             port=bind_port,
             timeout_s=5,
         )
         assert r == {
-            "op": "send_bitcoin",
+            "op": "manage_bitcoin",
             "to_token": "abc",
             "amount_sats": 1000,
         }, r

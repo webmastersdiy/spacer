@@ -10,8 +10,8 @@ pending_results).
 
 Scope (sp-uwa0v0): all four gateway write ops drain their real
 backend through one _HANDLERS table - the eCash writes fund_ecash /
-defund_ecash (doc 07 §3) plus the happy-path sends send_bitcoin
-(on-chain) and send_lightning (LN pay). This is the shared
+defund_ecash (doc 07 §3) plus the happy-path sends manage_bitcoin
+(on-chain) and manage_lightning (LN pay). This is the shared
 timing-layer executor the design always intended ("the same
 timing-layer executor that gates the other happy-path sends",
 doc 07 §9). No write op terminates at a not_implemented stub any
@@ -52,8 +52,8 @@ Lazy backend imports. bitcoin.py / lnd.py / ecash.py are imported
 INSIDE the handlers, never at module top, so importing this module at
 boot pulls in none of bitcoin-cli / lncli / nutshell. A handler
 imports only the backend its op needs, and only when the op is drained:
-send_bitcoin imports lnd.py in a Lightning/eCash deployment and
-bitcoin.py in the onchain default; send_lightning and the eCash writes
+manage_bitcoin imports lnd.py in a Lightning/eCash deployment and
+bitcoin.py in the onchain default; manage_lightning and the eCash writes
 import only what their (Lightning / eCash) mode already implies. An
 onchain deployment thus never imports lnd.py or ecash.py, and a
 lightning deployment never imports ecash.py - preserving the exit
@@ -83,7 +83,7 @@ import timing
 
 # Satoshis per bitcoin. bitcoin.sendtoaddress takes a BTC decimal
 # string, never a float (float -> str loses sat precision); the
-# send_bitcoin handler converts the AI's integer-sat amount with
+# manage_bitcoin handler converts the AI's integer-sat amount with
 # _btc_str() using exact integer arithmetic.
 _SATS_PER_BTC = 100_000_000
 
@@ -385,7 +385,7 @@ def _advanced_mode():
     Read from the environment here rather than imported from gateway so
     the executor stays decoupled from the request path, mirroring how
     timing.py / scale.py each read their own mode env var. It selects
-    the on-chain backend for send_bitcoin: the LND on-chain wallet when
+    the on-chain backend for manage_bitcoin: the LND on-chain wallet when
     a Lightning extension is present (the only on-chain wallet such a
     deployment runs), bitcoind in the onchain default - the same split
     query_balance makes in gateway._dispatch."""
@@ -396,8 +396,8 @@ def _advanced_mode():
     )
 
 
-def _execute_send_bitcoin(handle, params):
-    """send_bitcoin (doc 05 §4.6): broadcast an on-chain payment to the
+def _execute_manage_bitcoin(handle, params):
+    """manage_bitcoin (doc 05 §4.6): broadcast an on-chain payment to the
     registry-resolved recipient address once the action-delay window has
     elapsed.
 
@@ -422,14 +422,14 @@ def _execute_send_bitcoin(handle, params):
         import bitcoin
         txid = bitcoin.sendtoaddress(address, _btc_str(amount_sats))
     audit.record(
-        "send_bitcoin_executed",
+        "manage_bitcoin_executed",
         {"handle": handle, "amount_sats": amount_sats, "txid": txid},
     )
     return {"status": "sent", "amount_sats": amount_sats}
 
 
-def _execute_send_lightning(handle, params):
-    """send_lightning (doc 05 §4.6): pay the registry-resolved bolt11
+def _execute_manage_lightning(handle, params):
+    """manage_lightning (doc 05 §4.6): pay the registry-resolved bolt11
     over our LND node once the action-delay window has elapsed. An
     extension op, so this path only runs with the LND module present.
 
@@ -449,7 +449,7 @@ def _execute_send_lightning(handle, params):
     if status not in ("SUCCEEDED", "SUCCESS"):
         raise lnd.LndError(f"lightning payment not successful: {status!r}")
     audit.record(
-        "send_lightning_executed",
+        "manage_lightning_executed",
         {
             "handle": handle,
             "amount_sats": amount_sats,
@@ -468,8 +468,8 @@ def _execute_send_lightning(handle, params):
 # happen because the gateway HITL-parks an unknown op rather than
 # enqueueing it - the not_implemented stub is gone from the write path.
 _HANDLERS = {
-    "send_bitcoin": _execute_send_bitcoin,
-    "send_lightning": _execute_send_lightning,
+    "manage_bitcoin": _execute_manage_bitcoin,
+    "manage_lightning": _execute_manage_lightning,
     "fund_ecash": _execute_fund_ecash,
     "defund_ecash": _execute_defund_ecash,
 }
@@ -649,8 +649,8 @@ esac
     fake_cashu.chmod(0o755)
 
     # Fake lncli: payinvoice succeeds; addinvoice returns a bolt11;
-    # sendcoins returns a 64-hex txid (the advanced-mode send_bitcoin
-    # backend and the send_lightning backend).
+    # sendcoins returns a 64-hex txid (the advanced-mode manage_bitcoin
+    # backend and the manage_lightning backend).
     fake_lncli = work / "lncli"
     fake_lncli.write_text(
         """#!/bin/sh
@@ -668,7 +668,7 @@ esac
     fake_lncli.chmod(0o755)
 
     # Fake bitcoin-cli: sendtoaddress echoes a 64-hex txid (the onchain
-    # send_bitcoin backend, used when SPACER_MODE is unset).
+    # manage_bitcoin backend, used when SPACER_MODE is unset).
     fake_bitcoin = work / "bitcoin-cli"
     fake_bitcoin.write_text(
         """#!/bin/sh
@@ -690,7 +690,7 @@ esac
     os.environ["BITCOIN_CLI_BIN"] = str(fake_bitcoin)
     os.environ["BITCOIN_DATADIR"] = str(work)
     os.environ["BITCOIN_CLI_TIMEOUT_S"] = "5"
-    # send_bitcoin's backend is mode-selected; default to onchain
+    # manage_bitcoin's backend is mode-selected; default to onchain
     # (bitcoind) and flip to advanced (LND) in the relevant sub-test.
     os.environ.pop("SPACER_MODE", None)
 
@@ -770,12 +770,12 @@ esac
         # A failed defund does NOT move the ledger (doc 07 §3).
         assert ecash.outstanding_sats() == 0, ecash.outstanding_sats()
 
-        # --- send_lightning: pay a bolt11 over LND (fake payinvoice) -
+        # --- manage_lightning: pay a bolt11 over LND (fake payinvoice) -
         # recipient_address IS the resolved bolt11; amount_sats is the
         # AI's declared figure, surfaced back unchanged.
-        h_ln = "handle_send_lightning"
+        h_ln = "handle_manage_lightning"
         timing.enqueue_action(
-            h_ln, "send_lightning",
+            h_ln, "manage_lightning",
             {"recipient_address": "lntbs10n1pfakesendinvoice", "amount_sats": 1000},
         )
         assert execute_due_actions(now=far) == 1
@@ -784,13 +784,13 @@ esac
         assert status == "result", status
         assert payload == {"status": "sent", "amount_sats": 1000}, payload
 
-        # --- send_bitcoin, onchain default -> bitcoin.py ------------
+        # --- manage_bitcoin, onchain default -> bitcoin.py ------------
         # SPACER_MODE unset -> _advanced_mode() False -> bitcoind. The
         # amount is converted to a BTC decimal string by _btc_str.
         os.environ.pop("SPACER_MODE", None)
-        h_btc = "handle_send_bitcoin_onchain"
+        h_btc = "handle_manage_bitcoin_onchain"
         timing.enqueue_action(
-            h_btc, "send_bitcoin",
+            h_btc, "manage_bitcoin",
             {"recipient_address": "tb1qexampleonchain", "amount_sats": 2000},
         )
         assert execute_due_actions(now=far) == 1
@@ -799,13 +799,13 @@ esac
         assert status == "result", status
         assert payload == {"status": "sent", "amount_sats": 2000}, payload
 
-        # --- send_bitcoin, advanced mode -> LND on-chain wallet ----
+        # --- manage_bitcoin, advanced mode -> LND on-chain wallet ----
         # SPACER_MODE=ecash -> _advanced_mode() True -> lnd.sendcoins,
         # the same backend the live signet round-trip exercises.
         os.environ["SPACER_MODE"] = "ecash"
-        h_btc2 = "handle_send_bitcoin_lnd"
+        h_btc2 = "handle_manage_bitcoin_lnd"
         timing.enqueue_action(
-            h_btc2, "send_bitcoin",
+            h_btc2, "manage_bitcoin",
             {"recipient_address": "tb1qexamplelnd", "amount_sats": 3000},
         )
         assert execute_due_actions(now=far) == 1
@@ -837,8 +837,8 @@ esac
             "ecash_defund_executed",
             "ecash_ledger_fund",
             "ecash_ledger_defund",
-            "send_bitcoin_executed",    # onchain + LND send sub-tests
-            "send_lightning_executed",  # the LN pay sub-test
+            "manage_bitcoin_executed",    # onchain + LND send sub-tests
+            "manage_lightning_executed",  # the LN pay sub-test
             "executor_action_failed",  # the foreign-mint refusal
             "executor_no_handler",     # the unknown op
         ):

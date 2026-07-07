@@ -19,7 +19,7 @@ Schema (closes the §7 'Standing approvals YAML schema' open
 question):
 
   approvals:
-    - op: send_bitcoin             # required: send_bitcoin, send_lightning,
+    - op: manage_bitcoin           # required: manage_bitcoin, manage_lightning,
                                    #           fund_ecash, or defund_ecash
       destination: ABCDE4          # required: a registry token, or 'any';
                                    #           for the eCash ops write 'mint'
@@ -64,7 +64,7 @@ def _config_path():
 def matches(op, destination, amount_sats):
     """Return True iff some rule in the config matches.
 
-    `op` is the wire op string (e.g., "send_bitcoin").
+    `op` is the wire op string (e.g., "manage_bitcoin").
     `destination` is the resolved recipient token (post-registry),
     or the structural constant "mint" for the eCash ops (their
     destination is the operator-pinned mint, not a registry entry;
@@ -292,58 +292,58 @@ if __name__ == "__main__":
     os.environ["SPACER_STANDING_APPROVALS_PATH"] = str(tmp)
 
     # Missing file = no rule matches; nothing crashes.
-    assert matches("send_bitcoin", "ABCDE4", 1000) is False, "missing file should match nothing"
+    assert matches("manage_bitcoin", "ABCDE4", 1000) is False, "missing file should match nothing"
 
     # Empty file = no rule matches.
     tmp.write_text(render_yaml([]))
-    assert matches("send_bitcoin", "ABCDE4", 1000) is False, "empty rules should match nothing"
+    assert matches("manage_bitcoin", "ABCDE4", 1000) is False, "empty rules should match nothing"
 
     # One exact-token rule.
     rules = [
-        {"op": "send_bitcoin", "destination": "ABCDE4",
+        {"op": "manage_bitcoin", "destination": "ABCDE4",
          "max_amount_sats": 5000, "rationale": "test"},
     ]
     tmp.write_text(render_yaml(rules))
-    assert matches("send_bitcoin", "ABCDE4", 1000) is True, "in-bounds amount should match"
-    assert matches("send_bitcoin", "ABCDE4", 5000) is True, "at-bound amount should match (inclusive)"
-    assert matches("send_bitcoin", "ABCDE4", 5001) is False, "over-bound amount should NOT match"
-    assert matches("send_bitcoin", "OTHER1", 1000) is False, "wrong token should NOT match"
-    assert matches("send_lightning", "ABCDE4", 1000) is False, "wrong op should NOT match"
-    assert matches("send_bitcoin", "ABCDE4", None) is False, "unknown amount fails a bounded rule"
+    assert matches("manage_bitcoin", "ABCDE4", 1000) is True, "in-bounds amount should match"
+    assert matches("manage_bitcoin", "ABCDE4", 5000) is True, "at-bound amount should match (inclusive)"
+    assert matches("manage_bitcoin", "ABCDE4", 5001) is False, "over-bound amount should NOT match"
+    assert matches("manage_bitcoin", "OTHER1", 1000) is False, "wrong token should NOT match"
+    assert matches("manage_lightning", "ABCDE4", 1000) is False, "wrong op should NOT match"
+    assert matches("manage_bitcoin", "ABCDE4", None) is False, "unknown amount fails a bounded rule"
 
     # 'any' destination matches every token.
     rules = [
-        {"op": "send_lightning", "destination": "any",
+        {"op": "manage_lightning", "destination": "any",
          "max_amount_sats": 1000, "rationale": "tiny LN any-dest"},
     ]
     tmp.write_text(render_yaml(rules))
-    assert matches("send_lightning", "WHATEV", 1000) is True
-    assert matches("send_lightning", "WHATEV", 1001) is False
+    assert matches("manage_lightning", "WHATEV", 1000) is True
+    assert matches("manage_lightning", "WHATEV", 1001) is False
 
     # No max_amount_sats = any amount passes.
-    rules = [{"op": "send_bitcoin", "destination": "ABCDE4", "rationale": "no bound"}]
+    rules = [{"op": "manage_bitcoin", "destination": "ABCDE4", "rationale": "no bound"}]
     tmp.write_text(render_yaml(rules))
-    assert matches("send_bitcoin", "ABCDE4", 10**12) is True, "unbounded rule matches any amount"
-    assert matches("send_bitcoin", "ABCDE4", None) is True, "unbounded rule matches unknown amount"
+    assert matches("manage_bitcoin", "ABCDE4", 10**12) is True, "unbounded rule matches any amount"
+    assert matches("manage_bitcoin", "ABCDE4", None) is True, "unbounded rule matches unknown amount"
 
     # First match wins: put a narrow rule above a broad one; broad
     # one shouldn't be consulted when narrow matches.
     rules = [
-        {"op": "send_bitcoin", "destination": "ABCDE4", "max_amount_sats": 100, "rationale": "narrow"},
-        {"op": "send_bitcoin", "destination": "any", "max_amount_sats": 10**9, "rationale": "broad"},
+        {"op": "manage_bitcoin", "destination": "ABCDE4", "max_amount_sats": 100, "rationale": "narrow"},
+        {"op": "manage_bitcoin", "destination": "any", "max_amount_sats": 10**9, "rationale": "broad"},
     ]
     tmp.write_text(render_yaml(rules))
-    assert matches("send_bitcoin", "ABCDE4", 50) is True   # narrow rule
-    assert matches("send_bitcoin", "ABCDE4", 500) is True  # falls through to broad
-    assert matches("send_bitcoin", "OTHER1", 500) is True  # broad rule
+    assert matches("manage_bitcoin", "ABCDE4", 50) is True   # narrow rule
+    assert matches("manage_bitcoin", "ABCDE4", 500) is True  # falls through to broad
+    assert matches("manage_bitcoin", "OTHER1", 500) is True  # broad rule
 
     # Parse-error / wrong-shape inputs return [] without crashing.
     tmp.write_text("not yaml at all: : :\n")
     # Either parses to a degenerate dict or raises; either way no rules.
-    assert matches("send_bitcoin", "ABCDE4", 1) is False
+    assert matches("manage_bitcoin", "ABCDE4", 1) is False
 
     tmp.write_text("approvals: 42\n")  # wrong shape: not a list
-    assert matches("send_bitcoin", "ABCDE4", 1) is False
+    assert matches("manage_bitcoin", "ABCDE4", 1) is False
 
     print(f"OK: standing-approvals matcher round-trips at {tmp}")
     sys.exit(0)
