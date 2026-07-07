@@ -629,7 +629,7 @@ free-text rationale the operator wrote for their own future self.
 Schema details land with the implementation.
 
 **Scope.** Standing approvals apply to state-changing ops
-(`send_bitcoin`, `send_lightning`). Read-only ops (`query_balance`,
+(`manage_bitcoin`, `manage_lightning`). Read-only ops (`query_balance`,
 `query_channels`) dispatch unconditionally - they are protected by
 other mechanisms ([banding](#banding-numeric-value-banding),
 [scale cloaking](#scale-cloaking),
@@ -650,7 +650,7 @@ arbiter, the gateway pauses the call and surfaces it to the
 operator (a human) on a fully out-of-band channel. The call only
 proceeds on explicit human assent. Unknown ops - anything outside
 the recognized read set (`query_balance`, `query_channels`) and
-write set (`send_bitcoin`, `send_lightning`) - also trip HITL by
+write set (`manage_bitcoin`, `manage_lightning`) - also trip HITL by
 default, regardless of standing approvals.
 
 Out-of-band means: the request and response never travel on the

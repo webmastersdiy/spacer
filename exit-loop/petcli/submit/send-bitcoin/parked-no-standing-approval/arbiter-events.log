@@ -1,4 +1,0 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54761},"ts":"2026-06-18T20:11:38Z"}
-{"event":"request_received","payload":{"op":"send_bitcoin"},"ts":"2026-06-18T20:11:38Z"}
-{"event":"registry_lookup_ok","payload":{"id":1,"token":"C8QFKY"},"ts":"2026-06-18T20:11:38Z"}
-{"event":"decision_defer_hitl","payload":{"op":"send_bitcoin","reason":"no_standing_approval"},"ts":"2026-06-18T20:11:38Z"}

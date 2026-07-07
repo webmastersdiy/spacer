@@ -25,7 +25,7 @@ Command tree:
 
     petcli
     |-- submit                     state-changing actions (§3, §4.6)
-    |   `-- send-bitcoin           Bitcoin send by recipient token
+    |   `-- manage-bitcoin         Bitcoin send by recipient token
     |-- query                      read-only inspection (§3 last paragraph)
     |   `-- balance                node balance (banded)
     |-- result                     poll the result registry (§4.8)
@@ -33,7 +33,7 @@ Command tree:
     |-- estimate                   local-only estimate display (§5.2)
     |   `-- window                 upper-bound seconds, no arbiter call
     `-- advanced                   opt-in extensions (arbiter SPACER_MODE gates)
-        |-- send-lightning         Lightning send by recipient token
+        |-- manage-lightning       Lightning send by recipient token
         |-- channels               LN channels (aggregate-by-default)
         `-- ecash                  eCash extension (SPACER_MODE=ecash; doc 07)
             |-- fund               arbiter-mediated: operator wallet -> float
@@ -43,7 +43,7 @@ Command tree:
             |-- receive            local wallet: swap-claim a token
             `-- info               local wallet / mint info
 
-Bitcoin on-chain is the primary surface: send-bitcoin and balance live
+Bitcoin on-chain is the primary surface: manage-bitcoin and balance live
 at the top of the tree. The Lightning commands move under `advanced`
 because they belong to the opt-in advanced extension - the arbiter only
 honors them when it runs SPACER_MODE=lightning|full; an onchain-mode
@@ -123,9 +123,9 @@ def _add_endpoint_flags(parser):
     )
 
 
-def _do_submit_send_bitcoin(args):
+def _do_submit_manage_bitcoin(args):
     response = protocol.submit(
-        op="send_bitcoin",
+        op="manage_bitcoin",
         # Wire field is `recipient_token`: the arbiter's privacy gateway
         # resolves it through the recipient address registry (§4.7). The
         # CLI flag stays `--to-token` for operator brevity; the rename
@@ -150,15 +150,15 @@ def _do_submit_send_bitcoin(args):
     _emit(response)
 
 
-def _do_advanced_send_lightning(args):
+def _do_advanced_manage_lightning(args):
     # Lightning send: an advanced-extension command. The wire op is the
-    # same send_lightning the gateway has always routed; only the petcli
+    # same manage_lightning the gateway has always routed; only the petcli
     # command path moved under `advanced`. An onchain-mode arbiter
     # refuses this uniformly (the mode gate), so the AI sees the standard
     # refusal body when the extension is not enabled.
     response = protocol.submit(
-        op="send_lightning",
-        # Same wire-field convention as send-bitcoin above: the CLI
+        op="manage_lightning",
+        # Same wire-field convention as manage-bitcoin above: the CLI
         # exposes `--to-token` for brevity, the wire body carries
         # `recipient_token` because that is what the gateway's
         # pseudonymize-inbound step looks for.
@@ -331,7 +331,7 @@ def _build_parser():
     """Build the argparse tree.
 
     Every node carries its own description so `petcli --help`,
-    `petcli submit --help`, `petcli submit send-bitcoin --help`, etc.,
+    `petcli submit --help`, `petcli submit manage-bitcoin --help`, etc.,
     each stand alone as a discoverable surface. Subparser containers
     are required so a partial command (`petcli submit` with no op)
     fails with a usage line rather than silently succeeding.
@@ -364,7 +364,7 @@ def _build_parser():
     submit_sub.required = True
 
     sb = submit_sub.add_parser(
-        "send-bitcoin",
+        "manage-bitcoin",
         help="send Bitcoin to a recipient address registry token",
         description=(
             "Send Bitcoin to a recipient token from the arbiter's "
@@ -380,7 +380,7 @@ def _build_parser():
         "--amount-sats", required=True, type=int, help="amount in satoshis"
     )
     _add_endpoint_flags(sb)
-    sb.set_defaults(func=_do_submit_send_bitcoin)
+    sb.set_defaults(func=_do_submit_manage_bitcoin)
 
     # --- query: read-only inspection -------------------------------
     query_p = sub.add_parser(
@@ -489,14 +489,14 @@ def _build_parser():
         description=(
             "Advanced extensions, grouped here to signal they are "
             "opt-in. The Lightning commands speak the same Lightning "
-            "ops the gateway has always routed (send_lightning, "
+            "ops the gateway has always routed (manage_lightning, "
             "query_channels); the arbiter honors them only when "
             "deployed with the Lightning extension "
             "(SPACER_MODE=lightning|full). The ecash group layers the "
             "eCash extension on top (SPACER_MODE=ecash; design doc "
             "07). An arbiter without the corresponding extension - "
             "onchain is the default - refuses these uniformly. "
-            "Bitcoin on-chain commands (submit send-bitcoin, query "
+            "Bitcoin on-chain commands (submit manage-bitcoin, query "
             "balance) are the primary surface."
         ),
     )
@@ -504,7 +504,7 @@ def _build_parser():
     advanced_sub.required = True
 
     asl = advanced_sub.add_parser(
-        "send-lightning",
+        "manage-lightning",
         help="send a Lightning payment to a recipient token",
         description=(
             "Send a Lightning payment to a recipient token from the "
@@ -524,7 +524,7 @@ def _build_parser():
         help="amount in millisatoshis",
     )
     _add_endpoint_flags(asl)
-    asl.set_defaults(func=_do_advanced_send_lightning)
+    asl.set_defaults(func=_do_advanced_manage_lightning)
 
     ach = advanced_sub.add_parser(
         "channels",
