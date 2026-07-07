@@ -599,7 +599,13 @@ descriptor derivation is needed.
 derivation above are the **target design** of the recast;
 `arbiter/src/registry.py` still stores plain destination addresses.
 The code recast is the tracked follow-up **sp-pj3** (the sequel to
-sp-3mm, which closed the op-naming half of the reframe).
+sp-3mm, which closed the op-naming half of the reframe). The
+no-mainnet add-time check moves with it: with no address to inspect
+at add time, the gate becomes refusing mainnet-prefixed extended
+keys at registration (`xpub`/`zpub`; testnet/signet serialize as
+`tpub`/`vpub`), plus an HRP re-check of each derived address at
+derive time - in sp-pj3's scope, so the gate cannot silently fall
+out of the descriptor design.
 
 **Token format.** 5 random Crockford-base32 characters plus 1
 Damm32 check character. Crockford-base32 omits visually ambiguous
