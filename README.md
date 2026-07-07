@@ -62,7 +62,7 @@ GLOSSARY.md       project vocabulary; naming disputes resolve here
 The per-doc index with one-line summaries and the authority map is
 `design-docs/origin/README.md`.
 
-## Status (2026-07-07)
+## Status
 
 Design-first, with the skeleton landed and exercised: privacy gateway,
 recipient registry (YAML), standing approvals, eCash allowance, timing
