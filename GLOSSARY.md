@@ -28,11 +28,11 @@ spacer routes through one of them.
 
 ### Spacer
 
-The umbrella name for this project. Currently a research workspace
-at `~/spacer/` (testbed, session state, design docs, an installed
-Mutinynet node stack); will graduate to a GitHub repository of the
-same name that encompasses both **design** (the docs already in
-`design-docs/`) and **implementation** of a two-component system:
+The umbrella name for this project: this repository, encompassing
+both **design** (`design-docs/`) and **implementation** of a
+two-component system. (The testbed runtime tree - node binaries,
+datadirs, credentials - lives outside the repo at `~/spacer/`; docs
+that cite `~/spacer/...` paths mean that runtime tree.)
 
 - the **arbiter** (server-side node), running alongside bitcoind
   and LND on a host the AI cannot reach; bundles the privacy
@@ -61,7 +61,8 @@ of the AI's reach:
   and gates each call; see entry below);
 - access to the bitcoin clients (`bitcoin-cli` against the local
   bitcoind);
-- access to the LND clients (`lncli`, plus gRPC/REST against LND);
+- access to the LND client (`lncli`; it already speaks gRPC, so
+  there is no separate gRPC/REST client - architecture doc §4.3);
 - local state (audit log, policy tables, token-to-real-value
   mappings, HITL approval queue);
 - the ability to write the immutable audit log.
@@ -105,18 +106,10 @@ side places it in reach of the AI and defeats the point.
 
 The privacy gateway is the primary AI-facing defense; world-facing
 mitigations like Tor are defense-in-depth on top of it. Implemented
-as a skeleton at `arbiter/src/gateway.py`: HTTP server with a uniform
-refusal body, per-response [latency normalization](#latency-normalization),
-audit logging at every decision point, recipient-token resolution on
-known write ops (via the [recipient address registry](#recipient-address-registry)),
-[HITL](#human-in-the-loop-hitl-approval) park on unknown ops, and a
-binary-state result-poll endpoint (see [result delay](#result-delay)).
-Outbound filters ([hide secrets](#hide-secrets),
-[banding](#banding-numeric-value-banding),
-[aggregate-by-default](#aggregate-by-default)) are wired in structure
-but currently pass-through pending their own beads. Position in the
-data flow, the limited-and-airtight constraints, and the per-request
-mechanism list are documented in the architecture doc.
+at `arbiter/src/gateway.py`. The per-request mechanism order, the
+limited-and-airtight constraints, and the wired-vs-pending status
+all live in the architecture doc (§4.1) - implementation status is
+deliberately tracked there, once, not here.
 
 See also: [Architecture overview, §3](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#3-end-to-end-data-flow) and [§4.1](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#41-privacy-gateway).
 
@@ -1132,10 +1125,12 @@ publishing happens unconditionally on every send.
 ### Design doc naming
 
 Every file in `design-docs/` is named
-`YYYY-MM-DD-HHMM-<slug>.md`: creation date, then 24-hour HHMM time
-with no separator, then a kebab-case slug. Files sort
-chronologically by `ls`. Any new design doc must follow this
-convention so the directory remains scannable.
+`NN--YYYY-MM-DD-HHMM-<name>.md`: a two-digit chronological index
+(the citation handle - "doc 05" - and the `ls` sort key), then the
+creation date and 24-hour time, then a kebab-case slug. The full
+convention, including why the double dash, is
+[`design-docs/README.md`](design-docs/README.md) - that file is the
+authority; this entry is just the pointer.
 
 ### Layout
 
@@ -1201,14 +1196,14 @@ See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-ar
 
 ## See also
 
-- `~/spacer/design-docs/` - all design docs use the terms above.
-  See particularly `2026-05-05-0948-architecture-overview.md` for the
-  logical architecture, data flow, and mitigation map; and
-  `2026-05-02-1601-privacy-and-timing-leaks.md` and
-  `2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` for the
-  per-API leak maps that the mitigation terms target.
-- `~/spacer/archive/2026-05-02-1428-privacy-notes.md` - the
-  original session ledger that seeded the AI-facing design.
-  Archived from `~/spacer/test-harness/state/privacy_notes.md`.
-- `~/spacer/test-harness/state/INSTALL_BLOCKER.md` - context on why
-  ldk-node is not in active use despite being in the design surface.
+- [`design-docs/`](design-docs/README.md) - all design docs use the
+  terms above; the per-doc index is
+  [`design-docs/origin/README.md`](design-docs/origin/README.md).
+  See particularly doc 05 (architecture overview) for the logical
+  architecture, data flow, and mitigation map; and docs 01 / 03 for
+  the per-API leak maps that the mitigation terms target.
+- [`archive/2026-05-02-1428-privacy-notes.md`](archive/2026-05-02-1428-privacy-notes.md) -
+  the original session ledger that seeded the AI-facing design.
+- `~/spacer/test-harness/state/INSTALL_BLOCKER.md` (testbed runtime
+  tree, outside this repo) - context on why ldk-node is not in
+  active use despite being in the design surface.
