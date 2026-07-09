@@ -42,27 +42,49 @@ world-facing). Adversary: the petitioner / AI, which must never receive a column
 
 | Column | Holds | Colour | The question it answers |
 |---|---|---|---|
-| **1 - Petitioner-known** | events the petitioner already knows: things it caused and saw the result of, or could derive from what it holds - a banded amount it was told, a refusal it received, a tokenized id it was given | calm (e.g. green / neutral) | "what does the AI's view of us currently include?" |
+| **1 - Petitioner-known** | the **literal replies the petitioner received**, projected from the **disclosure record** (§3) - the timestamped log of petitioner<->arbiter traffic: a banded amount it was told, a refusal it received, a tokenized id it was given, an action's result once the [timing layer](05--2026-05-05-0948-architecture-overview.md#46-timing-layer) released it. Verbatim what crossed the gateway, stamped with the record's send time - not what it *could* derive. | calm (e.g. green / neutral) | "what does the AI's view of us currently include?" |
 | **2 - Petitioner-never-known** | things the petitioner must never learn: node / LND identity, the mint URL and keyset health, real (unbanded) amounts, monitoring tiers and thresholds, drain cadence, rotation internals, registry contents | alert (e.g. red / amber) | "what are we keeping from the AI right now, and is any of it at risk of leaking?" |
 
 Colour-coding is **load-bearing, not decoration**: the operator must tell the two apart at a glance,
-because the whole point is to never act on a column-2 item as if it were shareable. The columns sit
-**side by side** so a related pair - the petitioner saw X; internally we also did Y it must not see -
-reads across a single row.
+because the whole point is to never act on a column-2 item as if it were shareable.
 
-## 3. The classification contract (what producers tag)
+**Rows are shared, and a blank is a signal.** The columns sit **side by side on one row grid**,
+append-only - nothing already printed ever moves. When an internal event and its disclosure land
+together (the petitioner is told a banded X while the real X is withheld beside it), both print on
+one row and nothing more is needed. But disclosure usually **lags** the internal event by the
+timing-layer windows (action + result delay, ~12h+ each; [doc 05 §4.6](05--2026-05-05-0948-architecture-overview.md#46-timing-layer),
+doc 09): the event prints now in column 2 with **nothing opposite in column 1**, and that blank is
+first-class information - a filled column-2 cell beside an empty column-1 cell reads at a glance as
+*"we did this; the AI does not know it yet."* When the timing layer later releases the result, it
+prints on a **new** row that pairs the column-1 disclosure (the verbatim reply, stamped from the
+disclosure record) with a **re-print** of the withheld secret beside it, so the two align on that
+row without moving the original (a fresh column-1 row, §3, not a backfill). The re-print is only for this deferred case; the earlier column-2 line
+stays put, and a run of still-blank column-1 opposites is a visible backlog of what the AI has not
+yet been told.
 
-Every event posted to the TUI carries a **column tag** set by its producer: `pet-known` or `pet-never`.
-The producer owns the call because only it knows what it actually returned to the petitioner.
+## 3. What feeds each column
 
-- **Default to column 2 on any doubt.** Mistagging a never-known item as known is a *leak*; mistagging a
-  known item as never-known only *over-hides* from the operator. That asymmetry sets the default:
-  **unsure -> `pet-never`** - fail-safe, mirroring the gateway's deny-by-default and doc 07 §8's
-  missing-allowance refusal posture.
-- **"Known" means actually disclosed, not disclosable.** An event is `pet-known` only if the petitioner
-  already received it (or its banded / tokenized form). "We could have told it" is not "known."
-- **Tags are immutable once posted.** A later disclosure to the petitioner is a *new* `pet-known` event,
-  not a rewrite of the old one; the audit log (doc 05 §4.5) keeps the full trail.
+The two columns are fed differently, and that difference is what makes column 1 trustworthy.
+
+- **Column 1 is projected from the disclosure record, not tagged.** The disclosure record is the
+  arbiter's timestamped, append-only log of petitioner<->arbiter traffic - every request in and every
+  reply out. Column 1 is a straight projection of it: a row appears only because a reply was actually
+  sent, shown verbatim and stamped with the record's send time. So `pet-known` is never a producer's
+  guess about what the AI learned - it is what the record says crossed the gateway. Replies are meant
+  to be both machine- and human-readable (YAML the likely form), so one representation serves the wire,
+  the record, and the operator's eye; the reply / wire format itself is a protocol concern (doc 05 §8).
+  The disclosure record is arbiter architecture - a petitioner-facing relative of the
+  [audit log](../../GLOSSARY.md#audit-log) (doc 05 §4.5) - so its format and home are pinned there;
+  this doc only reads it.
+- **Column 2 is producer-tagged.** Internal events the petitioner never receives (mint-health tiers,
+  real amounts, rotation internals) have no traffic record to draw from, so each is emitted by its
+  producer carrying the `pet-never` tag. Here the producer does own the call, under two rules:
+  - **Default to `pet-never` on any doubt.** Mistagging a never-known item as known is a *leak*;
+    over-hiding only costs the operator a glance. That asymmetry sets the fail-safe default - mirroring
+    the gateway's deny-by-default and doc 07 §8's missing-allowance refusal posture.
+  - **Tags are immutable once posted.** A column-2 event is never rewritten into column 1; when the
+    petitioner is later told something, that is a *new* column-1 row from the disclosure record (§2),
+    and the [audit log](../../GLOSSARY.md#audit-log) (doc 05 §4.5) keeps the full trail.
 
 ## 4. The never-leak invariant
 
@@ -79,8 +101,14 @@ On the **arbiter console** - the same operator-only KVM that already hosts
 [HITL approval](../../GLOSSARY.md#human-in-the-loop-hitl-approval), the
 [recipient address registry](../../GLOSSARY.md#recipient-address-registry), and the git-snapshot audit
 queries (doc 06). **Not network-exposed**, no remote surface: a remote operator dashboard would be a new
-egress / identity channel, out of scope exactly as doc 06 §6 holds off-host shipping out. It
-**complements, does not replace**:
+egress / identity channel, out of scope exactly as doc 06 §6 holds off-host shipping out.
+
+HITL shares the console but not the surface: the TUI *shows* that a write parked for approval (a
+column-2 event), while the approve / deny input stays the separate
+[HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) channel (doc 05 §6) - the TUI itself takes
+no input (§4).
+
+It **complements, does not replace**:
 
 - the **runtime audit log** (doc 05 §4.5) - append-only, per-request, the forensic record. The TUI is the
   live glance; the audit log is the history.
@@ -89,10 +117,12 @@ egress / identity channel, out of scope exactly as doc 06 §6 holds off-host shi
 
 ## 6. Threat model and residual leaks
 
-- **Misclassification -> leak.** A `pet-never` item mistagged `pet-known` could be treated as shareable.
-  Mitigated by the default-to-column-2 rule (§3) and by producers being small and reviewable (doc 05
-  §2.1); never fully closed - it rests on each producer's tagging, so the tags get the same review
-  discipline as any other load-bearing arbiter contract (cf. doc 10 §3's build-time pin).
+- **Misclassification / omission.** Because column 1 is projected from the disclosure record (§3), a
+  producer cannot place a never-known value into column 1 - that leak path is closed by construction.
+  The residual is a producer *omitting* a column-2 event, or mis-describing one, which under-informs
+  the operator rather than over-informing the AI; mitigated by the fail-safe `pet-never` default and
+  small, reviewable producers (doc 05 §2.1), with the [audit log](../../GLOSSARY.md#audit-log)
+  (doc 05 §4.5) as the after-the-fact backstop.
 - **Operator error.** The TUI informs the operator but cannot stop them pasting a column-2 value
   elsewhere; it minimizes the chance by making the classification unmissable (colour + column), but the
   human remains the last line.
