@@ -3,10 +3,10 @@
 **Date:** 2026-05-02 (reconciled 2026-06-12)
 **Context:** AI-facing leak map for the bitcoind RPC surface - what each `bitcoin-cli` call exposes and which arbiter mitigation covers it. **bitcoind is the primary surface**: the default deployment mode (onchain, doc 05 §2.2) serves everything from it, with the opt-in advanced extensions stacking above it as the doc 07 rail ladder - Lightning (doc 01), then eCash atop Lightning (doc 07). Mitigation mechanics and caveats live in the [glossary](../../GLOSSARY.md#mitigations); this doc is the per-RPC inventory. Read together with the LND doc for the gateway policy layer.
 **Related:**
-- `2026-05-02-1601-privacy-and-timing-leaks.md` - the LND surface (advanced extension).
+- `01--2026-05-02-1601-privacy-and-timing-leaks.md` - the LND surface (advanced extension).
 - `07--2026-06-12-0916-ecash-extension.md` - the eCash extension two rails up (advanced, atop Lightning).
-- `2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
-- `~/spacer/archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
+- `02--2026-05-02-1602-bitcoind-mutinynet-test-flow.md` - testbed details.
+- `../../archive/2026-05-02-1700-node-privacy-from-the-world.md` - world-facing (archived; separate concern).
 
 ---
 
@@ -31,7 +31,7 @@ Out of scope: the bitcoind host OS / disk operator; Bitcoin P2P peers (world-fac
 
 ## 3. Per-RPC leak surface
 
-> **Live surface vs. policy.** The exposed op set depends on the deployment mode (doc 05 §2.2; onchain is the default). Onchain mode - this doc's surface - exposes `query_balance` (read, the bitcoind wallet) and `send_bitcoin` (write, routed through `sendtoaddress` after the registry and standing-approvals gates). The advanced Lightning extension layers `query_channels` / `send_lightning` back on, and the eCash extension (`SPACER_MODE=ecash`, doc 07) adds `fund_ecash` / `defund_ecash` on top of the full Lightning surface; against an onchain arbiter every extension op refuses uniformly at the mode gate (audit `decision_refuse_mode`, the op field disambiguating which extension). Every other inbound op parks in [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and returns the uniform refusal, so no raw RPC below is directly petitioner-reachable. The cells define policy for any future expansion of the AI-reachable set.
+> **Live surface vs. policy.** The exposed op set depends on the deployment mode (doc 05 §2.2; onchain is the default). Onchain mode - this doc's surface - exposes `query_balance` (read, the bitcoind wallet) and `manage_bitcoin` (write, routed through `sendtoaddress` after the registry and standing-approvals gates). The advanced Lightning extension layers `query_channels` / `manage_lightning` back on, and the eCash extension (`SPACER_MODE=ecash`, doc 07) adds `fund_ecash` / `defund_ecash` on top of the full Lightning surface; against an onchain arbiter every extension op refuses uniformly at the mode gate (audit `decision_refuse_mode`, the op field disambiguating which extension). Every other inbound op parks in [HITL](../../GLOSSARY.md#human-in-the-loop-hitl-approval) and returns the uniform refusal, so no raw RPC below is directly petitioner-reachable. The cells define policy for any future expansion of the AI-reachable set.
 
 Severity: **HIGH** = full identifier, key material, or balance reveal; **MED** = partial identifiers, counts, patterns, or confirmable state; **LOW** = flags, booleans, or public chain data. The mitigation column tags the glossary mechanism; mechanics and caveats are defined there.
 

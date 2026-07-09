@@ -3,7 +3,7 @@
 **Date:** 2026-05-02
 **Status:** completed
 **Context:** Validates the full on-chain + Lightning lifecycle (fund, on-chain send, open channel, pay, cooperative close) on a Voltage-hosted LND node against [Mutinynet](../../GLOSSARY.md#mutinynet) using only `lncli` and the public faucet. Produces the txids, timings, and balances that feed the AI-facing leak map.
-**Companion:** `2026-05-02-1601-privacy-and-timing-leaks.md` (per-call leak map).
+**Companion:** `01--2026-05-02-1601-privacy-and-timing-leaks.md` (per-call leak map).
 
 ---
 
@@ -63,7 +63,7 @@ Base `https://faucet.mutinynet.com/api`. `POST /bolt11` needs **no auth** (handy
 
 The §3 sequence is fully scriptable given credentials in `state/nodeA.env` and `state/faucet.env`; the only manual steps are the Voltage signup and the browser faucet funding (step 1). Txids and addresses differ every run; the ~168 s channel timing is approximate (Mutinynet block times vary).
 
-**Pointers:** leak map `2026-05-02-1601-privacy-and-timing-leaks.md`; `state/INSTALL_BLOCKER.md`; Voltage `voltage.cloud`; esplora `mutinynet.com`; faucet `faucet.mutinynet.com`; LND releases `github.com/lightningnetwork/lnd/releases`.
+**Pointers:** leak map `01--2026-05-02-1601-privacy-and-timing-leaks.md`; `state/INSTALL_BLOCKER.md`; Voltage `voltage.cloud`; esplora `mutinynet.com`; faucet `faucet.mutinynet.com`; LND releases `github.com/lightningnetwork/lnd/releases`.
 
 ## 8. Implementation learnings
 
