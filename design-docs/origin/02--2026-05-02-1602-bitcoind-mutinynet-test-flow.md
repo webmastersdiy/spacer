@@ -1,7 +1,7 @@
 # bitcoind Mutinynet setup and smoke-test flow
 
-**Date:** 2026-05-02 (reconciled 2026-05-24)
-**Status:** partial - syncing; on-chain send/receive pending full sync
+**Date:** 2026-05-02 (reconciled 2026-07-07)
+**Status:** bring-up record (complete as such). The §7 on-chain send/receive was overtaken rather than finished: the current live test deployment runs LND-only with no local bitcoind (doc 08 findings §4 - `manage_bitcoin` rides the LND on-chain wallet there), so this node is not part of it. bitcoind remains the onchain-default backend design (doc 05 §2.2), and this doc remains its setup record.
 **Context:** Brings up a locally self-hosted, Mutinynet-patched Bitcoin Core node on macOS arm64 with no package manager or source build, and exercises its RPC surface for the AI ↔ bitcoind proxy design. Produces the [local bitcoind](../../GLOSSARY.md#local-bitcoind) datadir the arbiter targets.
 **Companion docs:**
 - `00--2026-05-02-1600-lnd-mutinynet-test-flow.md` (LND side); `03--2026-05-02-1603-bitcoind-privacy-and-timing-leaks.md` (RPC leak map).
@@ -102,3 +102,4 @@ Everything through §3 is scriptable with no interactive steps except the rpcpas
 
 - **2026-05-24:** §4 layout rewritten to match the `arbiter/` + `test-harness/` split the setup steps and architecture overview §9 already use (the old flat `~/spacer/{bin,bitcoin,scripts}/` tree had drifted while the procedural steps stayed correct).
 - **2026-05-24:** §6 added documenting `arbiter/src/bitcoin.py` - it deliberately bypasses the shell wrapper so a non-AI reviewer can audit exactly what executes, and exposes only 4 of the ~30 RPCs the operator exercises during smoke-test (§5). Confirmed the `btccli` -> `bitcoin-cli -datadir=$HOME/spacer/arbiter/bitcoin` contract matches `bitcoin.py`'s `DEFAULT_BIN` / `DEFAULT_DATADIR`; no path drift.
+- **2026-07-07:** status reconciled - the §7 flow never ran to completion and is no longer pending: the live test deployment (doc 08) has no local bitcoind, so the on-chain send there rides the LND wallet. This doc stays as the onchain-default backend's setup record; §7 would only revive if a deployment actually runs the local node.

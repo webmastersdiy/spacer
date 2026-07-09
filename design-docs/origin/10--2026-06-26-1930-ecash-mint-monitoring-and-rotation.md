@@ -268,9 +268,10 @@ owed, and one item stays genuinely open.
   petitioner **must never learn**. The split keeps the operator's at-a-glance view from ever leaking a
   column-2 item into anything petitioner-facing. **Scope:** this TUI is a **general arbiter-visibility
   surface, not eCash-specific**, so its authoritative design does **not** belong here - it belongs in
-  **its own dedicated doc** (a follow-up). This doc states only that monitoring / rotation alerts
-  surface there, tagged petitioner-known vs petitioner-never-known; the concrete cross-ref lands once
-  that doc does.
+  **its own dedicated doc**:
+  [`13--2026-06-28-1720-operator-visibility-tui.md`](13--2026-06-28-1720-operator-visibility-tui.md).
+  This doc states only that monitoring / rotation alerts surface there, tagged petitioner-known vs
+  petitioner-never-known.
 - **Partial-rug drain: binary.** If the old mint honors only some melts, the policy is a simple
   **run / no-run**: drain in one pass (§6 step 2), then declare the remainder **stranded**. No
   graduated, time-tiered draining for now.
@@ -323,7 +324,7 @@ Owned by other docs, referenced and not restated here:
   cross-referenced from §4. This doc owns only the *probe cadence* it originates (§4), rather than
   scoping world-facing timing fully out.
 - The **operator-visibility TUI** (the two-column surface, §9) - a general arbiter feature, its own
-  dedicated doc (a follow-up), not this one.
+  dedicated doc ([doc 13](13--2026-06-28-1720-operator-visibility-tui.md)), not this one.
 - Concrete fee-accounting surface (doc 07 §10.4) and checkstate-cadence jitter (doc 07 §10.7), except
   where a fee change is a monitoring signal (M4).
 - Wire formats, `petcli` / executor code structure, and the exact `/v1/info` schema - all in the
