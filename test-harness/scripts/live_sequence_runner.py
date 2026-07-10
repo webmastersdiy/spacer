@@ -592,9 +592,9 @@ def cmd_cycle():
                    "manage_lightning past standing bound")
     watch.wait_for(ev("decision_defer_hitl", op="manage_lightning"), 10,
                    "HITL park")
-    expect_refused(raw_post(json.dumps({"op": "frobnicate_x"}).encode()),
+    expect_refused(raw_post(json.dumps({"op": "unknown_probe_op"}).encode()),
                    "unknown op")
-    watch.wait_for(ev("decision_defer_hitl", op="frobnicate_x"), 10,
+    watch.wait_for(ev("decision_defer_hitl", op="unknown_probe_op"), 10,
                    "unknown-op HITL park")
     expect_refused(raw_post(b"this is not json"), "malformed body")
     expect_refused(raw_post(b"x" * 70000), "oversized body")

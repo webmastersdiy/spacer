@@ -76,6 +76,7 @@ Stdlib only.
 """
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -83,15 +84,25 @@ from pathlib import Path
 # Same default resolution as audit.py: src/ -> ../state/audit.log.
 DEFAULT_AUDIT_PATH = Path(__file__).resolve().parent.parent / "state" / "audit.log"
 
-# Grid geometry. Two independent (timestamp, tag) prefixes now - one
-# per column - so a secret timestamp never rides in the left column.
-# 8 (ts) + 1 + 7 (tag) + 1 = 17 prefix per side. Sized to fit a
-# ~190-column terminal: 17 + 62 + 3 (" | ") + 17 + 86 = 185.
+# Grid geometry. Two independent (timestamp, tag) prefixes - one per
+# column - so a secret timestamp never rides in the left column: each
+# side is ts(8) + 1 + tag(7) + 1 = 17 fixed, then a flexible content
+# cell. The content widths are computed from the CURRENT terminal width
+# so a line never exceeds it - the right (never-known) column must never
+# wrap onto the left. Overlong content is truncated with a "~" marker,
+# not wrapped.
 _TS_W = 8
 _TAG_W = 7
-_COL1_W = 62
-_COL2_W = 86
 _SEP = " | "
+_PREFIX_W = _TS_W + 1 + _TAG_W + 1          # 17 per side
+_OVERHEAD = 2 * _PREFIX_W + len(_SEP)       # 37: both prefixes + sep
+_LEFT_RATIO = 0.42                          # content split, left:right
+_MIN_COL = 6                                # floor per content cell
+_MIN_WIDTH = _OVERHEAD + 2 * _MIN_COL       # narrowest we size for
+_FALLBACK_WIDTH = 100                        # when detection fails
+# Soft caps on pre-summarized note strings (the cell fit does the hard,
+# width-aware truncation; these just bound work before that).
+_NOTE_CAP = 120
 
 # ANSI. Colour-coding is load-bearing, not decoration (doc 13 §2).
 _GREEN = "\033[32m"
@@ -197,9 +208,46 @@ def _fit(text, width):
 
 
 def _region(ts, tag, text, width):
-    """One column's fixed-width cell: ts(8) tag(7) text(width). Blank
-    ts / tag render as spaces so an empty side reveals nothing."""
+    """One column's cell: ts(8) tag(7) text(width). Blank ts / tag
+    render as spaces so an empty side reveals nothing. text longer than
+    width is truncated with a "~" marker (never wrapped)."""
     return f"{_fit(ts, _TS_W)} {_fit(tag, _TAG_W)} {_fit(text, width)}"
+
+
+def _detect_width():
+    """Current terminal width in columns. SPACER_TUI_WIDTH pins it;
+    otherwise a live TIOCGWINSZ ioctl on stdout (so a tmux resize is
+    picked up immediately, and a stale COLUMNS env cannot mislead),
+    falling back to shutil's detection and then a constant. Clamped to a
+    floor so the two prefixes always fit."""
+    override = os.environ.get("SPACER_TUI_WIDTH")
+    if override and override.isdigit():
+        return max(_MIN_WIDTH, int(override))
+    try:
+        return max(_MIN_WIDTH, os.get_terminal_size(sys.stdout.fileno()).columns)
+    except (OSError, ValueError, AttributeError):
+        try:
+            return max(_MIN_WIDTH, shutil.get_terminal_size((_FALLBACK_WIDTH, 24)).columns)
+        except Exception:
+            return _FALLBACK_WIDTH
+
+
+def _content_dims(width):
+    """Split the usable width (terminal minus the two fixed prefixes and
+    the separator) into (left, right) content-cell widths so the whole
+    line is exactly `width` columns - never more, so it cannot wrap.
+    Left gets _LEFT_RATIO of the budget; both keep a minimum until the
+    terminal is too narrow to honor it, then split evenly."""
+    budget = width - _OVERHEAD
+    if budget < 2 * _MIN_COL:
+        half = max(1, budget // 2)
+        return half, max(1, budget - half)
+    c1 = max(_MIN_COL, int(budget * _LEFT_RATIO))
+    c2 = budget - c1
+    if c2 < _MIN_COL:
+        c2 = _MIN_COL
+        c1 = budget - c2
+    return c1, c2
 
 
 class Renderer:
@@ -220,10 +268,15 @@ class Renderer:
     - _last_op: the most recent request op, for tagging acks/refusals.
     """
 
-    def __init__(self, out=sys.stdout, pad=_DEFAULT_PAD, always_pad=False):
+    def __init__(self, out=sys.stdout, pad=_DEFAULT_PAD, always_pad=False,
+                 width=None):
         self.out = out
         self.pad = max(1, pad)
         self.always_pad = always_pad
+        # width=None auto-detects the terminal per line (so a live resize
+        # is honored); a fixed int pins it (tests, or an operator
+        # override beyond SPACER_TUI_WIDTH).
+        self._width = width
         self._secret_buf = []
         self._handle_notes = {}
         self._handle_layer = {}
@@ -233,29 +286,40 @@ class Renderer:
 
     # --- output primitives ------------------------------------------
 
-    def _line(self, left, right, lstyle, rstyle):
-        l = f"{lstyle}{left}{_RESET}" if left.strip() else left
-        r = f"{rstyle}{right}{_RESET}" if right.strip() else right
+    def _dims(self):
+        """(left_content_w, right_content_w) for the current terminal
+        width, sized so the assembled line is exactly the terminal width
+        and therefore never wraps."""
+        return _content_dims(self._width if self._width is not None else _detect_width())
+
+    def _row(self, lts, ltag, ltext, lstyle,
+             rts="", rtag="", rtext="", rstyle=_DIM_RED):
+        """Emit one grid line from per-column components, fitting each
+        content cell to the current terminal width. A blank side carries
+        no colour codes (nothing to style) so an empty cell reveals
+        nothing. The right cell is width-truncated with a "~" marker, so
+        never-known content can never wrap onto the left."""
+        c1, c2 = self._dims()
+        left = _region(lts, ltag, ltext, c1)
+        right = _region(rts, rtag, rtext, c2)
+        l = f"{lstyle}{left}{_RESET}" if (lts or ltag or ltext) else left
+        r = f"{rstyle}{right}{_RESET}" if (rts or rtag or rtext) else right
         self.out.write(l + _SEP + r + "\n")
         self.out.flush()
 
-    def _blank_left(self):
-        return _region("", "", "", _COL1_W)
-
-    def _blank_right(self):
-        return _region("", "", "", _COL2_W)
-
     def header(self):
+        c1, c2 = self._dims()
+        total = _PREFIX_W + c1 + len(_SEP) + _PREFIX_W + c2
         self.out.write(
-            f"{_BOLD}{_YELLOW}[ KVM-only console - unsafe over SSH or "
-            f"on an AI-sharing host; see banner above ]{_RESET}\n"
+            f"{_BOLD}{_YELLOW}"
+            + _fit("[ KVM-only console - unsafe over SSH or on an "
+                   "AI-sharing host; see banner above ]", total)
+            + f"{_RESET}\n"
         )
-        left = _region("UTC", "LAYER", "PETITIONER-KNOWN (told)", _COL1_W)
-        right = _region(
-            "UTC", "LAYER", "PETITIONER-NEVER-KNOWN (ground truth)", _COL2_W
-        )
+        left = _region("UTC", "LAYER", "PETITIONER-KNOWN (told)", c1)
+        right = _region("UTC", "LAYER", "PETITIONER-NEVER-KNOWN (ground truth)", c2)
         self.out.write(f"{_BOLD}{_GREEN}{left}{_RESET}{_SEP}{_BOLD}{_RED}{right}{_RESET}\n")
-        self.out.write("-" * (len(left) + len(_SEP) + len(right)) + "\n")
+        self.out.write("-" * total + "\n")
         self.out.flush()
 
     # --- rail attribution -------------------------------------------
@@ -295,7 +359,7 @@ class Renderer:
             if h:
                 self._handle_notes[h] = _shorten(
                     f"{event} {_compact({k: v for k, v in payload.items() if k != 'handle'})}",
-                    _COL2_W - 30,
+                    _NOTE_CAP,
                 )
                 if layer:
                     self._handle_layer[h] = layer
@@ -312,8 +376,7 @@ class Renderer:
         if not self._secret_buf:
             if force_empty:
                 for _ in range(self.pad):
-                    self._line(self._blank_left(), self._blank_right(),
-                               _GREEN, _RED)
+                    self._row("", "", "", _GREEN, rstyle=_RED)
             return
         if len(self._secret_buf) > self.pad:
             shown = self._secret_buf[: self.pad - 1]
@@ -325,29 +388,23 @@ class Renderer:
             rows = self._secret_buf + [("", "", "")] * (self.pad - len(self._secret_buf))
             self._secret_buf = []
         for ts, tag, text in rows:
-            right = _region(ts, tag, text, _COL2_W)
-            self._line(self._blank_left(), right, _GREEN, _RED)
+            self._row("", "", "", _GREEN, rts=ts, rtag=tag, rtext=text, rstyle=_RED)
 
     # --- petitioner (left) rows -------------------------------------
-
-    def _left_row(self, ts, layer, text, style, right=None, rstyle=_DIM_RED):
-        left = _region(_hhmmss(ts), _TAGS.get(layer, _TAGS[None]), text, _COL1_W)
-        self._line(left, right if right is not None else self._blank_right(),
-                   style, rstyle)
 
     def _disclosure(self, ts, body):
         """Render one reply row: verbatim on the left, the paired ground
         truth on the right where one exists. Rule 1: the paired re-print
         shares this row's timestamp, so its right timestamp is a spacer
         (blank), never a duplicate."""
-        right = None
+        rts = rtag = rtext = ""
         layer = None
         if isinstance(body, dict):
             if "balance_sats" in body or "capacity_sats" in body:
                 layer = "chain" if "balance_sats" in body else "ln"
                 if self._last_read is not None:
-                    right = _region("", _TAGS[layer],
-                                    "real: " + _compact(self._last_read[1]), _COL2_W)
+                    rtag = _TAGS[layer]
+                    rtext = "real: " + _compact(self._last_read[1])
                     self._last_read = None
             elif body.get("status") == "received" and body.get("handle"):
                 layer = _LAYER_BY_OP.get(self._last_op)
@@ -357,12 +414,13 @@ class Renderer:
                 h = self._pending_poll_handle
                 layer = self._handle_layer.get(h)
                 note = self._handle_notes.get(h, "")
-                right = _region("", _TAGS.get(layer, _TAGS[None]),
-                                _shorten(f"real: handle={h} {note}", _COL2_W), _COL2_W)
+                rtag = _TAGS.get(layer, _TAGS[None])
+                rtext = _shorten(f"real: handle={h} {note}", _NOTE_CAP)
             elif body.get("status") in ("refused", "not_yet"):
                 layer = _LAYER_BY_OP.get(self._last_op)
         self._pending_poll_handle = None
-        self._left_row(ts, layer, f"<- {_compact(body)}", _GREEN, right=right)
+        self._row(_hhmmss(ts), _TAGS.get(layer, _TAGS[None]), f"<- {_compact(body)}",
+                  _GREEN, rts=rts, rtag=rtag, rtext=rtext, rstyle=_DIM_RED)
 
     def feed(self, record):
         """Render one parsed audit record."""
@@ -378,7 +436,8 @@ class Renderer:
             self.flush_pending(force_empty=self.always_pad)
             op = payload.get("op")
             self._last_op = op
-            self._left_row(self._cur_ts, _LAYER_BY_OP.get(op), f"-> op={op}", _DIM_GREEN)
+            self._row(_hhmmss(self._cur_ts), _TAGS.get(_LAYER_BY_OP.get(op), _TAGS[None]),
+                      f"-> op={op}", _DIM_GREEN)
             return
 
         # Never-known (column 2). Pairing-only reads are consumed for the
@@ -441,9 +500,8 @@ def follow(path, renderer, poll_s=0.25, once=False):
                 try:
                     record = json.loads(line)
                 except ValueError:
-                    renderer._line(renderer._blank_left(),
-                                   _region("", "", _shorten(line, _COL2_W), _COL2_W),
-                                   _GREEN, _DIM_RED)
+                    renderer._row("", "", "", _GREEN,
+                                  rtext=_shorten(line, _NOTE_CAP), rstyle=_DIM_RED)
                     continue
                 renderer.feed(record)
         else:
@@ -533,8 +591,9 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
         return s
 
     PAD = 4
+    WIDTH = 185  # pinned so assertions do not depend on the real terminal
     out = io.StringIO()
-    r = Renderer(out=out, pad=PAD)
+    r = Renderer(out=out, pad=PAD, width=WIDTH)
     r.header()
     # A secret timestamp (12:00:09) that is NEVER part of a petitioner
     # disclosure - it must never appear in any left column cell.
@@ -570,6 +629,12 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
         return parts[1] if len(parts) > 1 else ""
 
     body = lines[3:]  # drop banner + header + rule (3 header lines)
+
+    # No-wrap invariant: at the pinned width every rendered line is
+    # exactly WIDTH columns (never more), so the right column can never
+    # spill onto the left.
+    for ln in lines:
+        assert len(ln) == WIDTH, (len(ln), WIDTH, repr(ln))
 
     # Rule 1: the secret timestamp 12:00:09 NEVER appears in any left
     # cell; it appears only on the right.
@@ -610,9 +675,22 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     made = [ln for ln in body if "made_up_event" in right(ln)]
     assert made and left(made[0]).strip() == "", "unknown event defaults to right"
 
+    # Narrow terminal: content truncates with "~" so no line exceeds the
+    # width and the right column never wraps onto the left.
+    outn = io.StringIO()
+    rn = Renderer(out=outn, pad=2, width=60)
+    rn.header()
+    rn.feed({"ts": "2026-07-10T12:00:09Z", "event": "manage_bitcoin_executed",
+             "payload": {"handle": "H", "amount_sats": 1500, "txid": "ab" * 32}})
+    rn.flush_pending()
+    narrow = strip(outn.getvalue()).splitlines()
+    for ln in narrow:
+        assert len(ln) <= 60, (len(ln), repr(ln))
+    assert any("~" in ln for ln in narrow), "narrow content must truncate with ~"
+
     # always_pad emits a PAD-line block even with no pending secrets.
     out2 = io.StringIO()
-    r2 = Renderer(out=out2, pad=3, always_pad=True)
+    r2 = Renderer(out=out2, pad=3, always_pad=True, width=WIDTH)
     r2.feed({"ts": "2026-07-10T13:00:00Z", "event": "request_received", "payload": {"op": "poll"}})
     r2.feed({"ts": "2026-07-10T13:00:01Z", "event": "request_received", "payload": {"op": "poll"}})
     lines2 = strip(out2.getvalue()).splitlines()
@@ -631,7 +709,7 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
             f.write(json.dumps(rec) + "\n")
         f.write("this line is not json\n")
     out3 = io.StringIO()
-    follow(tmp, Renderer(out=out3, pad=PAD), once=True)
+    follow(tmp, Renderer(out=out3, pad=PAD, width=WIDTH), once=True)
     got = strip(out3.getvalue())
     assert "PETITIONER-KNOWN" in got and "PETITIONER-NEVER-KNOWN" in got
     assert "-> op=manage_bitcoin" in got and "made_up_event" in got
