@@ -42,7 +42,12 @@ the world-facing model (archived doc) - it reconciles to them.
 Two operations under `manage_lightning`, both internal-management-only (doc 12):
 
 - **Probe availability.** "Is node X up / reachable?" and "does a path between X and Y work?" - a
-  liveness check, not a metric read.
+  liveness check, not a metric read. Mechanically it is a **one-way probe rooted at our own node**: a
+  payment carrying a deliberately unknown payment hash, sent toward the approved target (or routed
+  through X toward Y - LN cannot test an arbitrary third-party edge from outside). The target's
+  unknown-hash rejection reads "reachable"; a hop's liquidity failure reads "broken." It spends
+  **outbound liquidity only** (briefly locked along the route, released on the designed failure) and
+  pays **no routing fee** - LN routing fees settle only on successful forwards.
 - **Self-heal.** When a node or path a channel depends on fails availability past a threshold,
   **close that channel and open a fresh one** to a healthy counterparty, to keep liquidity working
   without hand-operation.
@@ -112,15 +117,22 @@ fail-closed line, never choose the counterparty":
   [registry](../../GLOSSARY.md#recipient-address-registry), never AI-named, never a fresh AI-supplied
   node (doc 01 §3.5 "resolve counterparty via the registry"; doc 10 §5 "never chooses the mint").
   Among eligible registry peers the arbiter prefers a **representative / average** one - selection
-  criterion = availability **and** representativeness - so the heal carries no distinctive
-  counterparty-selection signature and the ambient fee / health signal it yields is representative
-  (feeding the anonymity-set-aware fee feedback, §9). **Closing is a policy decision, not an AI choice**
+  criterion = availability **and** representativeness - so the ambient fee / health reading the heal
+  yields is not skewed by an outlier peer (it feeds the anonymity-set-aware fee feedback, §9.6).
+  **Closing is a policy decision, not an AI choice**
   (doc 01 §3.5); a **force-close needs elevated authorization** (§3.5). New channels default
-  [--private](../../GLOSSARY.md#default---private-channels), banded size (§3.5).
+  [--private](../../GLOSSARY.md#default---private-channels), banded size (§3.5). These opens are the
+  mechanized case of the **doc 12 §3 approved-peer carve-out** - the funding tx shows the chosen peer
+  our inputs and change, a bounded, accepted G1 cost - and they run under exactly the bounds that
+  carve-out names (registry-approved peer, default `--private`, banded size).
 - **The AI sees only aggregate health** - e.g. "liquidity healthy: yes", or a banded / relative
   indicator (doc 12 G2) - **never** the per-channel open / close events or their timing. This closes
   the [JIT-liquidity](../../GLOSSARY.md#jit-liquidity) sequence leak (doc 01 §4.6) and the private-close
-  balance inference (OQ3): the AI never sees the per-channel state those inferences need. Heal events
+  balance inference (OQ3): the AI never sees the per-channel state those inferences need. The same
+  must hold for the heal's **footprint in numbers the AI can read**: probes are ~free (§2), and a
+  heal's rebalance / open / close spend must stay **within the granularity of the banding /
+  scale-cloak the AI sees** (docs 01/03/05; doc 12 G2), so healing never surfaces as a band or
+  cloak-tier change the AI could use to detect it. Heal events
   surface to the **operator** (the two-column operator console, doc 13), tagged petitioner-never-known.
 - **Anti-flap.** A heal that churns channels rapidly is itself a signal (cf. doc 10 §7
   churn-as-signal); the loop rate-limits heals and treats sustained churn as an operator alert, not an
@@ -147,11 +159,13 @@ of active design scope) - its mitigations are pulled in only as bounds on how pr
 
 ## 8. Seams: cost, internal-only, eCash
 
-- **Cost (doc 11).** Every probe, rebalance, and channel open / close incurs a fee - LN routing fees on
-  probe payments, on-chain mining fees on channel open / close (doc 11 §3) - and the probe **cadence
-  has a recurring cost**. Each op books an exact `fee_components` record in the arbiter cost ledger
-  (doc 11 §4); the petitioner sees it banded / often 0 (doc 11 §2; doc 12 G2). doc 14 owns the
-  capability; **doc 11 owns the cost** - this doc does not redefine the ledger.
+- **Cost (doc 11).** A reachability probe is **~free**: it fails by design, and LN routing fees
+  settle only on successful forwards - its recurring cost is briefly locked liquidity, not sats (§2).
+  The paid ops are the **heals**: a circular rebalance pays LN routing fees; a channel open / close
+  pays on-chain mining fees (doc 11 §3). Each executed op books an exact `fee_components` record in
+  the arbiter cost ledger (doc 11 §4); the petitioner sees it banded / often 0 (doc 11 §2; doc 12 G2),
+  and heal spend stays within that banding granularity by design (§6). doc 14 owns the capability;
+  **doc 11 owns the cost** - this doc does not redefine the ledger.
 - **Internal-only (doc 12).** `manage_lightning` manages the operator's **own** LN plumbing between
   operator-controlled endpoints (doc 12 §2 / §6) - liquidity-health maintenance, not external value
   movement. The AI directs it but never holds value and never sees absolute amounts (doc 12 G2).
@@ -184,9 +198,9 @@ of active design scope) - its mitigations are pulled in only as bounds on how pr
    external infrastructure, even though the funds in a 2-of-2 channel with it stay the operator's.
    Reconcile the entry shape: either the registry gains a second, explicitly-tagged entry class
    (approved-peer: node pubkey, no descriptor, no fresh-address machinery), or peer approval becomes
-   its own small allowlist beside the registry. Either way the doc 12 posture is untouched - no
+   its own small allowlist beside the registry. Either way the doc 12 posture is unchanged - no
    external value payment: a channel open parks operator funds with an approved peer; it does not pay
-   them away.
+   them away (doc 12 §3 states this exposure as its bounded approved-peer carve-out).
 
 ## 10. What is NOT in this doc
 

@@ -31,8 +31,8 @@ never override).
 | 10 | eCash mint monitoring + rotation (authority: monitoring + rotation only; mechanics in `../implementation/00--...`) |
 | 11 | Cross-rail fee accounting - the operator-only cost ledger (authority: operator-facing fees; AI-facing fee banding stays docs 01/03) |
 | 12 | Foundational privacy posture: internal-only BTC/LN, eCash-only external value - the two guardrails (G1/G2) and the eCash exception |
-| 13 | Operator-visibility TUI: the two-column console (PR open) |
-| 14 | LN availability probing + autonomous channel management (PR open) |
+| 13 | Operator-visibility TUI: the two-column console - petitioner-known vs never-known, fed by the disclosure record |
+| 14 | LN availability probing + autonomous channel management under `manage_lightning` |
 
 ## Rule: AI-facing vs world-facing privacy
 
