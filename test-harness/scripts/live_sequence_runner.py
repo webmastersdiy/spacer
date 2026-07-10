@@ -427,11 +427,13 @@ def expect_refused(resp, desc):
 
 def tui_acknowledged():
     """True once the operator has cleared the TUI's startup safety gate
-    (doc 13 §5). The console prints its warning and waits for a typed
-    'I understand' before rendering; the column header only appears
-    after that, so its presence is the ack signal."""
+    (doc 13 §5) and the console is rendering the grid. The pre-ack state
+    shows only the warning + prompt (no grid); once rendering, every row
+    carries the ' | ' column separator. Checking for the separator is
+    robust to the header scrolling off the visible pane, unlike a
+    header-text check."""
     cap = tmux("capture-pane", "-p", "-t", f"{TMUX}:tui", check=False).stdout
-    return "PETITIONER-KNOWN" in cap
+    return " | " in cap and "Type 'I understand'" not in cap
 
 
 def cmd_cycle():
@@ -534,9 +536,16 @@ def cmd_cycle():
     fund_token = res3.get("token", "")
     if not fund_token.startswith("cashu"):
         raise StepError(f"fund token unexpected: {fund_token[:40]}")
+    # Assert the right-column (secret) fund events and the rail tag,
+    # which sit near the start of their cells and stay visible at any
+    # reasonable pane width. The bearer token itself is legitimately
+    # petitioner-known (the AI receives it in the fund result) and
+    # renders on the LEFT, but it is a long cashuB string that
+    # width-truncates off the glance display - so its presence is
+    # asserted from the result JSON above (fund_token.startswith), not
+    # from the screen capture.
     tui_capture(cdir, "s4-fund",
-                ["ecash_fund_executed", "ecash_ledger_fund", "token=cashu",
-                 "[ecash]"])
+                ["ecash_fund_executed", "ecash_ledger_fund", "[ecash]"])
 
     # --- S5 AI custody hop (local wallet ops, no arbiter) --------------
     rcv = petcli("advanced", "ecash", "receive", "--token", fund_token)
