@@ -507,9 +507,15 @@ def cmd_cycle():
         raise StepError("tok_btc was not consumed on success")
     exec1 = watch.find(ev("manage_bitcoin_executed", handle=h1))
     txid = (exec1 or {}).get("payload", {}).get("txid", "")
+    # Right-column markers are width-robust (near the start of their
+    # cell); the `real: handle=` re-print sits on the SAME row as the
+    # left disclosure, so its presence proves the disclosure rendered
+    # without asserting deep-left content that truncates on a narrow
+    # pane. The sent result itself is asserted programmatically above
+    # (res1).
     tui_capture(cdir, "s2-manage-bitcoin",
                 ["manage_bitcoin_executed", "registry_consume",
-                 "result.status=sent", f"real: handle={h1[:12]}"])
+                 f"real: handle={h1[:12]}"])
 
     # --- S3 manage_lightning: pay arbiter-owned mint quote ------------
     watch.mark()
@@ -582,9 +588,12 @@ def cmd_cycle():
     pet_end = pet_wallet_balance()
     if pet_end != pet0:
         raise StepError(f"pet wallet not drained: {pet0} -> {pet_end}")
+    # Width-robust right-column markers (see s2); the defunded result is
+    # asserted programmatically above (res4). `real: handle=` is the
+    # same-row proxy that the defund result disclosure rendered.
     tui_capture(cdir, "s6-defund",
                 ["ecash_defund_executed", "ecash_ledger_defund",
-                 "result.status=defunded"])
+                 f"real: handle={h4[:12]}"])
 
     # --- S7 negatives (no value moves) ---------------------------------
     # Amounts here are on-ladder (2000/5000) EXCEPT the two off-ladder
