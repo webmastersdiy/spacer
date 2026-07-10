@@ -1,4 +1,5 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61865},"ts":"2026-07-07T03:54:43Z"}
-{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-07-07T03:54:43Z"}
-{"event":"scale_tier_init","payload":{"real_sats":0,"scale":1.0,"tier":0},"ts":"2026-07-07T03:54:43Z"}
-{"event":"decision_allow","payload":{"op":"query_channels"},"ts":"2026-07-07T03:54:43Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54992},"ts":"2026-07-10T12:41:17Z"}
+{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-07-10T12:41:17Z"}
+{"event":"scale_tier_init","payload":{"real_sats":0,"scale":1.0,"tier":0},"ts":"2026-07-10T12:41:17Z"}
+{"event":"decision_allow","payload":{"op":"query_channels"},"ts":"2026-07-10T12:41:17Z"}
+{"event":"disclosure","payload":{"body":{"capacity_sats":0,"status":"ok"}},"ts":"2026-07-10T12:41:17Z"}

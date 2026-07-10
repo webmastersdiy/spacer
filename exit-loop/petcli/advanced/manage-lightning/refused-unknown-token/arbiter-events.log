@@ -1,4 +1,5 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61895},"ts":"2026-07-07T03:54:44Z"}
-{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:44Z"}
-{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-07-07T03:54:44Z"}
-{"event":"decision_refuse_registry","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:44Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55006},"ts":"2026-07-10T12:41:17Z"}
+{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-10T12:41:17Z"}
+{"event":"registry_lookup_refuse","payload":{"reason":"bad_checksum","token_len":6},"ts":"2026-07-10T12:41:17Z"}
+{"event":"decision_refuse_registry","payload":{"op":"manage_lightning"},"ts":"2026-07-10T12:41:17Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-10T12:41:18Z"}
