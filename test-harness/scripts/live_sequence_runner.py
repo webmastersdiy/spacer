@@ -405,15 +405,23 @@ def save_state(st):
     paths()["runner_state"].write_text(json.dumps(st, indent=1))
 
 
-def submit_and_result(watch, args, desc):
+def submit_and_result(watch, args, desc, result_timeout=330):
     """Submit a write, wait (operator-side) for its result deposit,
-    then poll exactly once. Returns (handle, result payload)."""
+    then poll exactly once. Returns (handle, result payload).
+
+    result_timeout is generous (default 330s) because a defund's melt
+    waits on the mint's outbound LN payment to our invoice, which on a
+    congested signet can stall on a slow-resolving HTLC well past the
+    normal ~30s; the single-threaded drainer blocks on that handler up
+    to CASHU_TIMEOUT_S. A stall longer than this is a live-infra outlier
+    (the mint held one melt ~15 min once), not a code fault - the defund
+    still settles correctly, just late."""
     resp = petcli(*args)
     handle = resp.get("handle")
     if resp.get("status") != "received" or not handle:
         raise StepError(f"{desc}: submit not acknowledged: {resp}")
     log(f"  {desc}: handle={handle} (estimate {resp.get('_petcli_estimate_window_s')}s)")
-    watch.wait_for(ev("result_deposit", handle=handle), 150,
+    watch.wait_for(ev("result_deposit", handle=handle), result_timeout,
                    f"result_deposit for {desc}")
     poll = petcli("result", "poll", "--handle", handle)
     if poll.get("status") != "result":
