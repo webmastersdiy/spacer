@@ -167,6 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(_REFUSED_BODY)
+            audit.record("disclosure", {"body": {"status": "refused"}})
         except Exception:
             # If the connection is already broken there is nothing to
             # write; swallow the secondary failure rather than emit a
@@ -615,12 +616,15 @@ def _registry_write_params(op, resolved):
     (manage_bitcoin / manage_lightning). Both carry the registry-resolved
     real destination - a Bitcoin address for manage_bitcoin, a bolt11 for
     manage_lightning (_pseudonymize_inbound wrote it into
-    recipient_address) - and the AI's declared amount in sats
+    recipient_address) - the AI's declared amount in sats
     (informational for manage_lightning, whose bolt11 carries its own
-    amount). Only what the action requires reaches the timing queue, not
+    amount), and the original recipient_token so the executor can flip
+    the registry entry used after a successful send (one-time-use,
+    §4.7). Only what the action requires reaches the timing queue, not
     the whole request."""
     return {
         "recipient_address": resolved.get("recipient_address"),
+        "recipient_token": resolved.get("recipient_token"),
         "amount_sats": _request_amount_sats(resolved),
     }
 
@@ -819,18 +823,23 @@ def _aggregate_outbound(response):
 def _respond_refused(handler, deadline):
     """Single uniform refusal. No reason field in the body, no
     distinguishing status code. Latency-normalized to the request
-    deadline."""
+    deadline. Records the sent body in the disclosure record (doc 13
+    §3: the petitioner-known column is projected from what actually
+    crossed the gateway; this event is the minimal producer, its
+    formalization tracked by sp-gm4)."""
     _wait_until(deadline)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(_REFUSED_BODY)))
     handler.end_headers()
     handler.wfile.write(_REFUSED_BODY)
+    audit.record("disclosure", {"body": {"status": "refused"}})
 
 
 def _respond_ok(handler, response, deadline):
     """Emit a well-formed response. Latency-normalized to the request
-    deadline."""
+    deadline. Records the sent body verbatim in the disclosure record
+    (doc 13 §3; see _respond_refused)."""
     body = json.dumps(response, separators=(",", ":"), sort_keys=True).encode("utf-8")
     _wait_until(deadline)
     handler.send_response(200)
@@ -838,6 +847,7 @@ def _respond_ok(handler, response, deadline):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+    audit.record("disclosure", {"body": response})
 
 
 def _wait_until(deadline):
@@ -1035,6 +1045,10 @@ if __name__ == "__main__":
     # smoke_ping, plus four polls. The malformed request is rejected
     # before request_received via send_error.
     assert events.count("request_received") == 5, events
+    # Every sent response lands in the disclosure record (doc 13 §3):
+    # the smoke_ping refusal, the parse-failure refusal, and the four
+    # poll responses.
+    assert events.count("disclosure") == 6, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
     # Poll path: deposit, ok, throttled, unknown, bad_input must all

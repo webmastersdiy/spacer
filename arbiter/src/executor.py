@@ -396,6 +396,29 @@ def _advanced_mode():
     )
 
 
+def _consume_registry_token(params, consumed_by):
+    """One-time-use enforcement (§4.7, GLOSSARY 'Recipient address
+    registry'): flip the resolved registry entry to used once the send
+    actually happened, recording the txid (Bitcoin) or payment hash
+    (Lightning) as consumed_by. The token rides in the timing params
+    only for the registry-gated ops (manage_bitcoin / manage_lightning
+    via gateway._registry_write_params); the eCash writes carry none
+    and skip this. registry is imported lazily to keep this module's
+    boot import surface unchanged. A failed flip is audit-logged for
+    operator triage (registry.consume logs its own refusal too); it
+    never surfaces to the petitioner - the send itself already
+    succeeded."""
+    token = params.get("recipient_token")
+    if not token:
+        return
+    import registry
+    if not registry.consume(token, consumed_by):
+        audit.record(
+            "executor_consume_failed",
+            {"token": token, "consumed_by": consumed_by},
+        )
+
+
 def _execute_manage_bitcoin(handle, params):
     """manage_bitcoin (doc 05 §4.6): broadcast an on-chain payment to the
     registry-resolved recipient address once the action-delay window has
@@ -421,6 +444,7 @@ def _execute_manage_bitcoin(handle, params):
     else:
         import bitcoin
         txid = bitcoin.sendtoaddress(address, _btc_str(amount_sats))
+    _consume_registry_token(params, txid)
     audit.record(
         "manage_bitcoin_executed",
         {"handle": handle, "amount_sats": amount_sats, "txid": txid},
@@ -448,6 +472,7 @@ def _execute_manage_lightning(handle, params):
     status = (pay.get("status") or "").upper()
     if status not in ("SUCCEEDED", "SUCCESS"):
         raise lnd.LndError(f"lightning payment not successful: {status!r}")
+    _consume_registry_token(params, pay.get("payment_hash") or "ln_payment")
     audit.record(
         "manage_lightning_executed",
         {
@@ -799,6 +824,28 @@ esac
         assert status == "result", status
         assert payload == {"status": "sent", "amount_sats": 2000}, payload
 
+        # --- consume-on-success: one-time-use enforcement (§4.7) -----
+        # A registry-gated write whose params carry recipient_token
+        # flips the entry to used after the backend send succeeds,
+        # recording the txid as consumed_by. The re-lookup refuses.
+        import registry
+        registry.configure(work / "destinations.yaml")
+        _, tok_consume = registry.add(
+            "tb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0l98cr"
+        )
+        h_btc_c = "handle_manage_bitcoin_consume"
+        timing.enqueue_action(
+            h_btc_c, "manage_bitcoin",
+            {"recipient_address": "tb1qexampleonchain", "amount_sats": 500,
+             "recipient_token": tok_consume},
+        )
+        assert execute_due_actions(now=far) == 1
+        assert deliver_due_results(now=far) == 1
+        status, payload, _ = results.poll(h_btc_c)
+        assert payload == {"status": "sent", "amount_sats": 500}, payload
+        st_c, _, _ = registry.lookup(tok_consume)
+        assert st_c == "used", st_c
+
         # --- manage_bitcoin, advanced mode -> LND on-chain wallet ----
         # SPACER_MODE=ecash -> _advanced_mode() True -> lnd.sendcoins,
         # the same backend the live signet round-trip exercises.
@@ -839,6 +886,7 @@ esac
             "ecash_ledger_defund",
             "manage_bitcoin_executed",    # onchain + LND send sub-tests
             "manage_lightning_executed",  # the LN pay sub-test
+            "registry_consume",           # consume-on-success sub-test
             "executor_action_failed",  # the foreign-mint refusal
             "executor_no_handler",     # the unknown op
         ):

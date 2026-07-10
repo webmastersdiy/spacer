@@ -193,22 +193,29 @@ def generate_token():
 
 # === Address validation ==============================================
 #
-# Three accepted formats (sp-77lxs.6), tried in fixed order:
+# Four accepted formats (sp-77lxs.6; bolt11 wired at the captain live
+# loop closing the doc-vs-code gap the schema reserved), tried in
+# fixed order:
 #   bech32m (P2TR taproot, BIP-350)
 #   bech32  (P2WPKH, P2WSH segwit, BIP-173)
 #   base58check (P2PKH, P2SH legacy, BIP-13)
+#   bolt11  (Lightning invoice, BOLT-11; the manage_lightning target)
 #
-# All three are checksum-self-validating, so a typo at the operator
+# All four are checksum-self-validating, so a typo at the operator
 # console is rejected before storage. The bech32 polymod and HRP-
 # expand helpers follow the BIP-173 reference implementation; the
 # only numeric difference between bech32 and bech32m is the constant
-# the polymod must yield (BIP-350).
+# the polymod must yield (BIP-350). bolt11 reuses the classic bech32
+# checksum with no 90-char cap (invoices run hundreds of chars) and
+# an HRP of "ln" + network + optional amount. bolt12 offers and
+# lightning addresses remain schema-reserved, not yet accepted.
 #
 # Network policy (no-mainnet hard rule): only test networks accepted.
 # bech32 HRP must be "tb" (testnet/signet) or "bcrt" (regtest); base58
 # version byte must be 0x6F (testnet/signet P2PKH) or 0xC4 (testnet/
-# signet P2SH). Mainnet bech32 HRP "bc" and base58 versions 0x00 / 0x05
-# are refused.
+# signet P2SH); bolt11 network must be tb (testnet), tbs (signet), or
+# bcrt (regtest). Mainnet bech32 HRP "bc", base58 versions 0x00 / 0x05,
+# and bolt11 network "bc" (lnbc...) are refused.
 
 _BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_CONST = 1
@@ -295,12 +302,77 @@ def _try_base58check(s):
     return version
 
 
+def _bolt11_network(rest):
+    """Return the network code from a bolt11 HRP with the leading
+    "ln" stripped (<network><amount?>), or None if the shape is not
+    a known network followed by a well-formed optional amount.
+
+    The prefixes are unambiguous because a bolt11 amount always
+    starts with a digit: "lnbcrt..." can never parse as bc + amount
+    "rt...", and "lntbs..." can never parse as tb + amount "s...".
+    The amount grammar (digits + one optional m/u/n/p multiplier) is
+    checked just enough to refuse an unknown network from
+    masquerading as a known prefix; full integrity comes from the
+    bech32 checksum over the whole string."""
+    for net in ("bcrt", "tbs", "tb", "bc"):
+        if not rest.startswith(net):
+            continue
+        tail = rest[len(net):]
+        if not tail:
+            return net
+        digits = tail[:-1] if tail[-1] in "munp" else tail
+        if digits and digits.isdigit():
+            return net
+        return None
+    return None
+
+
+def _try_bolt11(s):
+    """Validate s as a BOLT-11 Lightning invoice on a test network.
+    Returns the HRP on success, None on any failure (non-string,
+    mixed case, bad charset, bad bech32 checksum, unknown network,
+    mainnet network).
+
+    bolt11 is bech32-coded (BIP-173 charset and polymod, classic
+    constant) with two deviations that matter here: the 90-character
+    cap does not apply, and the HRP is "ln" + network + optional
+    amount. Field and signature semantics stay inside LND
+    (lnd.payinvoice validates what it pays); this gate validates
+    string integrity and the no-mainnet network rule only."""
+    if not isinstance(s, str) or len(s) < 20:
+        return None
+    if any(ord(c) < 33 or ord(c) > 126 for c in s):
+        return None
+    if s.lower() != s and s.upper() != s:
+        return None  # mixed case forbidden, as for on-chain bech32
+    s = s.lower()
+    if not s.startswith("ln"):
+        return None
+    pos = s.rfind("1")
+    if pos < 3:
+        return None
+    hrp = s[:pos]
+    net = _bolt11_network(hrp[2:])
+    if net is None or net == "bc":
+        return None  # unknown network, or the no-mainnet hard rule
+    data = []
+    for c in s[pos + 1:]:
+        v = _BECH32_ALPHABET.find(c)
+        if v == -1:
+            return None
+        data.append(v)
+    if _bech32_polymod(_bech32_hrp_expand(hrp) + data) != _BECH32_CONST:
+        return None
+    return hrp
+
+
 def detect_format(addr):
     """Detect the format of a candidate address. Returns one of
-    "bech32m", "bech32", "base58check" on success, None on failure.
-    Tries formats in fixed order; first match wins. The three
+    "bech32m", "bech32", "base58check", "bolt11" on success, None on
+    failure. Tries formats in fixed order; first match wins. The
     polymods / checksums are non-overlapping so at most one matches
-    in practice."""
+    in practice (a bolt11's HRP starts with "ln", never a bare
+    on-chain HRP, and on-chain bech32 caps at 90 chars)."""
     if not isinstance(addr, str):
         return None
     if _try_bech32(addr, _BECH32M_CONST) is not None:
@@ -309,15 +381,18 @@ def detect_format(addr):
         return "bech32"
     if _try_base58check(addr) is not None:
         return "base58check"
+    if _try_bolt11(addr) is not None:
+        return "bolt11"
     return None
 
 
 def canonicalize(addr, fmt):
-    """Return the canonical encoding for storage. bech32 / bech32m
-    are canonically lowercased (BIP-173 forbids mixed case at decode
-    and we normalize to the lowercase form on storage). base58check
-    is case-significant and stored verbatim."""
-    if fmt in ("bech32", "bech32m"):
+    """Return the canonical encoding for storage. bech32 / bech32m /
+    bolt11 are canonically lowercased (BIP-173 forbids mixed case at
+    decode and we normalize to the lowercase form on storage; bolt11
+    inherits the rule from its bech32 coding). base58check is
+    case-significant and stored verbatim."""
+    if fmt in ("bech32", "bech32m", "bolt11"):
         return addr.lower()
     return addr
 
@@ -841,10 +916,10 @@ def lookup(token):
     # stored address's format. If the result differs from the stored
     # format, storage is corrupt or the validator changed since
     # add-time. Audit-log full detail so the operator can investigate.
-    # Only applies to on-chain formats the arbiter validates; LN
-    # formats (bolt11, bolt12, lightning_address) are not yet wired
-    # through detect_format, so re-validation is skipped for them.
-    if fmt in ("bech32", "bech32m", "base58check") and detect_format(real) != fmt:
+    # Applies to every format detect_format validates (on-chain plus
+    # bolt11); the still-unwired LN formats (bolt12, lightning_address)
+    # are skipped.
+    if fmt in ("bech32", "bech32m", "base58check", "bolt11") and detect_format(real) != fmt:
         audit.record(
             "registry_lookup_anomalous",
             {"id": rid, "token": norm, "stored_format": fmt, "real": real},
@@ -1049,6 +1124,45 @@ if __name__ == "__main__":
     # Non-string input.
     assert detect_format(None) is None
     assert detect_format(b"tb1qabc") is None
+
+    # --- bolt11 validation -------------------------------------------
+    # Self-encoded invoice-shaped vectors (arbitrary zero payload +
+    # correct bech32 checksum), verifiable from first principles with
+    # the module's own polymod - the same discipline as the on-chain
+    # vectors above. Real signet invoices are exercised live.
+    def _mk_bolt11(hrp, payload_len=40):
+        data = [0] * payload_len
+        poly = _bech32_polymod(
+            _bech32_hrp_expand(hrp) + data + [0] * 6
+        ) ^ _BECH32_CONST
+        checksum = [(poly >> 5 * (5 - i)) & 31 for i in range(6)]
+        return hrp + "1" + "".join(
+            _BECH32_ALPHABET[d] for d in data + checksum
+        )
+
+    # Test networks accepted: signet (tbs), testnet (tb), regtest
+    # (bcrt), with and without an HRP amount.
+    assert detect_format(_mk_bolt11("lntbs")) == "bolt11"
+    assert detect_format(_mk_bolt11("lntbs4310n")) == "bolt11"
+    assert detect_format(_mk_bolt11("lntb500u")) == "bolt11"
+    assert detect_format(_mk_bolt11("lnbcrt1m")) == "bolt11"
+    # Uppercase form accepted (bech32 all-upper variant)...
+    assert detect_format(_mk_bolt11("lntbs256n").upper()) == "bolt11"
+    # ...and canonicalized to lowercase for storage.
+    up = _mk_bolt11("lntbs256n").upper()
+    assert canonicalize(up, "bolt11") == up.lower()
+    # Mainnet refused (no-mainnet hard rule): lnbc + amount / bare.
+    assert detect_format(_mk_bolt11("lnbc10n")) is None
+    assert detect_format(_mk_bolt11("lnbc")) is None
+    # Unknown network refused (lntbx is not tb + amount "x...").
+    assert detect_format(_mk_bolt11("lntbx5n")) is None
+    # Corrupted checksum refused: flip one data char.
+    good = _mk_bolt11("lntbs")
+    bad = good[:-8] + ("q" if good[-8] != "q" else "p") + good[-7:]
+    assert detect_format(bad) is None
+    # Mixed case refused, mirroring the on-chain bech32 rule.
+    mixed = good[: len("lntbs") + 3].upper() + good[len("lntbs") + 3:]
+    assert detect_format(mixed) is None
 
     # --- add / lookup happy path -------------------------------------
     addr = "tb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0l98cr"
@@ -1258,6 +1372,20 @@ if __name__ == "__main__":
         assert isinstance(ea, float)
         assert used_ in (0, 1)
         assert cb is None or isinstance(cb, str)
+
+    # --- bolt11 add / lookup / consume round-trip --------------------
+    # Runs last so the count-sensitive assertions above stay stable.
+    # Stored lowercased, returned by lookup, one-time-use flips like
+    # any other entry, and anomaly re-validation accepts the stored
+    # form (bolt11 is in the re-detect set).
+    inv = _mk_bolt11("lntbs4310n").upper()
+    rid_ln, token_ln = add(inv)
+    status, real_ln, fmt_ln = lookup(token_ln)
+    assert status == "ok" and fmt_ln == "bolt11", (status, fmt_ln)
+    assert real_ln == inv.lower(), real_ln
+    assert consume(token_ln, "smoke_payment_hash") is True
+    status, _, _ = lookup(token_ln)
+    assert status == "used", status
 
     print(f"OK: registry round-trips at audit={tmp_audit}, yaml={tmp_yaml}")
     sys.exit(0)
