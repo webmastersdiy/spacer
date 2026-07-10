@@ -1,0 +1,55 @@
+# Petitioner amount quantization: the allowed submission denominations.
+#
+# Read by arbiter/src/denominations.py. The privacy gateway refuses any
+# state-changing amount the petitioner submits (manage_bitcoin,
+# manage_lightning, fund_ecash) that is not exactly one of the values
+# below, BEFORE the registry / allowance / standing-approvals gates -
+# audit event decision_refuse_denomination, uniform refusal on the wire.
+# defund_ecash is exempt (it carries no gate-time amount).
+#
+# Why quantize: an amount the petitioner hands over is executed exactly
+# on the public LN / BTC / mint surface. A distinctive AI-chosen amount
+# would be a fingerprint linking the AI's request to the arbiter's node,
+# UTXOs, or float (design doc 12 G2). Restricting submissions to a small
+# ladder of round numbers - the amounts a large population of other
+# users also transacts - keeps every executed amount inside a big
+# anonymity set, so the amount alone carries no correlation signal.
+#
+# Choosing the ladder: use round figures that blend with human-chosen
+# amounts. The 1-2-5 series (banknote-denomination pattern) is the
+# default and maximizes overlap while staying usable. Do NOT use
+# powers of 2 for the network-facing amount - they are eCash-native but
+# stand OUT against human traffic. Fewer denominations = larger
+# anonymity set per denomination but coarser control; that trade is
+# yours to make. Keep the floor clear of the on-chain dust limit
+# (~294 sat for P2WPKH); 1000 is a safe floor.
+#
+# The arbiter ships with NO denominations.yaml: a missing file falls
+# back to the built-in DEFAULT_LADDER (privacy on with sane defaults -
+# unlike the allowance, whose missing-file default refuses everything,
+# because quantization is a privacy ENABLER, not a spend cap). A
+# malformed file also degrades to the built-in ladder (audited). To
+# change the set, copy this file to denominations.yaml and edit.
+#
+# SPACER_DENOMINATIONS (comma-separated sat integers) overrides this
+# file, for the test harness and quick experiments.
+#
+# Edit at the directly-attached arbiter console. Changes are captured by
+# the arb-auditability snapshot tree under arbiter/config/.
+#
+# Per design-docs/origin/12--2026-06-27-1337-external-value-boundary-and-scale-tradeoff.md
+# and GLOSSARY 'Quantized denominations'.
+
+# The built-in default (1-2-5 ladder, 1k sat to 1M sat). Uncomment and
+# edit to override.
+# denominations:
+#   - 1000
+#   - 2000
+#   - 5000
+#   - 10000
+#   - 20000
+#   - 50000
+#   - 100000
+#   - 200000
+#   - 500000
+#   - 1000000

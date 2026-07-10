@@ -70,6 +70,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
 import bitcoin
+import denominations
 import registry
 import results
 import scale
@@ -232,7 +233,14 @@ def process_request(handler):
         _respond_ok(handler, response, deadline)
         return
 
-    # Known write ops are gated twice. First the registry (§4.7) -
+    # Known write ops are gated three ways. First the amount gate
+    # (denominations, doc 12 G2) - the HOW-MUCH gate - refuses any
+    # amount off the standard denomination ladder before anything else
+    # runs, so a distinctive AI-chosen amount can never reach the
+    # network as a correlation fingerprint; checked first (ahead of the
+    # registry lookup) because a malformed amount is refusable without
+    # resolving a destination, and it collapses to the uniform refusal
+    # audited as decision_refuse_denomination. Then the registry (§4.7) -
     # the WHO gate - resolves the recipient_token; a non-`ok` lookup
     # collapses to the uniform "destination unavailable" refusal,
     # audit-logged as decision_refuse_registry so the operator can
@@ -243,9 +251,17 @@ def process_request(handler):
     # audit-logged as decision_defer_hitl with reason
     # no_standing_approval so the operator can distinguish the
     # default-pause from the registry miss and from an unknown op.
-    # Both gates must pass for dispatch to fire. The exposed write set
-    # depends on the deployment mode (_known_write_ops).
+    # All three gates must pass for dispatch to fire. The exposed write
+    # set depends on the deployment mode (_known_write_ops).
     if op in _known_write_ops():
+        amount = _request_amount_sats(request)
+        if not denominations.is_allowed(amount):
+            audit.record(
+                "decision_refuse_denomination",
+                {"op": op, "requested_sats": amount},
+            )
+            _respond_refused(handler, deadline)
+            return
         resolved = _pseudonymize_inbound(request)
         if resolved is None:
             audit.record("decision_refuse_registry", {"op": op})
@@ -695,6 +711,19 @@ def _handle_ecash_write(handler, request, deadline):
     op = request.get("op")
     amount = _request_amount_sats(request)
     if op == "fund_ecash":
+        # Amount gate first (doc 12 G2): the funded amount is minted and
+        # paid over LN exactly, so it must be a standard ladder
+        # denomination or it is a fingerprint. Checked ahead of the
+        # allowance cap - a malformed amount is refused on shape before
+        # any float-headroom question. defund_ecash is exempt (no
+        # gate-time amount; the token's value is already ladder-funded).
+        if not denominations.is_allowed(amount):
+            audit.record(
+                "decision_refuse_denomination",
+                {"op": op, "requested_sats": amount},
+            )
+            _respond_refused(handler, deadline)
+            return
         ecash = _ecash()
         outstanding = ecash.outstanding_sats()
         allowance = ecash.allowance_sats()
@@ -970,6 +999,24 @@ if __name__ == "__main__":
         decoded = json.loads(response_body.decode("utf-8"))
         assert decoded == {"status": "refused"}, f"unexpected body: {decoded!r}"
 
+        # Send a known write op (manage_bitcoin) with an off-ladder
+        # amount. The denomination gate (doc 12 G2) is checked first,
+        # ahead of the registry, so an off-ladder amount refuses
+        # uniformly and audits decision_refuse_denomination without
+        # needing a configured registry. 1234 is not on DEFAULT_LADDER.
+        body = json.dumps(
+            {"op": "manage_bitcoin", "recipient_token": "ABCDE4", "amount_sats": 1234}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+
         # Send a malformed request (not JSON). Should also refuse
         # uniformly, with no information about the parse failure.
         req = urllib.request.Request(
@@ -1057,16 +1104,20 @@ if __name__ == "__main__":
     with open(tmp_audit) as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert "gateway_start" in events, events
-    # 5 well-formed requests reach _parse_request: the original
-    # smoke_ping, plus four polls. The malformed request is rejected
-    # before request_received via send_error.
-    assert events.count("request_received") == 5, events
+    # 6 well-formed requests reach _parse_request: the original
+    # smoke_ping, the off-ladder manage_bitcoin, plus four polls. The
+    # malformed request is rejected before request_received via
+    # send_error.
+    assert events.count("request_received") == 6, events
     # Every sent response lands in the disclosure record (doc 13 §3):
-    # the smoke_ping refusal, the parse-failure refusal, and the four
-    # poll responses.
-    assert events.count("disclosure") == 6, events
+    # the smoke_ping refusal, the denomination refusal, the parse-
+    # failure refusal, and the four poll responses.
+    assert events.count("disclosure") == 7, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
+    # The off-ladder manage_bitcoin was refused at the amount gate,
+    # ahead of the registry (doc 12 G2).
+    assert "decision_refuse_denomination" in events, events
     # Poll path: deposit, ok, throttled, unknown, bad_input must all
     # appear. The bad-input case audit-logs at the gateway layer
     # (decision_poll_bad_input) without reaching results.poll().

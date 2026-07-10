@@ -50,12 +50,17 @@ TMUX = "spacer"
 PY = sys.executable or "python3"
 GATE_HOST, GATE_PORT = "127.0.0.1", 8420
 
-AMOUNT_ONCHAIN = 1500   # manage_bitcoin self-send
-AMOUNT_ML = 256         # manage_lightning -> arbiter-owned mint quote
-AMOUNT_FUND = 512       # fund/defund float round-trip
-ALLOWANCE = 2000        # config/ecash.yaml cap
+# All AI-submitted amounts must be on the denomination ladder (doc 12
+# G2, arbiter/src/denominations.py) or the gateway refuses them. These
+# are the smallest ladder rungs, keeping principal small (all recovered
+# each cycle) while conforming to the quantization gate.
+AMOUNT_ONCHAIN = 2000   # manage_bitcoin self-send (ladder rung)
+AMOUNT_ML = 1000        # manage_lightning -> arbiter-owned mint quote (ladder)
+AMOUNT_FUND = 1000      # fund/defund float round-trip (ladder)
+OFF_LADDER = 1234       # deliberately off-ladder amount for the S7 negative
+ALLOWANCE = 3000        # config/ecash.yaml cap (>= a couple fund rungs)
 SWEEP_MIN = 64          # melt arbiter-wallet residue at/above this
-LOSS_BOUND = 800        # sats; per-cycle conservation alarm threshold
+LOSS_BOUND = 900        # sats; per-cycle conservation alarm threshold
 
 # Reuse the executor's verified stdout parsers (pure regex helpers).
 sys.path.insert(0, str(REPO / "arbiter" / "src"))
@@ -582,17 +587,38 @@ def cmd_cycle():
                  "result.status=defunded"])
 
     # --- S7 negatives (no value moves) ---------------------------------
+    # Amounts here are on-ladder (2000/5000) EXCEPT the two off-ladder
+    # denomination probes: the denomination gate is checked first, so an
+    # off-ladder amount short-circuits there rather than reaching the
+    # registry / allowance / standing-approval path each other negative
+    # means to exercise.
     watch.mark()
+    # Off-ladder amount refuses at the denomination gate (doc 12 G2),
+    # ahead of the registry (manage_bitcoin) and the allowance (fund) -
+    # even a well-formed token never gets looked up.
+    expect_refused(petcli("submit", "manage-bitcoin", "--to-token", "ABCDE4",
+                          "--amount-sats", str(OFF_LADDER)), "off-ladder manage_bitcoin")
+    watch.wait_for(ev("decision_refuse_denomination", op="manage_bitcoin"), 10,
+                   "denomination refusal (btc)")
+    expect_refused(petcli("advanced", "ecash", "fund", "--amount-sats",
+                          str(OFF_LADDER)), "off-ladder fund")
+    watch.wait_for(ev("decision_refuse_denomination", op="fund_ecash"), 10,
+                   "denomination refusal (fund)")
+    # Reused (consumed) token: on-ladder amount so it passes the
+    # denomination gate and reaches the registry, which refuses it used.
     expect_refused(petcli("submit", "manage-bitcoin", "--to-token", tok_btc,
-                          "--amount-sats", "10"), "reused token")
+                          "--amount-sats", "2000"), "reused token")
     watch.wait_for(ev("decision_refuse_registry"), 10, "used-token refusal")
     expect_refused(petcli("submit", "manage-bitcoin", "--to-token", "ZZZZZ0",
-                          "--amount-sats", "10"), "bad checksum")
+                          "--amount-sats", "2000"), "bad checksum")
+    # On-ladder amount over the allowance headroom -> allowance refusal.
     expect_refused(petcli("advanced", "ecash", "fund", "--amount-sats",
-                          str(ALLOWANCE + 500)), "over allowance")
+                          "5000"), "over allowance")
     watch.wait_for(ev("decision_refuse_allowance"), 10, "allowance refusal")
+    # On-ladder amount within allowance but over the fund standing bound
+    # (1024) -> HITL park.
     expect_refused(petcli("advanced", "ecash", "fund", "--amount-sats",
-                          "1600"), "fund past standing bound")
+                          "2000"), "fund past standing bound")
     quote2_out = arb_cashu("invoice", 2000, "--no-check")
     bolt11_hitl, _q2 = _parse_mint_quote(quote2_out)
     tok_hitl = registry_add(bolt11_hitl)
@@ -630,9 +656,10 @@ def cmd_cycle():
                           handle=aged[-1]["h"]), 10, "already-consumed audit")
         log("  aged-handle already_consumed path exercised")
     tui_capture(cdir, "s7-negatives",
-                ["decision_refuse_registry", "decision_refuse_allowance",
-                 "decision_defer_hitl", "result_poll_unknown",
-                 "result_poll_throttled", "status=refused"])
+                ["decision_refuse_denomination", "decision_refuse_registry",
+                 "decision_refuse_allowance", "decision_defer_hitl",
+                 "result_poll_unknown", "result_poll_throttled",
+                 "status=refused"])
 
     # --- S8 sweep: melt arbiter-wallet residue back to LND -------------
     watch.mark()
