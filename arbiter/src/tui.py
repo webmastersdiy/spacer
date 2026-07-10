@@ -77,17 +77,25 @@ def _shorten(value, limit=_FRAG):
     return s if len(s) <= limit else s[: limit - 1] + "~"
 
 
-def _compact(payload):
+def _compact(payload, prefix=""):
     """Render a payload dict as `k=v` pairs with long values
-    truncated. Deterministic order for stable captures."""
+    truncated. One level of nesting flattens to dotted keys
+    (result.status=sent) so a released result's fields stay readable
+    rather than vanishing inside a truncated JSON blob. Deterministic
+    order for stable captures."""
     if not isinstance(payload, dict):
         return _shorten(payload, 60)
     parts = []
     for k in sorted(payload):
         v = payload[k]
+        key = f"{prefix}{k}"
+        if isinstance(v, dict) and not prefix:
+            inner = _compact(v, prefix=f"{k}.")
+            parts.append(inner if inner else f"{key}={{}}")
+            continue
         if isinstance(v, dict):
             v = json.dumps(v, separators=(",", ":"), sort_keys=True)
-        parts.append(f"{k}={_shorten(v)}")
+        parts.append(f"{key}={_shorten(v)}")
     return " ".join(parts)
 
 
