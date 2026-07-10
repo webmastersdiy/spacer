@@ -423,7 +423,11 @@ def submit_and_result(watch, args, desc, result_timeout=330):
     log(f"  {desc}: handle={handle} (estimate {resp.get('_petcli_estimate_window_s')}s)")
     watch.wait_for(ev("result_deposit", handle=handle), result_timeout,
                    f"result_deposit for {desc}")
-    poll = petcli("result", "poll", "--handle", handle)
+    # --handle=<value>, not --handle <value>: a result handle is
+    # secrets.token_urlsafe, which can begin with '-'; passed as a
+    # separate argv token argparse would read it as a flag (seen live in
+    # sequence B). The =form binds it as the value regardless.
+    poll = petcli("result", "poll", f"--handle={handle}")
     if poll.get("status") != "result":
         raise StepError(f"{desc}: poll after deposit not result: {poll}")
     return handle, poll["result"]
@@ -654,19 +658,19 @@ def cmd_cycle():
     # reused fake handle reads as throttled (same wire response, but
     # the audit cause this asserts would never fire again).
     ghost = f"neverexisted-{n}-{int(t_start)}"
-    nz = petcli("result", "poll", "--handle", ghost)
+    nz = petcli("result", "poll", f"--handle={ghost}")
     if nz != {"status": "not_yet"}:
         raise StepError(f"unknown-handle poll: {nz}")
     watch.wait_for(ev("result_poll_unknown", handle=ghost), 10,
                    "unknown-handle audit")
-    th = petcli("result", "poll", "--handle", h1)
+    th = petcli("result", "poll", f"--handle={h1}")
     if th != {"status": "not_yet"}:
         raise StepError(f"floor-throttled poll: {th}")
     watch.wait_for(ev("result_poll_throttled", handle=h1), 10,
                    "throttled audit")
     aged = [h for h in st["handles"] if t_start - h["ts"] > 660]
     if aged:
-        ac = petcli("result", "poll", "--handle", aged[-1]["h"])
+        ac = petcli("result", "poll", f"--handle={aged[-1]['h']}")
         if ac != {"status": "not_yet"}:
             raise StepError(f"aged consumed poll: {ac}")
         watch.wait_for(ev("result_poll_already_consumed",
