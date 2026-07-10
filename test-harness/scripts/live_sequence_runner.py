@@ -284,10 +284,14 @@ def tmux(*args, check=True):
 
 
 def tui_capture(cycle_dir, step, markers):
-    """Capture the TUI pane, save it, and require every marker."""
+    """Capture the TUI pane, save it, and require every marker. The
+    scrollback is deep (-S -3000) because the doc-13 fixed-height
+    secret blocks (SPACER_TUI_PAD lines each, default 20) make one
+    step span many rows; markers are substring greps so block layout
+    does not matter."""
     cap = ""
-    for _ in range(16):  # renderer polls at 250ms; allow 4s
-        cap = tmux("capture-pane", "-p", "-S", "-200", "-t",
+    for _ in range(24):  # renderer idle-flushes at 250ms; allow 6s
+        cap = tmux("capture-pane", "-p", "-S", "-3000", "-t",
                    f"{TMUX}:tui").stdout
         if all(m in cap for m in markers):
             break
@@ -358,10 +362,19 @@ def cmd_setup(fresh=False):
              f"cd {REPO} && . {p['envsh']} && exec {PY} arbiter/src/arbiter.py",
              "Enter")
         tmux("new-window", "-a", "-t", f"{TMUX}:arbiter", "-n", "tui")
+        # Launched WITHOUT SPACER_TUI_ACK: the operator must clear the
+        # doc-13 §5 safety gate by typing 'I understand' in the tui tab.
+        # A cycle refuses to run until they do (cmd_cycle precheck). For
+        # an unattended run on a known-safe KVM host, prepend
+        # SPACER_TUI_ACK=1 here. Deliberately NOT exec'd: if the console
+        # ever exits (abort, Ctrl-C), the pane drops back to a shell
+        # instead of the whole tmux window closing.
         tmux("send-keys", "-t", f"{TMUX}:tui",
-             f"cd {REPO} && AUDIT_LOG_PATH={p['audit']} exec {PY} arbiter/src/tui.py",
+             f"cd {REPO} && AUDIT_LOG_PATH={p['audit']} {PY} arbiter/src/tui.py",
              "Enter")
         log("tmux session 'spacer' launched (windows: arbiter, tui)")
+        log("ACK REQUIRED: switch to the 'tui' tab and type 'I understand' "
+            "to clear the console safety gate before running a cycle")
     for _ in range(40):
         if gateway_up():
             break
@@ -412,10 +425,26 @@ def expect_refused(resp, desc):
         raise StepError(f"{desc}: expected uniform refusal, got {resp}")
 
 
+def tui_acknowledged():
+    """True once the operator has cleared the TUI's startup safety gate
+    (doc 13 §5). The console prints its warning and waits for a typed
+    'I understand' before rendering; the column header only appears
+    after that, so its presence is the ack signal."""
+    cap = tmux("capture-pane", "-p", "-t", f"{TMUX}:tui", check=False).stdout
+    return "PETITIONER-KNOWN" in cap
+
+
 def cmd_cycle():
     p = paths()
     if not gateway_up():
         raise StepError("gateway not up; run setup first")
+    if not tui_acknowledged():
+        raise StepError(
+            "TUI not acknowledged. Switch to the 'tui' tmux tab and type: "
+            "I understand   (or, for an unattended run on a known-safe "
+            "KVM host, relaunch the tui window with SPACER_TUI_ACK=1). "
+            "The console must clear its production/KVM safety gate before "
+            "a cycle can assert its captures.")
     st = load_state()
     n = st["cycle"] + 1
     cdir = p["cycles"] / f"{n:03d}"
@@ -440,9 +469,13 @@ def cmd_cycle():
     qc = petcli("advanced", "channels")
     if qc.get("status") != "ok" or not isinstance(qc.get("capacity_sats"), int):
         raise StepError(f"query channels unexpected: {qc}")
+    # balance_read / capacity_read are consumed into the inline `real:`
+    # pairing (doc 13 §2 real-vs-told), so assert the paired ground
+    # truth, not the raw event names.
     tui_capture(cdir, "s0-reads",
                 ["op=query_balance", "op=query_channels", "balance_sats=",
-                 "balance_read", "capacity_read", "[chain]", "[ ln  ]"])
+                 "capacity_sats=", "real_sats=", "presented_sats=",
+                 "[chain]", "[ ln  ]"])
 
     # --- S1 operator provisioning ------------------------------------
     watch.mark()
