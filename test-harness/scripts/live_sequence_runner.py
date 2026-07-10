@@ -563,10 +563,15 @@ def cmd_cycle():
                    "unknown-op HITL park")
     expect_refused(raw_post(b"this is not json"), "malformed body")
     expect_refused(raw_post(b"x" * 70000), "oversized body")
-    nz = petcli("result", "poll", "--handle", "neverexisted42")
+    # Unique per cycle: the poll floor is keyed per handle, so a
+    # reused fake handle reads as throttled (same wire response, but
+    # the audit cause this asserts would never fire again).
+    ghost = f"neverexisted-{n}-{int(t_start)}"
+    nz = petcli("result", "poll", "--handle", ghost)
     if nz != {"status": "not_yet"}:
         raise StepError(f"unknown-handle poll: {nz}")
-    watch.wait_for(ev("result_poll_unknown"), 10, "unknown-handle audit")
+    watch.wait_for(ev("result_poll_unknown", handle=ghost), 10,
+                   "unknown-handle audit")
     th = petcli("result", "poll", "--handle", h1)
     if th != {"status": "not_yet"}:
         raise StepError(f"floor-throttled poll: {th}")
