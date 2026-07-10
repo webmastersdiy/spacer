@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55208},"ts":"2026-07-10T12:41:25Z"}
-{"event":"request_received","payload":{"op":"defund_ecash"},"ts":"2026-07-10T12:41:25Z"}
-{"event":"decision_defer_hitl","payload":{"op":"defund_ecash","reason":"no_standing_approval"},"ts":"2026-07-10T12:41:25Z"}
-{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-10T12:41:25Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":53116},"ts":"2026-07-10T15:47:39Z"}
+{"event":"request_received","payload":{"op":"defund_ecash"},"ts":"2026-07-10T15:47:39Z"}
+{"event":"decision_defer_hitl","payload":{"op":"defund_ecash","reason":"no_standing_approval"},"ts":"2026-07-10T15:47:39Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-10T15:47:39Z"}

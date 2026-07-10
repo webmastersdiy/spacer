@@ -1,5 +1,6 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54785},"ts":"2026-07-10T12:41:09Z"}
-{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-07-10T12:41:09Z"}
-{"event":"scale_tier_init","payload":{"real_sats":50000,"scale":1.0,"tier":0},"ts":"2026-07-10T12:41:09Z"}
-{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-07-10T12:41:09Z"}
-{"event":"disclosure","payload":{"body":{"balance_sats":50000,"status":"ok"}},"ts":"2026-07-10T12:41:09Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52945},"ts":"2026-07-10T15:47:24Z"}
+{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-07-10T15:47:24Z"}
+{"event":"scale_tier_init","payload":{"real_sats":50000,"scale":1.0,"tier":0},"ts":"2026-07-10T15:47:24Z"}
+{"event":"balance_read","payload":{"presented_sats":50000,"real_sats":50000},"ts":"2026-07-10T15:47:24Z"}
+{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-07-10T15:47:24Z"}
+{"event":"disclosure","payload":{"body":{"balance_sats":50000,"status":"ok"}},"ts":"2026-07-10T15:47:24Z"}

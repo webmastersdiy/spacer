@@ -774,12 +774,22 @@ def _dispatch(request):
             # Advanced extension: the LND on-chain wallet total.
             raw = _lnd().walletbalance()
             total = int(raw.get("total_balance", "0"))
-            return {"status": "ok", "balance_sats": scale.present(total)}
-        # onchain (default): the bitcoind wallet's confirmed balance.
-        # getbalance() returns a Decimal in BTC; scale to integer sats
-        # (the same wire shape the LND path presents) before cloaking.
-        total = int(bitcoin.getbalance() * _SATS_PER_BTC)
-        return {"status": "ok", "balance_sats": scale.present(total)}
+        else:
+            # onchain (default): the bitcoind wallet's confirmed
+            # balance. getbalance() returns a Decimal in BTC; scale to
+            # integer sats (the same wire shape the LND path presents)
+            # before cloaking.
+            total = int(bitcoin.getbalance() * _SATS_PER_BTC)
+        presented = scale.present(total)
+        # Operator-side record of real-vs-presented for this read: the
+        # doc 13 column-2 material ("real (unbanded) amounts") the
+        # operator console pairs against the disclosed figure. Never
+        # crosses the gateway; the petitioner sees only presented.
+        audit.record(
+            "balance_read",
+            {"real_sats": total, "presented_sats": presented},
+        )
+        return {"status": "ok", "balance_sats": presented}
     if op == "query_channels":
         # query_channels is an advanced-extension read; the onchain
         # router gates it before dispatch, so this branch only runs in
@@ -787,7 +797,13 @@ def _dispatch(request):
         raw = _lnd().channelbalance()
         local = int(raw.get("local_balance", {}).get("sat", "0"))
         remote = int(raw.get("remote_balance", {}).get("sat", "0"))
-        return {"status": "ok", "capacity_sats": scale.present(local + remote)}
+        presented = scale.present(local + remote)
+        # Same operator-side real-vs-presented record as query_balance.
+        audit.record(
+            "capacity_read",
+            {"real_sats": local + remote, "presented_sats": presented},
+        )
+        return {"status": "ok", "capacity_sats": presented}
     return {"status": "not_implemented", "op": op}
 
 

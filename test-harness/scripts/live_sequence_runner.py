@@ -441,7 +441,8 @@ def cmd_cycle():
     if qc.get("status") != "ok" or not isinstance(qc.get("capacity_sats"), int):
         raise StepError(f"query channels unexpected: {qc}")
     tui_capture(cdir, "s0-reads",
-                ["op=query_balance", "op=query_channels", "balance_sats="])
+                ["op=query_balance", "op=query_channels", "balance_sats=",
+                 "balance_read", "capacity_read", "[chain]", "[ ln  ]"])
 
     # --- S1 operator provisioning ------------------------------------
     watch.mark()
@@ -468,7 +469,7 @@ def cmd_cycle():
     txid = (exec1 or {}).get("payload", {}).get("txid", "")
     tui_capture(cdir, "s2-manage-bitcoin",
                 ["manage_bitcoin_executed", "registry_consume",
-                 "result.status=sent", f"re-print handle={h1[:12]}"])
+                 "result.status=sent", f"real: handle={h1[:12]}"])
 
     # --- S3 manage_lightning: pay arbiter-owned mint quote ------------
     watch.mark()
@@ -501,7 +502,8 @@ def cmd_cycle():
     if not fund_token.startswith("cashu"):
         raise StepError(f"fund token unexpected: {fund_token[:40]}")
     tui_capture(cdir, "s4-fund",
-                ["ecash_fund_executed", "ecash_ledger_fund", "token=cashu"])
+                ["ecash_fund_executed", "ecash_ledger_fund", "token=cashu",
+                 "[ecash]"])
 
     # --- S5 AI custody hop (local wallet ops, no arbiter) --------------
     rcv = petcli("advanced", "ecash", "receive", "--token", fund_token)
