@@ -144,8 +144,7 @@ The public IP was not in a single field - it appeared in every peer entry,
 once per peer connection. The LAN address `192.168.50.12` appeared in every
 `addrbind` field.
 
-Source: `bitcoind_notes.md` (section "Observed facts from live runs") and the
-bitcoind AI-facing doc §2 threat model.
+Source: the bitcoind AI-facing doc §2 threat model.
 
 ### 3.2 LND node identity (clearnet URI and Tor URI)
 
@@ -208,7 +207,7 @@ P2P traffic - including our single peer connection to `45.79.52.207` - is
 clearnet. Our IP is visible to the peer and to any network observer on the
 path.
 
-Source: `bitcoind_notes.md` (observed facts) and bitcoind AI-facing doc §2.
+Source: bitcoind AI-facing doc §2.
 
 ### 3.8 Dandelion absent in Mutinynet fork
 
@@ -217,7 +216,7 @@ Source: `bitcoind_notes.md` (observed facts) and bitcoind AI-facing doc §2.
 peers without a stem phase. The first peer to receive a transaction has
 strong evidence we originated it, especially with a single-peer setup.
 
-Source: `bitcoind_notes.md` (observed facts) and bitcoind AI-facing doc §4.1.
+Source: bitcoind AI-facing doc §4.1.
 
 ---
 
