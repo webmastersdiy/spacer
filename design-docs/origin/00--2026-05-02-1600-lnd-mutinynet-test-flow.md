@@ -9,7 +9,7 @@
 
 ## 1. Topology
 
-Single node: [Node A](../../GLOSSARY.md#node-a) (Voltage-hosted LND, Mutinynet) talking to the [faucet](../../GLOSSARY.md#faucet-mutinynet-faucet)'s LN node as counterparty. Two self-controlled nodes were the original plan, but the [Voltage](../../GLOSSARY.md#voltage) free tier caps at one Mutinynet node, and the local-second-node alternative ([ldk-node](../../GLOSSARY.md#ldk-node)) was blocked (no PyPI bindings, needs a Rust toolchain; see `state/INSTALL_BLOCKER.md`). The faucet node accepts connections, opens channels, and issues payable bolt11 invoices.
+Single node: [Node A](../../GLOSSARY.md#node-a) (Voltage-hosted LND, Mutinynet) talking to the [faucet](../../GLOSSARY.md#faucet-mutinynet-faucet)'s LN node as counterparty. Two self-controlled nodes were the original plan, but the [Voltage](../../GLOSSARY.md#voltage) free tier caps at one Mutinynet node, and the local-second-node alternative ([ldk-node](../../GLOSSARY.md#ldk-node)) was blocked (no PyPI bindings, needs a Rust toolchain). The faucet node accepts connections, opens channels, and issues payable bolt11 invoices.
 
 ## 2. Setup, and the two non-obvious steps
 
@@ -48,7 +48,7 @@ Node A identity: pubkey `029ec3af...62617`, host `first-test.u.voltageapp.io` (`
 
 ## 5. Faucet endpoints
 
-Base `https://faucet.mutinynet.com/api`. `POST /bolt11` needs **no auth** (handy for generating invoices in tests); `POST /onchain`, `/lightning`, and `/channel` all require a GitHub OAuth session. A standalone Rust `mutinynet-cli` exists for scripted on-chain faucet funding without a browser (source at `state/mutinynet_cli_main.rs`).
+Base `https://faucet.mutinynet.com/api`. `POST /bolt11` needs **no auth** (handy for generating invoices in tests); `POST /onchain`, `/lightning`, and `/channel` all require a GitHub OAuth session. A standalone Rust `mutinynet-cli` exists for scripted on-chain faucet funding without a browser.
 
 ## 6. Limitations and gotchas
 
@@ -57,13 +57,13 @@ Base `https://faucet.mutinynet.com/api`. `POST /bolt11` needs **no auth** (handy
 - **`go install lncli@latest` installs the v0.0.2 stub** - always use the prebuilt tarball.
 - **The TLS cert dance** (§2) is mandatory because Voltage uses Let's Encrypt.
 - **Channel confirmation time varies** - Mutinynet targets ~30 s blocks but LND needs 3 confirmations; budget 2-5 min from `openchannel` to active.
-- **ldk-node is a dead end without Rust** (`state/INSTALL_BLOCKER.md`); a second Voltage node or a local LND binary is more practical.
+- **ldk-node is a dead end without Rust**; a second Voltage node or a local LND binary is more practical.
 
 ## 7. Reproducible vs not
 
-The §3 sequence is fully scriptable given credentials in `state/nodeA.env` and `state/faucet.env`; the only manual steps are the Voltage signup and the browser faucet funding (step 1). Txids and addresses differ every run; the ~168 s channel timing is approximate (Mutinynet block times vary).
+The §3 sequence is fully scriptable given credentials; the only manual steps are the Voltage signup and the browser faucet funding (step 1). Txids and addresses differ every run; the ~168 s channel timing is approximate (Mutinynet block times vary).
 
-**Pointers:** leak map `01--2026-05-02-1601-privacy-and-timing-leaks.md`; `state/INSTALL_BLOCKER.md`; Voltage `voltage.cloud`; esplora `mutinynet.com`; faucet `faucet.mutinynet.com`; LND releases `github.com/lightningnetwork/lnd/releases`.
+**Pointers:** leak map `01--2026-05-02-1601-privacy-and-timing-leaks.md`; Voltage `voltage.cloud`; esplora `mutinynet.com`; faucet `faucet.mutinynet.com`; LND releases `github.com/lightningnetwork/lnd/releases`.
 
 ## 8. Implementation learnings
 
