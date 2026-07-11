@@ -24,9 +24,11 @@ Two columns (doc 13 §2, §3):
   Requests (request_received) render dimmed in the same column.
 - Column 2 (alert / red): PETITIONER-NEVER-KNOWN. Every other audit
   event: gateway decisions, registry activity, executor results with
-  real txids / amounts / fees, ledger movements, and the balance_read /
-  capacity_read events that record the REAL backend figure. Default-to-
-  never (doc 13 §3): an unrecognized event lands in column 2.
+  real txids / amounts / fees, ledger movements, and the
+  snapshot_refresh events that record the REAL backend figure at each
+  read-snapshot refresh (doc 15; the per-request balance_served /
+  capacity_served events carry the served value + snapshot age).
+  Default-to-never (doc 13 §3): an unrecognized event lands in column 2.
 
 Three leak-closing rules make the LEFT column safe to expose on its own:
 
@@ -55,10 +57,13 @@ Three leak-closing rules make the LEFT column safe to expose on its own:
 3. Real-vs-told pairing (doc 13 §2). When a reply carrying a number is
    released, the same row's right side re-prints the withheld ground
    truth (`real: ...`) beside it, so the operator reads told-vs-real at
-   a glance: read disclosures pair with the preceding balance_read /
-   capacity_read real figure; released results pair with the executor's
-   remembered real summary. This re-print shares the disclosure's
-   timestamp, so per rule 1 the right timestamp is a spacer.
+   a glance: read disclosures pair the latest snapshot_refresh real /
+   presented figures for that op with the request's snapshot age from
+   balance_served / capacity_served (doc 15 §4.8 - the operator's
+   told-vs-real survives the snapshot split and gains age as a health
+   fact); released results pair with the executor's remembered real
+   summary. This re-print shares the disclosure's timestamp, so per
+   rule 1 the right timestamp is a spacer.
 
 Every row also carries a LAYER tag per column - [chain] / [ ln  ] /
 [ecash] ([  -  ] for rail-neutral plumbing) - naming which value rail
@@ -143,8 +148,11 @@ _TAGS = {"chain": "[chain]", "ln": "[ ln  ]", "ecash": "[ecash]", None: "[  -  ]
 
 # Events consumed for real-vs-told pairing rather than shown as their
 # own secret-block line (they surface as the `real:` beside the read
-# disclosure they belong to).
-_PAIR_ONLY = ("balance_read", "capacity_read")
+# disclosure they belong to). balance_served / capacity_served are the
+# per-request snapshot-serving events (doc 15); balance_read /
+# capacity_read are their pre-snapshot ancestors, kept so historical
+# audit logs still render their pairing.
+_PAIR_ONLY = ("balance_served", "capacity_served", "balance_read", "capacity_read")
 
 
 _WARNING = f"""{_BOLD}{_YELLOW}
@@ -263,8 +271,13 @@ class Renderer:
     - _pending_poll_handle: the handle named by the most recent
       result_poll_ok, which the next disclosure re-prints (the gateway
       is single-threaded, so the poll reply is the next disclosure);
-    - _last_read: the most recent balance_read / capacity_read payload,
-      re-printed beside the read disclosure it belongs to;
+    - _last_read: the most recent per-request read event payload
+      (balance_served / capacity_served, or the pre-snapshot
+      balance_read / capacity_read from older logs), consumed by the
+      read disclosure it belongs to;
+    - _last_refresh: per-op payload of the latest snapshot_refresh
+      (doc 15), whose real / presented figures pair against every read
+      disclosure until the next refresh;
     - _last_op: the most recent request op, for tagging acks/refusals.
     """
 
@@ -282,6 +295,7 @@ class Renderer:
         self._handle_layer = {}
         self._pending_poll_handle = None
         self._last_read = None
+        self._last_refresh = {}
         self._last_op = None
 
     # --- output primitives ------------------------------------------
@@ -328,9 +342,9 @@ class Renderer:
         op = payload.get("op")
         if op in _LAYER_BY_OP:
             return _LAYER_BY_OP[op]
-        if event in ("balance_read",) or event.startswith("scale_"):
+        if event in ("balance_read", "balance_served") or event.startswith("scale_"):
             return "chain"
-        if event == "capacity_read":
+        if event in ("capacity_read", "capacity_served"):
             return "ln"
         if event.startswith("ecash_"):
             return "ecash"
@@ -401,11 +415,34 @@ class Renderer:
         layer = None
         if isinstance(body, dict):
             if "balance_sats" in body or "capacity_sats" in body:
-                layer = "chain" if "balance_sats" in body else "ln"
+                is_balance = "balance_sats" in body
+                layer = "chain" if is_balance else "ln"
+                op = "query_balance" if is_balance else "query_channels"
+                # Rule 3 pairing for a snapshot-served read (doc 15
+                # §4.8): the ground truth is the latest refresh's real /
+                # presented figures, and the served event contributes
+                # the snapshot age the operator watches as a health
+                # fact. Pre-snapshot logs carried real / presented on
+                # the per-request read event itself; fall back to that
+                # payload so old logs keep their pairing.
+                pair = {}
+                refresh = self._last_refresh.get(op)
+                if refresh:
+                    pair.update({
+                        k: refresh[k]
+                        for k in ("real_sats", "presented_sats")
+                        if k in refresh
+                    })
                 if self._last_read is not None:
-                    rtag = _TAGS[layer]
-                    rtext = "real: " + _compact(self._last_read[1])
+                    read_payload = self._last_read[1]
+                    if "snapshot_age_s" in read_payload:
+                        pair["snapshot_age_s"] = read_payload["snapshot_age_s"]
+                    if not pair:
+                        pair = dict(read_payload)
                     self._last_read = None
+                if pair:
+                    rtag = _TAGS[layer]
+                    rtext = "real: " + _compact(pair)
             elif body.get("status") == "received" and body.get("handle"):
                 layer = _LAYER_BY_OP.get(self._last_op)
                 if layer:
@@ -453,6 +490,11 @@ class Renderer:
         if event in _PAIR_ONLY:
             self._last_read = (event, dict(payload))
             return
+        if event == "snapshot_refresh":
+            # Remember the per-op ground truth for every read
+            # disclosure until the next refresh (rule 3); the refresh
+            # still renders as its own secret-block line below.
+            self._last_refresh[payload.get("op")] = dict(payload)
         if event == "result_poll_ok":
             self._pending_poll_handle = payload.get("handle")
         self._buffer_secret(event, payload)
@@ -605,11 +647,15 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     # A secret timestamp (12:00:09) that is NEVER part of a petitioner
     # disclosure - it must never appear in any left column cell.
     SECRET_TS = "2026-07-10T12:00:09Z"
+    # A refresh on the drainer clock (doc 15): its timestamp is also
+    # secret and must never surface in the left column.
+    REFRESH_TS = "2026-07-10T11:59:55Z"
     seq = [
+        {"ts": REFRESH_TS, "event": "snapshot_refresh", "payload": {"op": "query_balance", "real_sats": 142686, "presented_sats": 14268, "served_sats": 14000}},
         {"ts": "2026-07-10T12:00:00Z", "event": "request_received", "payload": {"op": "query_balance"}},
-        {"ts": "2026-07-10T12:00:00Z", "event": "balance_read", "payload": {"real_sats": 142686, "presented_sats": 14268}},
+        {"ts": "2026-07-10T12:00:00Z", "event": "balance_served", "payload": {"served_sats": 14000, "snapshot_age_s": 5.1}},
         {"ts": "2026-07-10T12:00:00Z", "event": "decision_allow", "payload": {"op": "query_balance"}},
-        {"ts": "2026-07-10T12:00:00Z", "event": "disclosure", "payload": {"body": {"balance_sats": 14268, "status": "ok"}}},
+        {"ts": "2026-07-10T12:00:00Z", "event": "disclosure", "payload": {"body": {"balance_sats": 14000, "status": "ok"}}},
         {"ts": "2026-07-10T12:00:01Z", "event": "request_received", "payload": {"op": "manage_bitcoin", "recipient_token": "ABCDE4", "amount_sats": 1500}},
         {"ts": "2026-07-10T12:00:01Z", "event": "decision_allow", "payload": {"op": "manage_bitcoin"}},
         {"ts": "2026-07-10T12:00:01Z", "event": "disclosure", "payload": {"body": {"status": "received", "handle": "H1"}}},
@@ -643,11 +689,14 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     for ln in lines:
         assert len(ln) == WIDTH, (len(ln), WIDTH, repr(ln))
 
-    # Rule 1: the secret timestamp 12:00:09 NEVER appears in any left
-    # cell; it appears only on the right.
+    # Rule 1: the secret timestamps (the executor burst at 12:00:09 and
+    # the snapshot refresh at 11:59:55) NEVER appear in any left cell;
+    # they appear only on the right.
     assert any("12:00:09" in right(ln) for ln in body), "secret ts must show on right"
+    assert any("11:59:55" in right(ln) for ln in body), "refresh ts must show on right"
     for ln in body:
         assert "12:00:09" not in left(ln), f"secret ts leaked into left: {ln!r}"
+        assert "11:59:55" not in left(ln), f"refresh ts leaked into left: {ln!r}"
 
     # Petitioner rows: left carries ts + tag + content; the read request
     # is tagged [chain].
@@ -660,12 +709,20 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     assert mbreq, "manage_bitcoin request row missing"
     assert "amount_sats=1500" in left(mbreq[0]) and "recipient_token=ABCDE4" in left(mbreq[0]), mbreq[0]
 
-    # Read pairing (rule 3): the balance disclosure shows the presented
-    # figure on the left and the REAL figure on the right, same row.
-    bal = [ln for ln in body if "balance_sats=14268" in left(ln)]
+    # Read pairing (rule 3): the balance disclosure shows the served
+    # figure on the left; the right pairs the refresh-time REAL /
+    # presented figures with the request's snapshot age (doc 15 §4.8).
+    bal = [ln for ln in body if "balance_sats=14000" in left(ln)]
     assert bal and "real_sats=142686" in right(bal[0]), bal
+    assert "presented_sats=14268" in right(bal[0]), bal
+    assert "snapshot_age_s=5.1" in right(bal[0]), bal
     # Its right timestamp is a spacer (rule 1: same-ts pair, left only).
     assert "12:00:00" not in right(bal[0]).split("real:")[0], "paired right ts must be blank"
+    # The refresh itself renders as a secret-block line too (the
+    # operator sees every refresh, not just the ones a read follows).
+    refr = [ln for ln in body if "snapshot_refresh" in right(ln)]
+    assert refr and left(refr[0]).strip() == "", "refresh renders right-only"
+    assert "[chain]" in right(refr[0]), refr
 
     # Rule 2: secret events render in a fixed PAD-line block, left blank.
     exec_rows = [ln for ln in body if "manage_bitcoin_executed" in right(ln)]
@@ -699,6 +756,20 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     for ln in narrow:
         assert len(ln) <= 60, (len(ln), repr(ln))
     assert any("~" in ln for ln in narrow), "narrow content must truncate with ~"
+
+    # Legacy pre-snapshot logs still pair: balance_read carried the
+    # real / presented figures on the per-request event itself, so a
+    # renderer that has seen no snapshot_refresh falls back to that
+    # payload for the `real:` re-print.
+    outl = io.StringIO()
+    rl = Renderer(out=outl, pad=2, width=WIDTH)
+    rl.feed({"ts": "2026-07-10T14:00:00Z", "event": "balance_read",
+             "payload": {"real_sats": 142686, "presented_sats": 14268}})
+    rl.feed({"ts": "2026-07-10T14:00:00Z", "event": "disclosure",
+             "payload": {"body": {"balance_sats": 14268, "status": "ok"}}})
+    legacy = strip(outl.getvalue()).splitlines()
+    lbal = [ln for ln in legacy if "balance_sats=14268" in left(ln)]
+    assert lbal and "real_sats=142686" in right(lbal[0]), legacy
 
     # always_pad emits a PAD-line block even with no pending secrets.
     out2 = io.StringIO()

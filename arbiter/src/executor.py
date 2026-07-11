@@ -26,6 +26,13 @@ Flow (ecash mode, doc 07 §3):
          -> [result delay] -> deliver_due_results() -> results.deposit()
          -> petitioner polls the handle and learns the outcome.
 
+The drainer also carries the read-snapshot refresh sweep (doc 15,
+snapshots.py): each tick, refresh_read_snapshots() re-reads the
+backends for any read op whose randomized refresh epoch has elapsed
+and stores the presented+quantized value the gateway serves. The
+sweep's clock is event-independent by design - it ticks here, off the
+request path, never on wallet activity.
+
 Threading. The gateway request path is single-threaded by design (doc
 05 §4.1, for latency-normalization predictability). This drainer runs
 in a SEPARATE daemon thread started at boot (arbiter.main). It never
@@ -78,6 +85,7 @@ import time
 
 import audit
 import results
+import snapshots
 import timing
 
 
@@ -556,6 +564,33 @@ def deliver_due_results(now=None):
     return delivered
 
 
+# === read-snapshot refresh sweep ====================================
+
+# One-way latch: set after the first NotImplementedError from the
+# snapshot sweep (production epochs are blocked on sp-77lxs.3, doc 15
+# §4.4). Without it the drainer would re-raise - and audit-log - the
+# same NotImplementedError every tick; with it the operator gets one
+# loud snapshot_refresh_unavailable record and a quiet drainer, and
+# the gateway keeps refusing reads uniformly (no row is ever written).
+_snapshots_unavailable = False
+
+
+def refresh_read_snapshots(now=None):
+    """Run one read-snapshot refresh sweep (snapshots.refresh_due,
+    doc 15 §4) on the drainer's clock. Returns the count of ops swept,
+    0 once the production gate has latched. now= is for tests; the
+    drainer passes None."""
+    global _snapshots_unavailable
+    if _snapshots_unavailable:
+        return 0
+    try:
+        return snapshots.refresh_due(now=now)
+    except NotImplementedError as e:
+        _snapshots_unavailable = True
+        audit.record("snapshot_refresh_unavailable", {"error": str(e)[:200]})
+        return 0
+
+
 # === background drainer thread ======================================
 
 # How often the drainer wakes to check for due rows. Short enough that
@@ -576,11 +611,18 @@ def _tick_s():
 
 
 def run_forever(stop_event):
-    """Drainer loop: drain due actions then due results every tick
-    until stop_event is set. A tick-level exception is audit-logged and
-    swallowed so a transient backend hiccup cannot kill the drainer."""
+    """Drainer loop: refresh due read snapshots, then drain due actions
+    and due results, every tick until stop_event is set. A tick-level
+    exception is audit-logged and swallowed so a transient backend
+    hiccup cannot kill the drainer.
+
+    The snapshot sweep rides this drainer by design (doc 15 §4): the
+    refresh clock is arbiter-internal and event-independent, exactly
+    like the action/result clocks, and the drainer is the one place
+    that already ticks on wall time off the request path."""
     while not stop_event.is_set():
         try:
+            refresh_read_snapshots()
             execute_due_actions()
             deliver_due_results()
         except Exception as e:
@@ -693,13 +735,15 @@ esac
     fake_lncli.chmod(0o755)
 
     # Fake bitcoin-cli: sendtoaddress echoes a 64-hex txid (the onchain
-    # manage_bitcoin backend, used when SPACER_MODE is unset).
+    # manage_bitcoin backend, used when SPACER_MODE is unset);
+    # getbalance feeds the read-snapshot sweep sub-test.
     fake_bitcoin = work / "bitcoin-cli"
     fake_bitcoin.write_text(
         """#!/bin/sh
 case "$1" in -datadir=*) shift;; esac
 case "$1" in
   sendtoaddress) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';;
+  getbalance) printf '0.00050000';;
   *) echo "fake bitcoin-cli: unknown $1" >&2; exit 64;;
 esac
 """
@@ -873,6 +917,29 @@ esac
         status, payload, _ = results.poll(h_unknown)
         assert payload == {"status": "failed"}, payload
 
+        # --- read-snapshot sweep (doc 15) ---------------------------
+        # The drainer's per-tick sweep: onchain mode (SPACER_MODE
+        # unset) refreshes query_balance from the fake bitcoin-cli
+        # (0.00050000 BTC -> 50_000 sats, T0 no-cloak, grid-aligned).
+        os.environ["SPACER_SCALE_MODE"] = "test"
+        assert refresh_read_snapshots() == 1
+        served, age = snapshots.serve("query_balance")
+        assert served == 50_000, served
+        assert age < 5.0, age
+
+        # Production gate latches once: with test mode off the sweep
+        # audit-logs snapshot_refresh_unavailable a single time and
+        # returns 0 thereafter (no per-tick raise/log spam).
+        snapshots.seed_for_test(
+            "query_balance", 50_000, time.time(), time.time() - 1.0
+        )  # due row, so the sweep must draw a window and hit the gate
+        del os.environ["SPACER_TIMING_MODE"]
+        assert refresh_read_snapshots() == 0
+        assert _snapshots_unavailable is True
+        assert refresh_read_snapshots() == 0  # latched, quiet
+        os.environ["SPACER_TIMING_MODE"] = "test"
+        _snapshots_unavailable = False  # restore for any later sub-test
+
         # --- audit trail carries the executor's events -------------
         events = [
             json.loads(line)["event"]
@@ -889,8 +956,11 @@ esac
             "registry_consume",           # consume-on-success sub-test
             "executor_action_failed",  # the foreign-mint refusal
             "executor_no_handler",     # the unknown op
+            "snapshot_refresh",        # the read-snapshot sweep
         ):
             assert required in events, (required, sorted(set(events)))
+        # The production gate audit-logged exactly once (the latch).
+        assert events.count("snapshot_refresh_unavailable") == 1, events
 
         print(f"OK: executor send + fund/defund round-trips (fakes) at {work}")
     finally:
