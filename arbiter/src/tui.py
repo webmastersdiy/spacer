@@ -93,9 +93,9 @@ DEFAULT_AUDIT_PATH = Path(__file__).resolve().parent.parent / "state" / "audit.l
 # not wrapped.
 _TS_W = 8
 _TAG_W = 7
-_SEP = " | "
+_SEP = " |   | "
 _PREFIX_W = _TS_W + 1 + _TAG_W + 1          # 17 per side
-_OVERHEAD = 2 * _PREFIX_W + len(_SEP)       # 37: both prefixes + sep
+_OVERHEAD = 2 * _PREFIX_W + len(_SEP)       # 41: both prefixes + sep
 _LEFT_RATIO = 0.42                          # content split, left:right
 _MIN_COL = 6                                # floor per content cell
 _MIN_WIDTH = _OVERHEAD + 2 * _MIN_COL       # narrowest we size for
