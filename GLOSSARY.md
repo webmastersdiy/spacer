@@ -678,15 +678,24 @@ expensive in any realistic threat model:
   pending consume" by response time.
 
 **Refusal behavior.** Every refusal path collapses to one bit on
-the petitioner side: ok (the call proceeds) or refused. The
-production deployment defers refusals through the result registry
-(see [Result delay](#result-delay)) on a 1-hour ± 30-minute
-randomized delay so the petitioner cannot correlate submission time
-with response time. (Test mode collapses this delay; see the
-test-mode timing rules in the architecture overview's exit
-criteria.) The current `arbiter/src/gateway.py` skeleton refuses
-synchronously; the deferred-rejection path lands with the result-
-registry bead.
+the petitioner side: ok (the call proceeds) or refused. That bit is
+not delivered at submit: a refused state-changing call returns the
+SAME `received` + handle acknowledgment a gate-passed write returns,
+and the refusal is deferred through the result registry (see [Result
+delay](#result-delay)) on a 1-hour ± 30-minute randomized delay, so
+the petitioner cannot correlate submission time with response time and
+cannot tell at submit whether the call passed or was refused. (Test
+mode collapses this delay; see the test-mode timing rules in the
+architecture overview's exit criteria.) Wired in
+`arbiter/src/gateway.py` (`_defer_rejection_and_ack`): every write-op
+gate miss - denomination, registry, standing approval, the eCash
+allowance cap, the extension/mode gate, and the unknown-op HITL park -
+defers a uniform rejection payload identical to a dispatched-but-failed
+send, so the deferred outcome never leaks which gate refused. Only
+malformed input (parse / protocol error) and the not-yet-refreshed
+read path still refuse synchronously - neither is a state-changing gate
+decision, and neither leaks policy the petitioner does not already
+hold.
 
 ### Standing approvals
 

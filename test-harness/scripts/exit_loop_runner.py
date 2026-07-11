@@ -623,8 +623,10 @@ def _apply_precondition(precondition):
 #   runner installs at module-import time; manage_bitcoin exercises the
 #   registry-miss refusal and both standing-approvals branches. The
 #   extension ops (query_channels / manage_lightning / fund_ecash /
-#   defund_ecash) are extension-gated: recognized but refused
-#   uniformly (decision_refuse_mode).
+#   defund_ecash) are extension-gated (decision_refuse_mode):
+#   recognized but disabled. The disabled WRITES defer the refusal to
+#   a received-ack (sp-tb0); the disabled READ (query_channels) refuses
+#   synchronously.
 # - advanced (SPACER_MODE=lightning|full): the Lightning extension
 #   layers query_channels / manage_lightning back on, and the
 #   query_balance refresh reads the LND wallet instead of bitcoind -
@@ -660,13 +662,23 @@ def _apply_precondition(precondition):
 
 
 def _is_received_ack(r):
-    """A submit that passed every gate now returns the timing-layer
-    acknowledgment - status 'received' plus an opaque handle the
-    petitioner later polls (doc 05 §3, §4.6, §4.8) - with petcli's local
-    estimate-window stamp (§5.2) layered on. The handle is random per
-    call, so the four allowed-by-standing-approval variants assert the
-    shape, not an exact dict. This is the real executor path that
-    replaced the not_implemented dispatch stub (sp-uwa0v0)."""
+    """The timing-layer acknowledgment - status 'received' plus an opaque
+    handle the petitioner later polls (doc 05 §3, §4.6, §4.8) - with
+    petcli's local estimate-window stamp (§5.2) layered on. The handle is
+    random per call, so variants assert the shape, not an exact dict.
+
+    As of sp-tb0 this is the shape a gate-REFUSED state-changing call
+    returns too, not only a gate-passed one: a refusal is deferred through
+    the result registry and acknowledged identically, so submit carries no
+    pass-vs-refuse signal (GLOSSARY 'Recipient address registry'
+    probing-infeasibility; doc 05 §4.7). The refused-* / parked-* variants
+    and the allowed-by-standing-approval variants therefore share this
+    exact predicate - they are wire-indistinguishable by construction, and
+    the expected_audit_events (decision_refuse_* / decision_defer_hitl vs.
+    standing_approval_match + decision_allow) are the only evidence that
+    tells them apart, operator-side. The one exception is the READ mode
+    gate (query_channels in onchain mode), which still refuses
+    synchronously - reads are snapshot-served, never enqueued."""
     return (
         set(r) == {"status", "handle", "_petcli_estimate_window_s"}
         and r.get("status") == "received"
@@ -800,12 +812,12 @@ VARIANTS = [
     # --- submit manage-bitcoin: the primary (onchain) write op. State-
     # changing ops resolve through the recipient address registry
     # (§4.7). Sending with a token that is not in the registry (here,
-    # the made-up 'ABCDEF') refuses uniformly at the registry gate.
-    # The wire shape is the standard refusal body; the audit log
-    # carries decision_refuse_registry so the operator can see *which*
-    # token failed and why. The advanced-extension manage_lightning
-    # analogues live in the advanced-mode group at the end of the
-    # manifest.
+    # the made-up 'ABCDEF') fails at the registry gate. The refusal is
+    # DEFERRED (sp-tb0): the wire shape is the same received-ack a pass
+    # returns, and the audit log carries decision_refuse_registry so the
+    # operator can see *which* token failed and why. The advanced-
+    # extension manage_lightning analogues live in the advanced-mode
+    # group at the end of the manifest.
     {
         "path": ("submit", "manage-bitcoin", "refused-unknown-token"),
         "petcli_args": [
@@ -815,17 +827,16 @@ VARIANTS = [
         ],
         "uses_arbiter": True,
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "description": (
             "manage_bitcoin is a known write op; the gateway calls "
             "registry.lookup() on recipient_token=ABCDEF, which "
-            "fails (bad checksum or unknown - either way non-`ok`), "
-            "and the gateway refuses uniformly. petcli stamps the "
-            "§5.2 local 30s estimate alongside the refusal. Audit "
-            "logs decision_refuse_registry."
+            "fails (bad checksum or unknown - either way non-`ok`). "
+            "The refusal is DEFERRED: the gateway returns the same "
+            "received-ack a gate-passed write returns (petcli stamps "
+            "the §5.2 local 30s estimate on it), so submit is "
+            "indistinguishable from a pass and the refusal surfaces "
+            "only on a later poll. Audit logs decision_refuse_registry."
         ),
     },
     # --- submit: post-registry, standing-approvals gate. The token
@@ -850,17 +861,15 @@ VARIANTS = [
             ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
             # No seed_standing_approvals: default-pause path.
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
             "manage_bitcoin with a valid (registry-resolved) recipient "
             "token but NO matching standing-approval rule. The "
             "registry resolves; the standing-approvals check fails "
             "(default-pause = empty config); the gateway HITL-parks "
-            "and refuses uniformly. arbiter-events.log must contain "
+            "and DEFERS the refusal (received-ack, not a synchronous "
+            "refusal). arbiter-events.log must contain "
             "decision_defer_hitl with reason no_standing_approval, "
             "distinct from the refused-unknown-token variants' "
             "decision_refuse_registry."
@@ -1209,12 +1218,14 @@ VARIANTS = [
     },
     # --- extension gate: Lightning ops while the arbiter runs onchain
     # (default) mode. The ops are recognized but deliberately disabled;
-    # the gateway refuses uniformly BEFORE the registry or standing-
-    # approvals gates are consulted and audit-logs decision_refuse_mode
-    # (distinct from decision_refuse_registry / decision_defer_hitl).
-    # The send variant stages a resolvable token + a matching standing-
-    # approval rule to prove the mode gate wins over an otherwise-
-    # allowable call.
+    # the mode gate fires BEFORE the registry or standing-approvals
+    # gates are consulted and audit-logs decision_refuse_mode (distinct
+    # from decision_refuse_registry / decision_defer_hitl). A disabled
+    # WRITE (manage_lightning) DEFERS the refusal to a received-ack; a
+    # disabled READ (query_channels, next variant) refuses
+    # synchronously. The send variant stages a resolvable token + a
+    # matching standing-approval rule to prove the mode gate wins over
+    # an otherwise-allowable call.
     {
         "path": ("advanced", "manage-lightning", "refused-onchain-mode"),
         "petcli_args": [
@@ -1232,10 +1243,7 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
             "manage_lightning against an onchain (default) arbiter. The "
@@ -1243,8 +1251,9 @@ VARIANTS = [
             "matches - in advanced mode this exact call dispatches "
             "(advanced/manage-lightning/allowed-by-standing-approval) - "
             "but the mode gate refuses first: the op belongs to the "
-            "disabled Lightning extension. Wire shape is the standard "
-            "uniform refusal; arbiter-events.log carries "
+            "disabled Lightning extension. Wire shape is the deferred "
+            "received-ack (identical to a pass, so 'is Lightning on?' "
+            "is not a submit-time oracle); arbiter-events.log carries "
             "decision_refuse_mode with reason "
             "advanced_extension_disabled (the runner asserts the "
             "event), distinct from a registry miss or an unknown op."
@@ -1260,18 +1269,22 @@ VARIANTS = [
         "description": (
             "query_channels against an onchain (default) arbiter: the "
             "Lightning read is extension-gated, so the gateway refuses "
-            "uniformly without dispatching (lnd.py is never imported). "
-            "arbiter-events.log carries decision_refuse_mode (the "
-            "runner asserts the event); the wire body is the same "
-            "uniform refusal every other refusal cause produces."
+            "SYNCHRONOUSLY without dispatching (lnd.py is never "
+            "imported). arbiter-events.log carries decision_refuse_mode "
+            "(the runner asserts the event). Unlike the write gates, a "
+            "read refusal is NOT deferred - reads are snapshot-served "
+            "and never enqueued, so there is no result handle to hand "
+            "back (the read-path probing model is doc 15's; sp-tb0)."
         ),
     },
     # --- extension gate, eCash rung (doc 07 §9): the eCash writes are
     # recognized in every mode but honored only in ecash mode. Against
-    # an onchain (default) arbiter they refuse uniformly at the same
-    # mode gate as the Lightning ops - decision_refuse_mode, op field
-    # disambiguating which extension was asked for - and ecash.py is
-    # never imported (the no-ecash-import gate asserts that later).
+    # an onchain (default) arbiter they hit the same mode gate as the
+    # Lightning WRITE ops and DEFER the refusal to a received-ack -
+    # decision_refuse_mode, op field disambiguating which extension was
+    # asked for - and ecash.py is never imported (the deferral enqueues
+    # via the timing layer, not the mint; the no-ecash-import gate
+    # asserts that later).
     {
         "path": ("advanced", "ecash", "fund", "refused-onchain-mode"),
         "petcli_args": [
@@ -1280,19 +1293,17 @@ VARIANTS = [
         ],
         "uses_arbiter": True,
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
             "fund_ecash against an onchain (default) arbiter. The op "
-            "belongs to the disabled eCash extension, so the gateway "
-            "refuses uniformly at the mode gate before any allowance "
-            "or standing-approvals logic runs (arbiter/src/ecash.py "
-            "is never imported). arbiter-events.log carries "
-            "decision_refuse_mode with reason "
-            "advanced_extension_disabled; the op field tells the "
+            "belongs to the disabled eCash extension, so the mode gate "
+            "fires before any allowance or standing-approvals logic "
+            "runs (arbiter/src/ecash.py is never imported - the "
+            "deferral enqueues via the timing layer, which needs no "
+            "eCash import). The refusal is deferred to a received-ack; "
+            "arbiter-events.log carries decision_refuse_mode with reason "
+            "advanced_extension_disabled, the op field telling the "
             "operator it was the eCash extension being probed."
         ),
     },
@@ -1304,10 +1315,7 @@ VARIANTS = [
         ],
         "uses_arbiter": True,
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
             "defund_ecash against an onchain (default) arbiter: same "
@@ -1413,10 +1421,7 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "lightning",
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_registry"],
         "description": (
             "Same registry-miss path as submit/manage-bitcoin/refused-"
@@ -1436,10 +1441,7 @@ VARIANTS = [
         "preconditions": [
             ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
             "Same default-pause path as submit/manage-bitcoin/parked-no-"
@@ -1497,18 +1499,17 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "lightning",
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
             "fund_ecash against a lightning-mode arbiter. The "
             "Lightning extension is on, but the eCash extension is "
-            "its own opt-in rung (doc 07 §9): the mode gate refuses "
-            "uniformly with decision_refuse_mode, and ecash.py stays "
-            "unimported (the no-ecash-import gate asserts that "
-            "lightning-mode variants ran mint-free)."
+            "its own opt-in rung (doc 07 §9): the mode gate fires "
+            "(decision_refuse_mode) and DEFERS the refusal to a "
+            "received-ack, and ecash.py stays unimported (the deferral "
+            "goes through the timing layer, not the mint; the "
+            "no-ecash-import gate asserts lightning-mode variants ran "
+            "mint-free)."
         ),
     },
     {
@@ -1520,10 +1521,7 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "full",
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_mode"],
         "description": (
             "defund_ecash against a SPACER_MODE=full arbiter: `full` "
@@ -1602,10 +1600,7 @@ VARIANTS = [
         "preconditions": [
             # No seed_ecash_allowance: the missing-config default.
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_allowance"],
         "description": (
             "fund_ecash in ecash mode with NO allowance config "
@@ -1639,10 +1634,7 @@ VARIANTS = [
                  "rationale": "exit-loop test rule"},
             ]),
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_refuse_allowance"],
         "forbidden_audit_events": ["standing_approval_match"],
         "description": (
@@ -1669,17 +1661,14 @@ VARIANTS = [
             ("seed_ecash_allowance", 50000),
             # No seed_standing_approvals: default-pause path.
         ],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
             "fund_ecash inside the allowance (1000 of 50_000) but "
             "with NO standing-approval rule: the allowance gate "
             "passes, the standing-approvals check fails (default-"
-            "pause = empty config), the gateway HITL-parks and "
-            "refuses uniformly. arbiter-events.log carries "
+            "pause = empty config), the gateway HITL-parks and DEFERS "
+            "the refusal (received-ack). arbiter-events.log carries "
             "decision_defer_hitl with reason no_standing_approval, "
             "distinct from the allowance refusal."
         ),
@@ -1728,17 +1717,14 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "ecash",
         "preconditions": [],
-        "expected": lambda r: (
-            r.get("status") == "refused"
-            and r.get("_petcli_estimate_window_s") == 30.0
-        ),
+        "expected": _is_received_ack,
         "expected_audit_events": ["decision_defer_hitl"],
         "description": (
             "defund_ecash in ecash mode with no standing-approval "
             "rule: no allowance check applies (defund only shrinks "
             "the float), the standing-approvals default-pause parks "
-            "it in HITL and refuses uniformly. arbiter-events.log "
-            "carries decision_defer_hitl with reason "
+            "it in HITL and DEFERS the refusal (received-ack). "
+            "arbiter-events.log carries decision_defer_hitl with reason "
             "no_standing_approval. No allowance config is seeded - "
             "defund must not require one."
         ),
@@ -2114,11 +2100,14 @@ def _run_variant(variant):
             return (False, f"expected returned False; result={parsed}")
 
         # Optional audit-event assertions. Refusal wire shapes are
-        # deliberately uniform across causes (§4.1), so a variant whose
-        # whole point is WHICH gate fired (mode gate vs. registry miss
-        # vs. allowance vs. standing-approvals park) cannot be told
-        # apart by the response alone; the distinguishing audit event
-        # in arbiter-events.log is the evidence, and the runner checks
+        # deliberately uniform across causes (§4.1) - and, as of sp-tb0,
+        # uniform with a gate-PASS too: a refused write defers and
+        # returns the same received-ack a passed write returns (doc 05
+        # §4.7). So a variant whose whole point is WHICH gate fired (mode
+        # gate vs. registry miss vs. allowance vs. standing-approvals
+        # park), or even WHETHER one fired, cannot be told apart by the
+        # response alone; the distinguishing audit event in
+        # arbiter-events.log is the only evidence, and the runner checks
         # it here. forbidden_audit_events is the complement: a variant
         # whose point is that a gate did NOT fire (the allowance check
         # preceding standing approvals; a pending tier shift not yet

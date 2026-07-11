@@ -28,19 +28,40 @@ based on op:
   randomized event-independent clock. The request path never touches
   bitcoind / LND, so polling at any rate only observes the snapshot.
 - Known write ops: resolve the recipient_token through the recipient
-  address registry during pseudonymize-inbound; on miss, refuse
-  uniformly. The registry IS the destination gate - there is no
-  separate outbound-policy step.
+  address registry during pseudonymize-inbound; on any gate miss
+  (denomination, registry, standing approval) DEFER the refusal (see
+  below) rather than refusing synchronously. The registry IS the
+  destination gate - there is no separate outbound-policy step.
 - eCash write ops in ecash mode: no recipient_token (the destination
   is structurally the operator-pinned mint), so they skip the
   registry and run allowance cap (fund only) -> standing approvals ->
-  dispatch (doc 07 §3, §8).
+  dispatch (doc 07 §3, §8); a gate miss defers the same way.
 - Extension ops while their extension is disabled (Lightning or eCash
-  ops in onchain mode; eCash ops in lightning mode): refuse uniformly,
-  audit-logged decision_refuse_mode so the operator sees an
-  extension-gated call distinctly from an unknown op.
-- Unknown ops: park in the HITL queue and refuse uniformly so the
-  operator can decide on the directly-attached console.
+  ops in onchain mode; eCash ops in lightning mode): audit-logged
+  decision_refuse_mode so the operator sees an extension-gated call
+  distinctly from an unknown op. A disabled WRITE defers its refusal;
+  a disabled READ (query_channels in onchain mode) refuses
+  synchronously - reads are snapshot-served, never enqueued.
+- Unknown ops: park in the HITL queue and defer the refusal so an
+  unrecognized op is petitioner-indistinguishable at submit from a
+  recognized-and-gated one; the operator decides on the directly-
+  attached console.
+
+Deferred refusal (§4.7, §4.8). A refused state-changing call does NOT
+return a synchronous {"status": "refused"} - that would be an instant,
+free pass-vs-refuse oracle a petitioner could use to map policy
+thresholds (a standing-approval amount band, the registry, the
+deployment mode). Instead the gateway returns the SAME
+{"status": "received", "handle": ...} a gate-passed write returns and
+enqueues a kind="rejection" on the timing layer
+(_defer_rejection_and_ack); the refusal surfaces only on the
+petitioner's later poll, after the rejection-delivery window, as the
+uniform _REJECTION_PAYLOAD. Submit thus carries no signal - by content
+or by timing - of whether the call passed or was refused, or which gate
+fired. Malformed input (parse / protocol error) and the not-yet-
+refreshed read path still refuse synchronously: those are not
+state-changing gate decisions and leak no policy the petitioner does
+not already hold.
 
 Every branch audit-logs at each decision point, and the response is
 latency-normalized regardless of which branch fired. There are no
@@ -281,12 +302,12 @@ def process_request(handler):
                 "decision_refuse_denomination",
                 {"op": op, "requested_sats": amount},
             )
-            _respond_refused(handler, deadline)
+            _defer_rejection_and_ack(handler, op, deadline)
             return
         resolved = _pseudonymize_inbound(request)
         if resolved is None:
             audit.record("decision_refuse_registry", {"op": op})
-            _respond_refused(handler, deadline)
+            _defer_rejection_and_ack(handler, op, deadline)
             return
         if not standing_approvals.matches(
             op,
@@ -298,7 +319,7 @@ def process_request(handler):
                 {"op": op, "reason": "no_standing_approval"},
             )
             _hitl_park(request)
-            _respond_refused(handler, deadline)
+            _defer_rejection_and_ack(handler, op, deadline)
             return
         # Both gates passed. Enqueue on the timing layer and acknowledge
         # with an opaque handle; the executor (executor.py) drains the
@@ -336,14 +357,31 @@ def process_request(handler):
             "decision_refuse_mode",
             {"op": op, "reason": "advanced_extension_disabled"},
         )
-        _respond_refused(handler, deadline)
+        # A disabled extension WRITE defers exactly like any other gate
+        # refusal, so "is this extension enabled?" is not a submit-time
+        # oracle: in its home mode the op passes the gates and returns
+        # received+handle, so the disabled case must return that too. A
+        # disabled extension READ (query_channels in onchain mode) stays a
+        # synchronous refusal - reads are snapshot-served synchronously
+        # (doc 15) and never enqueued, so there is no deferred-result
+        # handle to hand back, and the read-path probing model is doc 15's
+        # concern, not this gate's.
+        if op in _ADVANCED_READ_OPS:
+            _respond_refused(handler, deadline)
+        else:
+            _defer_rejection_and_ack(handler, op, deadline)
         return
 
-    # Unknown op. Park in the HITL queue and refuse uniformly so the
-    # operator can decide on the directly-attached console (§6).
+    # Unknown op. Park in the HITL queue, then defer the refusal through
+    # the result registry so an unrecognized op is petitioner-
+    # indistinguishable at submit from a recognized-and-gated one (both
+    # return received+handle) - the op namespace is not a submit-time
+    # oracle either. The operator decides on the directly-attached console
+    # (§6); until the HITL queue table lands (_hitl_park is a no-op
+    # skeleton) the deferred outcome is the uniform refusal.
     audit.record("decision_defer_hitl", {"op": op})
     _hitl_park(request)
-    _respond_refused(handler, deadline)
+    _defer_rejection_and_ack(handler, op, deadline)
 
 
 def _read_body(handler):
@@ -547,17 +585,17 @@ def _pseudonymize_inbound(request):
     `recipient_token` (so the dispatch layer can call
     registry.consume() after a successful send). On any non-`ok`
     lookup outcome (missing field, unknown token, bad checksum,
-    expired, used, anomalous, wrong type) returns None so the
-    caller emits the uniform "destination unavailable" body and
-    audit-logs decision_refuse_registry.
+    expired, used, anomalous, wrong type) returns None so the caller
+    defers the refusal through the result registry
+    (_defer_rejection_and_ack) and audit-logs decision_refuse_registry.
 
-    Per §4.7 production timing, registry refusals are deferred by
-    the rejection-delivery delay (1 hour ± 30 min) before the
-    petitioner sees them. The current gateway refuses synchronously;
-    sp-77lxs.14 (result registry) wires the deferred-rejection path
-    so the petitioner picks up "destination unavailable" via the
-    normal poll cadence, breaking the submission-to-response timing
-    channel.
+    Per §4.7 production timing, registry refusals are deferred by the
+    rejection-delivery delay (1 hour ± 30 min) before the petitioner
+    sees them. This is wired (here + _defer_rejection_and_ack): the
+    caller returns the same received-ack a gate-passed write returns,
+    and the "destination unavailable" outcome surfaces later via the
+    petitioner's normal poll cadence as the uniform _REJECTION_PAYLOAD,
+    breaking the submission-to-response timing channel.
     """
     token = request.get("recipient_token")
     if token is None:
@@ -680,6 +718,61 @@ def _enqueue_write_and_ack(handler, op, params, deadline):
     _respond_ok(handler, {"status": "received", "handle": handle}, deadline)
 
 
+# Uniform deferred-rejection payload. A gate-refused state-changing call
+# is deposited into the result registry under this body (kind="rejection")
+# once the rejection-delivery window elapses. It is the SAME shape the
+# executor emits for a dispatched-but-failed action (executor.py's
+# {"status": "failed"}), so a policy refusal is indistinguishable at poll
+# from a genuine execution failure - and it is uniform across every gate
+# (denomination, registry, standing approval, allowance, mode,
+# unknown op), so the deferred outcome never leaks WHICH gate refused,
+# the same non-leak the synchronous _REFUSED_BODY gives at submit. Treated
+# as immutable (only ever handed to json.dumps in the timing layer).
+_REJECTION_PAYLOAD = {"status": "failed"}
+
+
+def _defer_rejection_and_ack(handler, op, deadline):
+    """Defer a gate refusal through the result registry and acknowledge
+    it with the SAME {"status": "received", "handle": ...} shape a
+    gate-passed write returns (§4.7, §4.8; GLOSSARY 'Recipient address
+    registry' probing-infeasibility / refusal-behavior).
+
+    The point: a petitioner cannot tell at submit time - by response
+    content OR by response timing - whether a state-changing call passed
+    its gates or was refused. Both paths mint an opaque handle and return
+    the received-ack, latency-normalized to the same deadline. The refusal
+    surfaces only later, on the petitioner's poll, after the
+    rejection-delivery window elapses (timing.py's rejection band, a
+    randomized 1h ± 30min in production, §4.7), when the executor's result
+    drainer deposits _REJECTION_PAYLOAD against the handle
+    (executor.deliver_due_results). This closes the probing oracle the
+    synchronous refusal used to be: an amount above a standing-approval
+    band, or a token off the registry, no longer refuses instantly and for
+    free - the outcome costs a delivery-window wait and carries no
+    submit-to-response timing correlation. The caller already audit-logged
+    the specific gate (decision_refuse_* / decision_defer_hitl), which
+    stays operator-side; this tail records only the deferral and its
+    handle so the operator's console can tell a deferred-refusal handle
+    from a real pending-action handle (doc 13).
+
+    Production timing is blocked on sp-77lxs.3, so enqueue_result raises
+    NotImplementedError there - exactly as enqueue_action does on the pass
+    path (_enqueue_write_and_ack). The fallback is the SAME synchronous
+    refusal the pass path falls back to, so pass and refuse stay
+    wire-identical in production too: both collapse to the uniform
+    {"status": "refused"} until the timing layer is wired, never a
+    received-vs-refused split that would re-open the channel."""
+    handle = _new_handle()
+    try:
+        timing.enqueue_result(handle, _REJECTION_PAYLOAD, kind="rejection")
+    except NotImplementedError:
+        audit.record("decision_refuse_timing_unavailable", {"op": op})
+        _respond_refused(handler, deadline)
+        return
+    audit.record("decision_defer_rejection", {"op": op, "handle": handle})
+    _respond_ok(handler, {"status": "received", "handle": handle}, deadline)
+
+
 def _handle_ecash_write(handler, request, deadline):
     """Run an eCash write (fund_ecash / defund_ecash) through its
     gate pipeline (doc 07 §3, §8). Only reachable in ecash mode.
@@ -727,7 +820,7 @@ def _handle_ecash_write(handler, request, deadline):
                 "decision_refuse_denomination",
                 {"op": op, "requested_sats": amount},
             )
-            _respond_refused(handler, deadline)
+            _defer_rejection_and_ack(handler, op, deadline)
             return
         ecash = _ecash()
         outstanding = ecash.outstanding_sats()
@@ -752,7 +845,7 @@ def _handle_ecash_write(handler, request, deadline):
                     "allowance_sats": allowance,
                 },
             )
-            _respond_refused(handler, deadline)
+            _defer_rejection_and_ack(handler, op, deadline)
             return
     if not standing_approvals.matches(op, _ECASH_DESTINATION, amount):
         audit.record(
@@ -760,7 +853,7 @@ def _handle_ecash_write(handler, request, deadline):
             {"op": op, "reason": "no_standing_approval"},
         )
         _hitl_park(request)
-        _respond_refused(handler, deadline)
+        _defer_rejection_and_ack(handler, op, deadline)
         return
     # Gates passed: hand the write to the timing layer + executor, which
     # drains it against the pinned mint + our LND (doc 07 §3; doc 05 §3,
@@ -963,9 +1056,11 @@ if __name__ == "__main__":
     audit.configure(tmp_audit)
     state.configure(tmp_state)
     state.migrate()
-    # Test mode for snapshots.seed_for_test (the read-path sub-test
-    # below); no write in this smoke reaches the timing layer (the
-    # manage_bitcoin probe refuses at the denomination gate first).
+    # Test mode: snapshots.seed_for_test (the read-path sub-test) and the
+    # deferred-rejection path both need it. A gate-refused write now
+    # enqueues a kind="rejection" on the timing layer (the rejection band,
+    # 1-5s in test mode) instead of refusing synchronously, so the
+    # manage_bitcoin / unknown-op probes below exercise enqueue_result.
     os.environ["SPACER_TIMING_MODE"] = "test"
 
     # Bind port 0 so the OS picks a free ephemeral port; avoids
@@ -975,9 +1070,13 @@ if __name__ == "__main__":
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     try:
-        # Send a well-formed request with an unknown op. Unknown ops
-        # park in HITL and refuse uniformly, so the response is the
-        # standard refusal body.
+        # Send a well-formed request with an unknown op. Unknown ops park
+        # in HITL, but the gateway no longer refuses synchronously: it
+        # defers the refusal through the result registry and returns the
+        # SAME received-ack a gate-passed write returns, so submit carries
+        # no recognized-vs-unknown-op signal. The petitioner sees only
+        # received+handle; the HITL park and the deferral are audit-logged
+        # for the operator.
         body = json.dumps({"op": "smoke_ping"}).encode("utf-8")
         req = urllib.request.Request(
             f"http://127.0.0.1:{bind_port}/",
@@ -990,18 +1089,24 @@ if __name__ == "__main__":
             assert resp.status == 200, f"expected 200, got {resp.status}"
             response_body = resp.read()
         elapsed = time.monotonic() - t0
-        # Latency normalization floor was 0.05s; the actual response
-        # must not return faster than the floor. Allow a small jitter
+        # Latency normalization floor was 0.05s; the actual response must
+        # not return faster than the floor (it applies to the deferred-
+        # refusal path identically to a pass). Allow a small jitter
         # tolerance below the floor for clock granularity.
         assert elapsed >= 0.045, f"latency floor not enforced: elapsed {elapsed:.3f}s"
-        decoded = json.loads(response_body.decode("utf-8"))
-        assert decoded == {"status": "refused"}, f"unexpected body: {decoded!r}"
+        unknown_ack = json.loads(response_body.decode("utf-8"))
+        # Received-ack shape: exactly {status: received, handle: <str>},
+        # byte-shape-identical to what a gate-passed write returns.
+        assert set(unknown_ack) == {"status", "handle"}, unknown_ack
+        assert unknown_ack["status"] == "received", unknown_ack
+        assert isinstance(unknown_ack["handle"], str) and unknown_ack["handle"], unknown_ack
 
         # Send a known write op (manage_bitcoin) with an off-ladder
         # amount. The denomination gate (doc 12 G2) is checked first,
-        # ahead of the registry, so an off-ladder amount refuses
-        # uniformly and audits decision_refuse_denomination without
-        # needing a configured registry. 1234 is not on DEFAULT_LADDER.
+        # ahead of the registry, so an off-ladder amount is refused and
+        # audits decision_refuse_denomination without needing a configured
+        # registry. 1234 is not on DEFAULT_LADDER. The refusal is deferred:
+        # the response is the received-ack, not a synchronous refusal.
         body = json.dumps(
             {"op": "manage_bitcoin", "recipient_token": "ABCDE4", "amount_sats": 1234}
         ).encode("utf-8")
@@ -1013,7 +1118,56 @@ if __name__ == "__main__":
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
-            assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+            denom_ack = json.loads(resp.read().decode("utf-8"))
+        assert isinstance(denom_ack.get("handle"), str) and denom_ack["handle"], denom_ack
+        assert denom_ack == {"status": "received", "handle": denom_ack["handle"]}, denom_ack
+
+        # Probe-cost / indistinguishability check (the property this bead
+        # restores): the unknown-op refusal and the denomination refusal
+        # are wire-indistinguishable from each other AND from a
+        # gate-passed write - identical key set, identical status - so a
+        # petitioner cannot tell at submit which gate fired, or whether
+        # one fired at all. Only the random per-call handle differs; which
+        # gate actually refused lives in the audit log, operator-side.
+        assert set(unknown_ack) == set(denom_ack) == {"status", "handle"}, (
+            unknown_ack,
+            denom_ack,
+        )
+        assert unknown_ack["status"] == denom_ack["status"] == "received"
+
+        # The deferred refusal is real, not dropped: a kind="rejection"
+        # entry sits on the result side under the ack's handle, carrying
+        # the uniform _REJECTION_PAYLOAD - the same {"status": "failed"}
+        # the executor emits for a dispatched-but-failed action. Inspected
+        # arbiter-internally; this never crosses the gateway.
+        pend = timing.pending_result(denom_ack["handle"])
+        assert pend is not None, "a gate refusal must queue a deferred rejection"
+        _ready, rej_payload, rej_kind = pend
+        assert rej_kind == "rejection", pend
+        assert rej_payload == {"status": "failed"}, pend
+
+        # Drive it through the result registry (what
+        # executor.deliver_due_results does once the rejection window
+        # elapses) and poll via HTTP: the refusal surfaces only now, in
+        # the SAME {"status": "result", "result": {...}} envelope a real
+        # outcome uses, with a payload uniform with a dispatched-but-
+        # failed send. This is the "indistinguishable at the wire until
+        # result delivery" property (doc 05 §4.7, §4.8).
+        for _h, _res, _kind in timing.due_results(now=time.time() + 60.0):
+            results.deposit(_h, _res, kind=_kind)
+        body = json.dumps(
+            {"op": "poll", "handle": denom_ack["handle"]}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            rej_poll = json.loads(resp.read().decode("utf-8"))
+        assert rej_poll == {"status": "result", "result": {"status": "failed"}}, rej_poll
 
         # Send a malformed request (not JSON). Should also refuse
         # uniformly, with no information about the parse failure.
@@ -1130,27 +1284,32 @@ if __name__ == "__main__":
         t.join(timeout=2)
 
     # Verify the audit log captured the boot event, every request
-    # receipt, the HITL deferral, the parse-failure refusal, and the
-    # result-poll path (deposit, ok, throttled, unknown, bad_input,
-    # decision_allow for the four poll calls).
+    # receipt, the HITL deferral, the two deferred-rejection tails, the
+    # parse-failure refusal, and the result-poll path (deposit, ok,
+    # throttled, unknown, bad_input, decision_allow for the poll calls).
     with open(tmp_audit) as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert "gateway_start" in events, events
-    # 8 well-formed requests reach _parse_request: the original
-    # smoke_ping, the off-ladder manage_bitcoin, the two query_balance
-    # reads (pre-snapshot refusal, snapshot-served), plus four polls.
-    # The malformed request is rejected before request_received via
-    # send_error.
-    assert events.count("request_received") == 8, events
+    # 9 well-formed requests reach _parse_request: the smoke_ping
+    # (unknown op), the off-ladder manage_bitcoin, the poll of the
+    # deferred rejection, the two query_balance reads (pre-snapshot
+    # refusal, snapshot-served), plus four more polls. The malformed
+    # "not json" request is rejected at _parse_request before
+    # request_received.
+    assert events.count("request_received") == 9, events
     # Every sent response lands in the disclosure record (doc 13 §3):
-    # the smoke_ping refusal, the denomination refusal, the parse-
-    # failure refusal, the two read responses, and the four poll
-    # responses.
-    assert events.count("disclosure") == 9, events
+    # the two write refusals (now received-acks), the deferred-rejection
+    # poll, the parse-failure refusal, the two read responses, and the
+    # four poll responses = 10.
+    assert events.count("disclosure") == 10, events
     assert "decision_defer_hitl" in events, events
+    # Both write refusals (unknown op, off-ladder denomination) defer
+    # through the result registry rather than refusing synchronously,
+    # each recording a decision_defer_rejection tail with its handle.
+    assert events.count("decision_defer_rejection") == 2, events
     assert events.count("decision_refuse") == 1, events
     # The off-ladder manage_bitcoin was refused at the amount gate,
-    # ahead of the registry (doc 12 G2).
+    # ahead of the registry (doc 12 G2) - now deferred, not synchronous.
     assert "decision_refuse_denomination" in events, events
     # Read path (doc 15): the pre-snapshot read refused with its own
     # audit marker; the served read recorded the served value + age.
@@ -1167,10 +1326,10 @@ if __name__ == "__main__":
         "decision_poll_bad_input",
     ):
         assert required in events, f"audit missing {required}: {events!r}"
-    # Three successful poll routings (ok, throttled, unknown) plus the
-    # snapshot-served read log decision_allow; the bad-input poll uses
-    # its own marker (decision_poll_bad_input), so decision_allow
-    # appears exactly 4 times.
-    assert events.count("decision_allow") == 4, events
+    # Four successful poll routings (the deferred-rejection poll, plus
+    # ok, throttled, unknown) plus the snapshot-served read log
+    # decision_allow; the bad-input poll uses its own marker
+    # (decision_poll_bad_input), so decision_allow appears exactly 5 times.
+    assert events.count("decision_allow") == 5, events
     print(f"OK: gateway pipeline round-trips at audit={tmp_audit}, port={bind_port}")
     sys.exit(0)

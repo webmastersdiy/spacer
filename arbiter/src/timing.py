@@ -179,10 +179,13 @@ def enqueue_result(handle, result, kind="result"):
     """Defer a result (or rejection) by the result-delay window.
 
     Records the outcome in pending_results and returns the wall-clock
-    epoch timestamp at which it becomes deliverable. The result
-    registry (lands with sp-77lxs.14) consumes due entries via
-    due_results() and deposits them so the petitioner's poll picks
-    them up.
+    epoch timestamp at which it becomes deliverable. The executor's
+    result drainer (executor.deliver_due_results) consumes due entries
+    via due_results() and deposits them into the result registry so the
+    petitioner's poll picks them up. The gateway enqueues a
+    kind="rejection" here for every deferred gate refusal
+    (gateway._defer_rejection_and_ack); the executor enqueues
+    kind="result" for a drained action's outcome.
     """
     delay_s = _result_window_s(kind)
     now = time.time()

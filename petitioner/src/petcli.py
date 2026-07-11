@@ -153,9 +153,11 @@ def _do_submit_manage_bitcoin(args):
 def _do_advanced_manage_lightning(args):
     # Lightning send: an advanced-extension command. The wire op is the
     # same manage_lightning the gateway has always routed; only the petcli
-    # command path moved under `advanced`. An onchain-mode arbiter
-    # refuses this uniformly (the mode gate), so the AI sees the standard
-    # refusal body when the extension is not enabled.
+    # command path moved under `advanced`. An onchain-mode arbiter refuses
+    # this at the mode gate, but the refusal is deferred: the AI sees the
+    # same received-ack a gate-passed write returns, and the refusal
+    # surfaces on a later result poll - the extension's on/off state is
+    # not a submit-time signal.
     response = protocol.submit(
         op="manage_lightning",
         # Same wire-field convention as manage-bitcoin above: the CLI
