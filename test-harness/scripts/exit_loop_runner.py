@@ -188,6 +188,31 @@ _VALID_TOKEN = registry.generate_token()
 _VALID_REAL = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
 _VALID_FMT = "bech32"
 
+# The manage-lightning variants need their own destination: a bolt11
+# whose ENCODED amount equals the declared 1000 sats (amount_msats
+# 1_000_000), because the gateway re-runs the amount gates on the
+# resolved invoice amount and refuses on amountless / mismatch
+# (sp-l0c), and registry.lookup re-validates the stored string, so
+# the fixture must be checksum-valid. Self-encoded with the
+# registry's own polymod (zero payload), the same discipline as the
+# registry smoke's vectors: HRP lntbs10u = signet, 10u = 1000 sats.
+
+
+def _mk_test_bolt11(hrp):
+    data = [0] * 40
+    poly = registry._bech32_polymod(
+        registry._bech32_hrp_expand(hrp) + data + [0] * 6
+    ) ^ registry._BECH32_CONST
+    checksum = [(poly >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(
+        registry._BECH32_ALPHABET[d] for d in data + checksum
+    )
+
+
+_VALID_LN_TOKEN = registry.generate_token()
+_VALID_LN_REAL = _mk_test_bolt11("lntbs10u")
+_VALID_LN_FMT = "bolt11"
+
 
 # === Fake lncli for the read-only query variants ====================
 #
@@ -1428,13 +1453,13 @@ VARIANTS = [
         "path": ("advanced", "manage-lightning", "parked-no-standing-approval"),
         "petcli_args": [
             "advanced", "manage-lightning",
-            "--to-token", _VALID_TOKEN,
+            "--to-token", _VALID_LN_TOKEN,
             "--amount-msats", "1000000",
         ],
         "uses_arbiter": True,
         "spacer_mode": "lightning",
         "preconditions": [
-            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_registry", _VALID_LN_TOKEN, _VALID_LN_REAL, _VALID_LN_FMT),
         ],
         "expected": lambda r: (
             r.get("status") == "refused"
@@ -1444,8 +1469,10 @@ VARIANTS = [
         "description": (
             "Same default-pause path as submit/manage-bitcoin/parked-no-"
             "standing-approval but for the Lightning send op with the "
-            "extension enabled. amount_msats=1_000_000 (= 1000 sats "
-            "post-ceiling) is irrelevant here because no rule exists; "
+            "extension enabled. The token resolves to a bolt11 encoding "
+            "1000 sats, equal to amount_msats=1_000_000 post-ceiling, so "
+            "the resolved-amount gate (sp-l0c) passes and the call "
+            "reaches the standing-approvals gate, where no rule exists; "
             "arbiter-events.log records decision_defer_hitl with "
             "reason no_standing_approval."
         ),
@@ -1454,16 +1481,16 @@ VARIANTS = [
         "path": ("advanced", "manage-lightning", "allowed-by-standing-approval"),
         "petcli_args": [
             "advanced", "manage-lightning",
-            "--to-token", _VALID_TOKEN,
+            "--to-token", _VALID_LN_TOKEN,
             "--amount-msats", "1000000",
         ],
         "uses_arbiter": True,
         "spacer_mode": "lightning",
         "preconditions": [
-            ("seed_registry", _VALID_TOKEN, _VALID_REAL, _VALID_FMT),
+            ("seed_registry", _VALID_LN_TOKEN, _VALID_LN_REAL, _VALID_LN_FMT),
             ("seed_standing_approvals", [
                 {"op": "manage_lightning",
-                 "destination": _VALID_TOKEN,
+                 "destination": _VALID_LN_TOKEN,
                  "max_amount_sats": 50000,
                  "rationale": "exit-loop test rule"},
             ]),
@@ -1473,12 +1500,63 @@ VARIANTS = [
         "description": (
             "manage_lightning analogue of submit/manage-bitcoin/allowed-"
             "by-standing-approval, with the extension enabled. "
-            "amount_msats=1_000_000 rounds up to 1000 sats; "
-            "max_amount_sats=50000 admits it. Both gates pass; the "
-            "gateway enqueues the write and acknowledges with a handle "
-            "(status 'received') - the real executor path, no "
-            "not_implemented stub. arbiter-events.log contains "
-            "standing_approval_match and decision_allow."
+            "amount_msats=1_000_000 rounds up to 1000 sats and the "
+            "resolved bolt11 encodes the same 1000 sats, so the "
+            "resolved-amount gate (sp-l0c) passes and max_amount_sats="
+            "50000 - checked against that resolved figure - admits it. "
+            "All gates pass; the gateway enqueues the write and "
+            "acknowledges with a handle (status 'received') - the real "
+            "executor path, no not_implemented stub. arbiter-events.log "
+            "contains standing_approval_match and decision_allow."
+        ),
+    },
+    {
+        "path": (
+            "advanced", "manage-lightning", "refused-invoice-amount-mismatch",
+        ),
+        "petcli_args": [
+            "advanced", "manage-lightning",
+            "--to-token", _VALID_LN_TOKEN,
+            "--amount-msats", "1000000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "lightning",
+        "preconditions": [
+            # Same token, but it resolves to a 500k-sat invoice (5m =
+            # 500_000 sats) while the declared amount is 1000 sats -
+            # and a standing approval whose max_amount_sats admits the
+            # DECLARED figure. Before sp-l0c this dispatched: both
+            # amount gates checked the declared 1000 while payinvoice
+            # would have paid 500k - the amount-band HITL bypass. Now
+            # the gateway extracts the resolved invoice amount and
+            # refuses on the mismatch, before standing approvals.
+            ("seed_registry", _VALID_LN_TOKEN,
+             _mk_test_bolt11("lntbs5m"), _VALID_LN_FMT),
+            ("seed_standing_approvals", [
+                {"op": "manage_lightning",
+                 "destination": _VALID_LN_TOKEN,
+                 "max_amount_sats": 1000,
+                 "rationale": "exit-loop test rule (tiny LN band)"},
+            ]),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": ["decision_refuse_denomination"],
+        "forbidden_audit_events": [
+            "standing_approval_match", "decision_allow",
+        ],
+        "description": (
+            "The sp-l0c regression variant: the executed LN amount is "
+            "the resolved bolt11's own encoded amount, so a declared "
+            "1000 sats (on-ladder, inside the max_amount_sats=1000 "
+            "rule) against a token resolving to a 500k-sat invoice "
+            "must refuse - uniformly on the wire - rather than "
+            "dispatch 500k with no HITL. arbiter-events.log records "
+            "decision_refuse_denomination with requested_sats=1000, "
+            "invoice_sats=500000, reason invoice_amount_mismatch, and "
+            "neither standing_approval_match nor decision_allow fires."
         ),
     },
     # --- extension gate, eCash rung against the LIGHTNING extension:

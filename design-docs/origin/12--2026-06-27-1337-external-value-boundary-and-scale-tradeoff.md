@@ -126,9 +126,13 @@ operator-configurable; a missing config fails safe to the built-in ladder (quant
 privacy *enabler*, so the default is "on," unlike the allowance's "refuse all"). Note the eCash
 wallet still decomposes a funded ladder amount into power-of-2 proofs internally - invisible on the
 LN leg, which sees only the ladder total; power-of-2 amounts are deliberately *not* the ladder,
-since they would stand out against human round-number traffic. Residual: `manage_lightning` executes
-the operator's registered invoice amount, so full effect there also needs the operator's invoices to
-be ladder amounts - the gate bounds the PET, the registry bounds the operator.
+since they would stand out against human round-number traffic. Residual closed (sp-l0c): `manage_lightning`
+executes the operator's registered invoice amount, so the gateway re-runs the amount gates on the
+resolved invoice's own encoded amount after registry resolution - it must equal the declared amount
+and sit on the ladder, else refuse - and the executor re-asserts the equality before paying. An
+off-ladder or amountless registered invoice refuses at the gate rather than executing off-ladder,
+so the gate bounds the executed figure for the PET and the operator alike
+([GLOSSARY 'Quantized denominations'](../../GLOSSARY.md#quantized-denominations)).
 
 ---
 

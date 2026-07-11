@@ -265,14 +265,30 @@ def process_request(handler):
     # the WHO gate - resolves the recipient_token; a non-`ok` lookup
     # collapses to the uniform "destination unavailable" refusal,
     # audit-logged as decision_refuse_registry so the operator can
-    # see *which* token failed and why. Then standing approvals
+    # see *which* token failed and why. For manage_lightning the
+    # HOW-MUCH gate then re-fires on the RESOLVED destination: what
+    # executes is the bolt11's own encoded amount (lnd.payinvoice pays
+    # the invoice, not the declared figure), so the declared-amount
+    # check alone would bind a field the executor discards. The
+    # resolved invoice amount must be extractable, exactly equal to
+    # the declared amount, and itself on the ladder; any miss refuses
+    # uniformly, audited as decision_refuse_denomination with the
+    # declared and resolved figures and a reason
+    # (invoice_amount_unresolvable / invoice_amount_mismatch /
+    # invoice_amount_off_ladder) for operator triage. The resolved
+    # amount also carries invoice-side knowledge (registry content),
+    # so it rides only in the audit log - never in the response, which
+    # stays the uniform refusal body. Then standing approvals
     # (GLOSSARY 'Standing approvals', §6) - the WHAT gate - check
     # whether the operator has pre-approved this (op, destination,
-    # amount) tuple; no match parks in HITL and refuses uniformly,
+    # amount) tuple, where the amount is the one that will execute:
+    # the resolved invoice amount for manage_lightning, the declared
+    # amount for manage_bitcoin (whose executor sends exactly that
+    # figure); no match parks in HITL and refuses uniformly,
     # audit-logged as decision_defer_hitl with reason
     # no_standing_approval so the operator can distinguish the
     # default-pause from the registry miss and from an unknown op.
-    # All three gates must pass for dispatch to fire. The exposed write
+    # All gates must pass for dispatch to fire. The exposed write
     # set depends on the deployment mode (_known_write_ops).
     if op in _known_write_ops():
         amount = _request_amount_sats(request)
@@ -288,10 +304,41 @@ def process_request(handler):
             audit.record("decision_refuse_registry", {"op": op})
             _respond_refused(handler, deadline)
             return
+        if op == "manage_lightning":
+            invoice_sats = registry.bolt11_amount_sats(
+                resolved.get("recipient_address")
+            )
+            if invoice_sats is None:
+                reason = "invoice_amount_unresolvable"
+            elif invoice_sats != amount:
+                reason = "invoice_amount_mismatch"
+            elif not denominations.is_allowed(invoice_sats):
+                # Unreachable while the mismatch check above enforces
+                # exact equality with an already-laddered declared
+                # amount; kept so the doc 12 §4.1 invariant (the
+                # EXECUTED amount is a ladder amount) holds on its own
+                # even if the equality rule is ever loosened.
+                reason = "invoice_amount_off_ladder"
+            else:
+                reason = None
+            if reason is not None:
+                audit.record(
+                    "decision_refuse_denomination",
+                    {
+                        "op": op,
+                        "requested_sats": amount,
+                        "invoice_sats": invoice_sats,
+                        "reason": reason,
+                    },
+                )
+                _respond_refused(handler, deadline)
+                return
+            # From here on the amount is the one that executes.
+            amount = invoice_sats
         if not standing_approvals.matches(
             op,
             request.get("recipient_token"),
-            _request_amount_sats(request),
+            amount,
         ):
             audit.record(
                 "decision_defer_hitl",
@@ -637,12 +684,15 @@ def _registry_write_params(op, resolved):
     (manage_bitcoin / manage_lightning). Both carry the registry-resolved
     real destination - a Bitcoin address for manage_bitcoin, a bolt11 for
     manage_lightning (_pseudonymize_inbound wrote it into
-    recipient_address) - the AI's declared amount in sats
-    (informational for manage_lightning, whose bolt11 carries its own
-    amount), and the original recipient_token so the executor can flip
-    the registry entry used after a successful send (one-time-use,
-    §4.7). Only what the action requires reaches the timing queue, not
-    the whole request."""
+    recipient_address) - the AI's declared amount in sats, and the
+    original recipient_token so the executor can flip the registry
+    entry used after a successful send (one-time-use, §4.7). For
+    manage_bitcoin the executor sends amount_sats itself; for
+    manage_lightning the bolt11 carries its own amount, which the
+    resolved-amount gate (process_request) has already pinned equal to
+    amount_sats and the executor re-asserts before paying. Only what
+    the action requires reaches the timing queue, not the whole
+    request."""
     return {
         "recipient_address": resolved.get("recipient_address"),
         "recipient_token": resolved.get("recipient_token"),
@@ -1124,6 +1174,76 @@ if __name__ == "__main__":
         with urllib.request.urlopen(req, timeout=5) as resp:
             poll_body = json.loads(resp.read().decode("utf-8"))
         assert poll_body == {"status": "not_yet"}
+
+        # --- manage_lightning resolved-amount gate (sp-l0c) -----------
+        # What executes on the LN leg is the bolt11's own encoded
+        # amount, so the amount gates must bind the RESOLVED invoice
+        # amount, not just the AI-declared figure. Fixtures are
+        # self-encoded checksum-valid invoices (zero payload), the same
+        # discipline as the registry smoke's vectors.
+        def _test_bolt11(hrp):
+            data = [0] * 40
+            poly = registry._bech32_polymod(
+                registry._bech32_hrp_expand(hrp) + data + [0] * 6
+            ) ^ registry._BECH32_CONST
+            checksum = [(poly >> 5 * (5 - i)) & 31 for i in range(6)]
+            return hrp + "1" + "".join(
+                registry._BECH32_ALPHABET[d] for d in data + checksum
+            )
+
+        os.environ["SPACER_MODE"] = "lightning"
+        tmp_registry = (
+            Path(tempfile.gettempdir()) / "arbiter-gateway-smoke-registry.yaml"
+        )
+        if tmp_registry.exists():
+            tmp_registry.unlink()
+        registry.configure(tmp_registry)
+        _, tok_1k = registry.add(_test_bolt11("lntbs10u"))   # 1000 sats
+        _, tok_500k = registry.add(_test_bolt11("lntbs5m"))  # 500k sats
+        _, tok_bare = registry.add(_test_bolt11("lntbs"))    # amountless
+        tmp_sa = (
+            Path(tempfile.gettempdir()) / "arbiter-gateway-smoke-approvals.yaml"
+        )
+        os.environ["SPACER_STANDING_APPROVALS_PATH"] = str(tmp_sa)
+        tmp_sa.write_text(standing_approvals.render_yaml([
+            {"op": "manage_lightning", "destination": "any",
+             "max_amount_sats": 1000, "rationale": "smoke: tiny LN sends"},
+        ]))
+
+        def _post_ln(token, amount_msats):
+            body = json.dumps({
+                "op": "manage_lightning",
+                "recipient_token": token,
+                "amount_msats": amount_msats,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{bind_port}/",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status == 200
+                return json.loads(resp.read().decode("utf-8"))
+
+        # The HITL-band evasion this gate closes: declared 1000 sats
+        # passes the ladder AND the max_amount_sats: 1000 rule, but the
+        # token resolves to a 500k-sat invoice - which is what would
+        # execute. Must refuse (invoice_amount_mismatch), and on the
+        # wire the refusal is the same uniform body as every other.
+        assert _post_ln(tok_500k, 1_000_000) == {"status": "refused"}
+
+        # Amountless registered invoice: no gate-pinnable executed
+        # amount -> refuse (invoice_amount_unresolvable).
+        assert _post_ln(tok_bare, 1_000_000) == {"status": "refused"}
+
+        # Declared == resolved == 1000 sats, on-ladder, inside the
+        # standing approval: every gate passes, the write enqueues on
+        # the timing layer (test mode) and acks with an opaque handle.
+        ok_body = _post_ln(tok_1k, 1_000_000)
+        assert ok_body.get("status") == "received" and ok_body.get("handle"), (
+            ok_body
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -1134,24 +1254,43 @@ if __name__ == "__main__":
     # result-poll path (deposit, ok, throttled, unknown, bad_input,
     # decision_allow for the four poll calls).
     with open(tmp_audit) as f:
-        events = [json.loads(line)["event"] for line in f if line.strip()]
+        records = [json.loads(line) for line in f if line.strip()]
+    events = [r["event"] for r in records]
     assert "gateway_start" in events, events
-    # 8 well-formed requests reach _parse_request: the original
+    # 11 well-formed requests reach _parse_request: the original
     # smoke_ping, the off-ladder manage_bitcoin, the two query_balance
-    # reads (pre-snapshot refusal, snapshot-served), plus four polls.
-    # The malformed request is rejected before request_received via
-    # send_error.
-    assert events.count("request_received") == 8, events
+    # reads (pre-snapshot refusal, snapshot-served), four polls, and
+    # the three manage_lightning resolved-amount probes. The malformed
+    # request is rejected before request_received via send_error.
+    assert events.count("request_received") == 11, events
     # Every sent response lands in the disclosure record (doc 13 §3):
     # the smoke_ping refusal, the denomination refusal, the parse-
-    # failure refusal, the two read responses, and the four poll
-    # responses.
-    assert events.count("disclosure") == 9, events
+    # failure refusal, the two read responses, the four poll
+    # responses, and the three manage_lightning responses.
+    assert events.count("disclosure") == 12, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
     # The off-ladder manage_bitcoin was refused at the amount gate,
     # ahead of the registry (doc 12 G2).
     assert "decision_refuse_denomination" in events, events
+    # manage_lightning resolved-amount gate (sp-l0c): the 500k-invoice
+    # and amountless-invoice probes refuse at the same audit marker,
+    # each carrying the declared figure, the resolved invoice figure,
+    # and a triage reason - operator-side (audit) only; both wire
+    # responses were the uniform refusal above.
+    ln_refusals = [
+        r["payload"] for r in records
+        if r["event"] == "decision_refuse_denomination"
+        and r["payload"].get("op") == "manage_lightning"
+    ]
+    assert [p.get("reason") for p in ln_refusals] == [
+        "invoice_amount_mismatch",
+        "invoice_amount_unresolvable",
+    ], ln_refusals
+    assert ln_refusals[0]["requested_sats"] == 1000, ln_refusals
+    assert ln_refusals[0]["invoice_sats"] == 500000, ln_refusals
+    assert ln_refusals[1]["requested_sats"] == 1000, ln_refusals
+    assert ln_refusals[1]["invoice_sats"] is None, ln_refusals
     # Read path (doc 15): the pre-snapshot read refused with its own
     # audit marker; the served read recorded the served value + age.
     assert "decision_refuse_snapshot_unavailable" in events, events
@@ -1167,10 +1306,11 @@ if __name__ == "__main__":
         "decision_poll_bad_input",
     ):
         assert required in events, f"audit missing {required}: {events!r}"
-    # Three successful poll routings (ok, throttled, unknown) plus the
-    # snapshot-served read log decision_allow; the bad-input poll uses
-    # its own marker (decision_poll_bad_input), so decision_allow
-    # appears exactly 4 times.
-    assert events.count("decision_allow") == 4, events
+    # Three successful poll routings (ok, throttled, unknown), the
+    # snapshot-served read, and the gate-passing manage_lightning
+    # dispatch each log decision_allow; the bad-input poll uses its
+    # own marker (decision_poll_bad_input), so decision_allow appears
+    # exactly 5 times.
+    assert events.count("decision_allow") == 5, events
     print(f"OK: gateway pipeline round-trips at audit={tmp_audit}, port={bind_port}")
     sys.exit(0)

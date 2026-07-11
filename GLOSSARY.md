@@ -502,10 +502,18 @@ allowance](#ecash-allowance), a **missing** config fails safe to the
 built-in ladder ("privacy on with sane defaults"), because quantization
 is a privacy *enabler*, not a spend cap. Landed at
 `arbiter/src/denominations.py` and enforced in `arbiter/src/gateway.py`;
-design authority is doc 12 §4.1. Caveat: `manage_lightning` executes the
-operator's registered invoice amount, so full effect there also requires
-the operator to register ladder-amount invoices - the gate bounds the
-AI, the registry bounds the operator.
+design authority is doc 12 §4.1. `manage_lightning` executes the
+registered bolt11's own encoded amount, not the AI-declared field, so
+for that op BOTH amount gates - the ladder and the standing-approval
+`max_amount_sats` bound - bind the **resolved invoice amount**: the
+gateway extracts it after registry resolution and refuses unless it is
+extractable, exactly equal to the declared amount, and itself on the
+ladder (audited `decision_refuse_denomination` with declared + resolved
+figures; the executor re-asserts the same equality before paying). An
+operator-registered off-ladder or amountless invoice therefore refuses
+at the gate instead of executing an off-ladder amount - the gate bounds
+the executed figure for both parties, closing the earlier caveat that
+only the registry bounded the operator.
 
 ### Scale cloaking
 
@@ -736,6 +744,17 @@ other mechanisms ([banding](#banding-numeric-value-banding),
 [scale cloaking](#scale-cloaking),
 [aggregate-by-default](#aggregate-by-default)) and HITL on every
 balance check would be unworkable friction.
+
+**Amount semantics (per rail).** `max_amount_sats` bounds the amount
+that will EXECUTE, not merely the AI-declared field: for
+`manage_bitcoin` those are the same figure (the executor sends
+`amount_sats` itself); for `manage_lightning` the executed amount is
+the resolved bolt11's own encoded amount, so the gateway checks the
+rule against that resolved figure after requiring it to equal the
+declared amount ([Quantized denominations](#quantized-denominations)
+has the resolution rule). Without the resolved-amount binding, a rule
+like `max_amount_sats: 1000` would pass a declared 1000 while a
+500k-sat registered invoice executed - an amount-band HITL bypass.
 
 **Caveat.** Every line of standing approval is a decision the
 operator made that some future call would not get reviewed. A long
@@ -1279,6 +1298,16 @@ See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-ar
   production `NotImplementedError`-gated). No body changes - the
   entries described the build accurately; doc 07 §11 is the full
   reconcile.
+- 2026-07-11: `manage_lightning` amount gates rebound to the
+  resolved invoice amount (audit sp-gkh finding 3, fixed as
+  sp-l0c). Previously both the ladder and the standing-approval
+  `max_amount_sats` bound checked the AI-declared amount while the
+  executor paid the bolt11's own encoded amount - the gates bound a
+  field the executor discards. [Quantized
+  denominations](#quantized-denominations) now states the
+  resolved-amount rule; [Standing approvals](#standing-approvals)
+  gained the per-rail amount-semantics paragraph (the previously
+  undisclosed half).
 
 ## See also
 

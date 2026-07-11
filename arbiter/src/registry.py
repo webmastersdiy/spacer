@@ -366,6 +366,72 @@ def _try_bolt11(s):
     return hrp
 
 
+# BOLT-11 HRP amount multipliers, in millisatoshis per unit. The HRP
+# amount unit is bitcoin (1 BTC = 10^11 msat); m/u/n scale down by
+# 10^-3 each. p (10^-12 BTC = 0.1 msat) is handled separately because
+# one unit is sub-msat: the spec requires p amounts to be multiples of
+# 10 so they resolve to whole msat.
+_BOLT11_MULT_MSATS = {"m": 10**8, "u": 10**5, "n": 10**2}
+
+
+def bolt11_amount_sats(payreq):
+    """Extract the amount a bolt11 invoice encodes, in whole sats.
+
+    Returns the amount as an int, or None if the string does not carry
+    a usable whole-sat amount: not a string, no ln prefix / separator,
+    unknown or mainnet network, amountless (payer-chooses invoices have
+    no gate-pinnable amount), malformed amount (leading zero, zero, a
+    p-multiplier value not a multiple of 10), or an amount with a
+    sub-sat msat fraction - which is off-ladder by definition, since
+    the denomination ladder is whole sats.
+
+    HRP-only by design: no checksum or signature validation here. The
+    strings this runs on were checksum-validated at registry add time
+    (_try_bolt11 via detect_format) and re-validated at lookup, and
+    LND re-validates whatever it pays; this function's job is only to
+    recover the amount the invoice would execute, for the gateway's
+    resolved-amount gates and the executor's pre-pay assertion. Every
+    failure mode returns None, and every caller treats None as
+    refuse/abort, so parse strictness fails closed.
+    """
+    if not isinstance(payreq, str):
+        return None
+    s = payreq.lower()
+    if not s.startswith("ln"):
+        return None
+    pos = s.rfind("1")
+    if pos < 3:
+        return None
+    rest = s[2:pos]
+    net = _bolt11_network(rest)
+    if net is None or net == "bc":
+        return None  # unknown network, or the no-mainnet hard rule
+    tail = rest[len(net):]
+    if not tail:
+        return None  # amountless invoice: no amount to pin
+    mult = None
+    digits = tail
+    if tail[-1] in "munp":
+        mult = tail[-1]
+        digits = tail[:-1]
+    # Leading zeros are a BOLT-11 writer violation (and "0" alone is a
+    # zero amount); both are anomalous encodings, so fail closed.
+    if not digits.isdigit() or digits[0] == "0":
+        return None
+    value = int(digits)
+    if mult == "p":
+        if value % 10:
+            return None  # BOLT-11: pico amounts must be 10-multiples
+        msats = value // 10
+    elif mult is None:
+        msats = value * 10**11
+    else:
+        msats = value * _BOLT11_MULT_MSATS[mult]
+    if msats % 1000:
+        return None  # sub-sat fraction: never a ladder amount
+    return msats // 1000
+
+
 def detect_format(addr):
     """Detect the format of a candidate address. Returns one of
     "bech32m", "bech32", "base58check", "bolt11" on success, None on
@@ -1163,6 +1229,40 @@ if __name__ == "__main__":
     # Mixed case refused, mirroring the on-chain bech32 rule.
     mixed = good[: len("lntbs") + 3].upper() + good[len("lntbs") + 3:]
     assert detect_format(mixed) is None
+
+    # --- bolt11 HRP amount extraction --------------------------------
+    # bolt11_amount_sats recovers the executed amount for the gateway's
+    # resolved-amount gates and the executor's pre-pay assertion. HRP
+    # unit is BTC: m = 10^5 sat, u = 10^2 sat, n = 0.1 sat, p = 10^-4
+    # sat. Whole sats only; every anomaly returns None (fail closed).
+    assert bolt11_amount_sats(_mk_bolt11("lntbs10u")) == 1000
+    assert bolt11_amount_sats(_mk_bolt11("lntbs1m")) == 100000
+    assert bolt11_amount_sats(_mk_bolt11("lntbs5m")) == 500000
+    assert bolt11_amount_sats(_mk_bolt11("lntbs2500u")) == 250000
+    assert bolt11_amount_sats(_mk_bolt11("lntbs10n")) == 1
+    assert bolt11_amount_sats(_mk_bolt11("lnbcrt2")) == 200_000_000
+    assert bolt11_amount_sats(_mk_bolt11("lntb10000000p")) == 1000
+    # Uppercase tolerated (the parser lowercases; case policy is
+    # enforced at add time by detect_format).
+    assert bolt11_amount_sats(_mk_bolt11("lntbs10u").upper()) == 1000
+    # Amountless: no amount to pin.
+    assert bolt11_amount_sats(_mk_bolt11("lntbs")) is None
+    # Sub-sat msat fractions: 5n = 0.5 sat, 10005n = 1000.5 sat.
+    assert bolt11_amount_sats(_mk_bolt11("lntbs5n")) is None
+    assert bolt11_amount_sats(_mk_bolt11("lntbs10005n")) is None
+    # p not a multiple of 10 (BOLT-11 reader MUST fail).
+    assert bolt11_amount_sats(_mk_bolt11("lntbs10001p")) is None
+    # Leading zero / zero amount: anomalous encodings, fail closed.
+    assert bolt11_amount_sats(_mk_bolt11("lntbs010u")) is None
+    assert bolt11_amount_sats(_mk_bolt11("lntbs0u")) is None
+    # Mainnet and unknown networks refused, mirroring _try_bolt11.
+    assert bolt11_amount_sats(_mk_bolt11("lnbc10u")) is None
+    assert bolt11_amount_sats(_mk_bolt11("lntbx5n")) is None
+    # Non-invoice inputs (an on-chain address, garbage, non-strings).
+    assert bolt11_amount_sats("tb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0l98cr") is None
+    assert bolt11_amount_sats("not an invoice") is None
+    assert bolt11_amount_sats(None) is None
+    assert bolt11_amount_sats(1000) is None
 
     # --- add / lookup happy path -------------------------------------
     addr = "tb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0l98cr"

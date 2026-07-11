@@ -1,6 +1,6 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55741},"ts":"2026-07-11T16:01:49Z"}
-{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"QTY7WQ"},"ts":"2026-07-11T16:01:49Z"}
-{"event":"registry_lookup_ok","payload":{"id":1,"token":"QTY7WQ"},"ts":"2026-07-11T16:01:49Z"}
-{"event":"standing_approval_match","payload":{"op":"manage_lightning","rationale":"exit-loop test rule"},"ts":"2026-07-11T16:01:49Z"}
-{"event":"decision_allow","payload":{"op":"manage_lightning"},"ts":"2026-07-11T16:01:49Z"}
-{"event":"disclosure","payload":{"body":{"handle":"ERoQ-KxsMVi_L6_-bZGtBg","status":"received"}},"ts":"2026-07-11T16:01:49Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52831},"ts":"2026-07-11T23:35:07Z"}
+{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"ZSRFBM"},"ts":"2026-07-11T23:35:07Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"ZSRFBM"},"ts":"2026-07-11T23:35:07Z"}
+{"event":"standing_approval_match","payload":{"op":"manage_lightning","rationale":"exit-loop test rule"},"ts":"2026-07-11T23:35:07Z"}
+{"event":"decision_allow","payload":{"op":"manage_lightning"},"ts":"2026-07-11T23:35:07Z"}
+{"event":"disclosure","payload":{"body":{"handle":"de7ZjIyWOP-dQTHb3StMBw","status":"received"}},"ts":"2026-07-11T23:35:07Z"}

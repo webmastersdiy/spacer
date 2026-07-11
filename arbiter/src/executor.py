@@ -467,8 +467,15 @@ def _execute_manage_lightning(handle, params):
 
     recipient_address IS the bolt11 invoice: the registry resolves a
     petitioner token to the real invoice (gateway._pseudonymize_inbound),
-    and payinvoice pays the invoice's own encoded amount. amount_sats is
-    the AI's gate-declared figure, surfaced back unchanged.
+    and payinvoice pays the invoice's own encoded amount. The gateway's
+    resolved-amount gate already pinned that encoded amount equal to
+    the gate-declared amount_sats (ladder + standing-approval bound run
+    against it); the pre-pay assertion here re-derives it from the same
+    frozen bolt11 and aborts on any divergence, so a future path that
+    enqueues manage_lightning without the gate fails loudly instead of
+    paying an unbounded amount. Failure lands in the standard
+    executor_action_failed path: uniform failed result, cause in the
+    audit log only.
 
     Hide-secrets discipline (doc 05 §4.1): the preimage and the routing
     fee stay operator-side (audit only); the petitioner sees only the
@@ -476,6 +483,14 @@ def _execute_manage_lightning(handle, params):
     import lnd
     bolt11 = params["recipient_address"]
     amount_sats = params.get("amount_sats")
+    import registry
+    invoice_sats = registry.bolt11_amount_sats(bolt11)
+    if invoice_sats is None or invoice_sats != amount_sats:
+        raise ValueError(
+            "manage_lightning amount not bound by gate: "
+            f"invoice encodes {invoice_sats!r} sats, "
+            f"gate-declared {amount_sats!r} sats"
+        )
     pay = lnd.payinvoice(bolt11)
     status = (pay.get("status") or "").upper()
     if status not in ("SUCCEEDED", "SUCCESS"):
@@ -840,18 +855,36 @@ esac
         assert ecash.outstanding_sats() == 0, ecash.outstanding_sats()
 
         # --- manage_lightning: pay a bolt11 over LND (fake payinvoice) -
-        # recipient_address IS the resolved bolt11; amount_sats is the
-        # AI's declared figure, surfaced back unchanged.
+        # recipient_address IS the resolved bolt11; its HRP amount
+        # (10u = 1000 sats) must match the gate-declared amount_sats or
+        # the pre-pay assertion aborts before payinvoice.
         h_ln = "handle_manage_lightning"
         timing.enqueue_action(
             h_ln, "manage_lightning",
-            {"recipient_address": "lntbs10n1pfakesendinvoice", "amount_sats": 1000},
+            {"recipient_address": "lntbs10u1pfakesendinvoice", "amount_sats": 1000},
         )
         assert execute_due_actions(now=far) == 1
         assert deliver_due_results(now=far) == 1
         status, payload, _ = results.poll(h_ln)
         assert status == "result", status
         assert payload == {"status": "sent", "amount_sats": 1000}, payload
+
+        # --- manage_lightning, invoice amount != declared amount ------
+        # The invoice encodes 10n = 1 sat but the params claim 1000:
+        # the pre-pay assertion must abort (no payinvoice) and surface
+        # the uniform failed result via executor_action_failed. This is
+        # the executor half of the sp-l0c fix; the gateway half refuses
+        # the same divergence at gate time.
+        h_ln_bad = "handle_manage_lightning_mismatch"
+        timing.enqueue_action(
+            h_ln_bad, "manage_lightning",
+            {"recipient_address": "lntbs10n1pfakesendinvoice", "amount_sats": 1000},
+        )
+        assert execute_due_actions(now=far) == 1
+        assert deliver_due_results(now=far) == 1
+        status, payload, _ = results.poll(h_ln_bad)
+        assert status == "result", status
+        assert payload == {"status": "failed"}, payload
 
         # --- manage_bitcoin, onchain default -> bitcoin.py ------------
         # SPACER_MODE unset -> _advanced_mode() False -> bitcoind. The

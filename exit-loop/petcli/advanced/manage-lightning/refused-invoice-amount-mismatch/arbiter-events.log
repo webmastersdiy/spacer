@@ -1,0 +1,5 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52838},"ts":"2026-07-11T23:35:08Z"}
+{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"ZSRFBM"},"ts":"2026-07-11T23:35:08Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"ZSRFBM"},"ts":"2026-07-11T23:35:08Z"}
+{"event":"decision_refuse_denomination","payload":{"invoice_sats":500000,"op":"manage_lightning","reason":"invoice_amount_mismatch","requested_sats":1000},"ts":"2026-07-11T23:35:08Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-11T23:35:08Z"}
