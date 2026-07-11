@@ -818,7 +818,14 @@ bound that replaces per-action control for AI-held bearer value.
 `ecash_allowance_sats` (arbiter config, console-edited like the
 registry and standing approvals) caps **outstanding float**:
 total funded minus total successfully defunded, maintained entirely
-from gateway-visible events. `fund_ecash` refuses past the cap
+from gateway-visible events, **plus in-flight funds** - a fund
+reserves its amount at gate-pass, settles into the ledger at
+execution, and releases on failure, so a burst of submits inside
+one [action delay](#action-delay) window cannot each read the same
+stale outstanding and overshoot the cap N-fold (sp-mki; the
+executor re-checks at the drain moment, so a lowered allowance
+binds before value moves and an unreserved fund fails closed).
+`fund_ecash` refuses past the cap
 (audit `decision_refuse_allowance`, uniform refusal on the wire),
 and the check precedes [standing
 approvals](#standing-approvals): a [HITL](#human-in-the-loop-hitl-approval)
