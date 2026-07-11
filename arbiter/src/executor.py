@@ -215,36 +215,60 @@ def _execute_fund_ecash(handle, params):
     """fund_ecash (doc 07 §3): request a mint quote, pay its bolt11 via
     our LND, issue the proofs, serialize a DLEQ handoff token for the
     AI. mint_gap_s() rides between the three mint-facing steps (quote
-    -> pay -> issue)."""
+    -> pay -> issue).
+
+    Allowance discipline (doc 07 §8, sp-mki): the gateway reserved this
+    fund's amount at gate-pass; re-check it here at the drain moment -
+    BEFORE any mint contact - so an allowance lowered while the fund
+    sat in its action-delay window still binds, and a fund with no
+    reservation (enqueued outside the gate pipeline) fails closed.
+    Success settles the reservation into the ledger (record_funded);
+    any failure releases it, since a fund that minted nothing must not
+    keep holding allowance headroom - mirroring the existing rule that
+    a failed fund does not move the ledger."""
     import ecash
     import lnd
 
     amount_sats = int(params["amount_sats"])
 
-    # 1. Mint quote: the bolt11 to pay and the quote id to issue against
-    #    (no payment yet, --no-check).
-    bolt11, quote_id = _parse_mint_quote(ecash.mint_quote(amount_sats))
+    try:
+        # 0. Drain-moment allowance re-check (doc 07 §8 hard bound).
+        ecash.recheck_reservation(handle, amount_sats)
 
-    _mint_gap()
+        # 1. Mint quote: the bolt11 to pay and the quote id to issue
+        #    against (no payment yet, --no-check).
+        bolt11, quote_id = _parse_mint_quote(ecash.mint_quote(amount_sats))
 
-    # 2. Pay the mint's bolt11 from our LND. The mint sees an HTLC
-    #    arrive (doc 07 §5.1); the routing fee is operator cost.
-    pay = lnd.payinvoice(bolt11)
-    status = (pay.get("status") or "").upper()
-    if status not in ("SUCCEEDED", "SUCCESS"):
-        raise ecash.EcashError(f"funding LN payment not successful: {status!r}")
-    routing_fee_msat = int(pay.get("fee_msat") or 0)
+        _mint_gap()
 
-    _mint_gap()
+        # 2. Pay the mint's bolt11 from our LND. The mint sees an HTLC
+        #    arrive (doc 07 §5.1); the routing fee is operator cost.
+        pay = lnd.payinvoice(bolt11)
+        status = (pay.get("status") or "").upper()
+        if status not in ("SUCCEEDED", "SUCCESS"):
+            raise ecash.EcashError(
+                f"funding LN payment not successful: {status!r}"
+            )
+        routing_fee_msat = int(pay.get("fee_msat") or 0)
 
-    # 3. Issue the proofs against the now-paid quote (mint completes).
-    ecash.mint(amount_sats, quote_id)
+        _mint_gap()
 
-    # 4. Serialize the float into a DLEQ handoff token for the AI.
-    token = _parse_token(ecash.send(amount_sats))
+        # 3. Issue the proofs against the now-paid quote (mint
+        #    completes).
+        ecash.mint(amount_sats, quote_id)
 
-    # 5. Ledger: record the gross funded amount (doc 07 §8, §10.4).
-    ecash.record_funded(handle, amount_sats)
+        # 4. Serialize the float into a DLEQ handoff token for the AI.
+        token = _parse_token(ecash.send(amount_sats))
+
+        # 5. Ledger: record the gross funded amount and settle the
+        #    reservation in the same transaction (doc 07 §8, §10.4).
+        ecash.record_funded(handle, amount_sats)
+    except Exception:
+        # The fund is terminally failed (execute_due_actions delivers
+        # the uniform failed result); its reservation hands the
+        # headroom back. No-op if it never existed or already settled.
+        ecash.release_reservation(handle)
+        raise
 
     # Fee accounting (doc 07 §10.4: funded != received). The LN routing
     # fee is operator cost, audit-logged, not deducted from the float.
@@ -754,6 +778,13 @@ esac
     os.environ["CASHU_MINT_URL"] = pinned_mint
     os.environ["CASHU_DIR"] = str(work / "wallet")
     os.environ["CASHU_TIMEOUT_S"] = "5"
+    # Allowance config for the reservation lifecycle (doc 07 §8): the
+    # fund handler's drain-moment re-check reads it, so the smoke test
+    # pins its own file rather than falling through to the deployment
+    # default under ~/spacer.
+    allowance_yaml = work / "ecash.yaml"
+    allowance_yaml.write_text("ecash_allowance_sats: 50000\n")
+    os.environ["SPACER_ECASH_ALLOWANCE_PATH"] = str(allowance_yaml)
     os.environ["LNCLI_BIN"] = str(fake_lncli)
     os.environ["LNCLI_TIMEOUT_S"] = "5"
     os.environ["BITCOIN_CLI_BIN"] = str(fake_bitcoin)
@@ -799,8 +830,12 @@ esac
         )
         assert m3 == {"https://mint.y"} and t3 == 7, (m3, t3)
 
-        # --- fund: enqueue -> execute -> deliver -> poll ------------
+        # --- fund: reserve -> enqueue -> execute -> deliver -> poll -
+        # The reserve mirrors the gateway's gate-pass step: the
+        # executor's drain-moment re-check requires it (fail-closed).
+        import ecash
         h_fund = "handle_fund_smoke"
+        assert ecash.reserve(h_fund, 5000)
         timing.enqueue_action(h_fund, "fund_ecash", {"amount_sats": 5000})
         assert execute_due_actions(now=far) == 1
         assert deliver_due_results(now=far) == 1
@@ -811,9 +846,10 @@ esac
         assert payload["token"].startswith("cashuB"), payload
         assert kind == "result", kind
 
-        # Ledger moved by the gross funded amount.
-        import ecash
+        # Ledger moved by the gross funded amount, and the reservation
+        # settled into it (reserved back to 0, doc 07 §8).
         assert ecash.outstanding_sats() == 5000, ecash.outstanding_sats()
+        assert ecash.reserved_sats() == 0, ecash.reserved_sats()
 
         # --- defund happy path: claimed 5000, melt -----------------
         h_defund = "handle_defund_smoke"
@@ -838,6 +874,35 @@ esac
         assert payload == {"status": "failed"}, payload
         # A failed defund does NOT move the ledger (doc 07 §3).
         assert ecash.outstanding_sats() == 0, ecash.outstanding_sats()
+
+        # --- fund with NO reservation: fails closed (doc 07 §8) ----
+        # Enqueued outside the gate pipeline (no reserve), so the
+        # drain-moment re-check refuses before any mint contact and
+        # the ledger does not move.
+        h_norsv = "handle_fund_no_reservation"
+        timing.enqueue_action(h_norsv, "fund_ecash", {"amount_sats": 5000})
+        assert execute_due_actions(now=far) == 1
+        assert deliver_due_results(now=far) == 1
+        status, payload, _ = results.poll(h_norsv)
+        assert status == "result", status
+        assert payload == {"status": "failed"}, payload
+        assert ecash.outstanding_sats() == 0, ecash.outstanding_sats()
+        assert ecash.reserved_sats() == 0, ecash.reserved_sats()
+
+        # --- allowance lowered mid-window: re-check fails the fund
+        # and releases its reservation (headroom handed back) --------
+        h_lowered = "handle_fund_allowance_lowered"
+        assert ecash.reserve(h_lowered, 5000)
+        timing.enqueue_action(h_lowered, "fund_ecash", {"amount_sats": 5000})
+        allowance_yaml.write_text("ecash_allowance_sats: 1000\n")
+        assert execute_due_actions(now=far) == 1
+        assert deliver_due_results(now=far) == 1
+        status, payload, _ = results.poll(h_lowered)
+        assert status == "result", status
+        assert payload == {"status": "failed"}, payload
+        assert ecash.outstanding_sats() == 0, ecash.outstanding_sats()
+        assert ecash.reserved_sats() == 0, ecash.reserved_sats()
+        allowance_yaml.write_text("ecash_allowance_sats: 50000\n")
 
         # --- manage_lightning: pay a bolt11 over LND (fake payinvoice) -
         # recipient_address IS the resolved bolt11; amount_sats is the
@@ -951,6 +1016,8 @@ esac
             "ecash_defund_executed",
             "ecash_ledger_fund",
             "ecash_ledger_defund",
+            "ecash_reserved",              # gate-pass reservation (fund)
+            "ecash_reservation_released",  # failed fund hands headroom back
             "manage_bitcoin_executed",    # onchain + LND send sub-tests
             "manage_lightning_executed",  # the LN pay sub-test
             "registry_consume",           # consume-on-success sub-test

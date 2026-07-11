@@ -66,6 +66,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 # Repo layout. test-harness/scripts/exit_loop_runner.py -> ../../ is repo root.
@@ -426,11 +427,14 @@ def _stop_arbiter(server, thread):
     thread.join(timeout=2.0)
 
 
-def _apply_precondition(precondition):
+def _apply_precondition(precondition, port=None):
     """Apply one declarative precondition to the running arbiter's
     state. Operations bypass the gateway because they represent
     arbiter-internal setup (timing-layer drainer would do this in
-    production) rather than petitioner-visible state.
+    production) rather than petitioner-visible state. The one
+    exception is submit_gateway, which deliberately goes THROUGH the
+    gateway (port is the running arbiter's ephemeral port) to stage
+    prior petitioner traffic.
 
     Supported ops:
       ("deposit", handle, payload, kind)
@@ -499,6 +503,17 @@ def _apply_precondition(precondition):
         backend value underneath an existing snapshot. Only keys
         already managed per-variant by env_overrides are safe here
         (the teardown restore covers them).
+      ("submit_gateway", body, expected_status)
+        POST body (a dict) to the running arbiter exactly as a
+        petitioner would - one JSON request through the full gate
+        pipeline - and require the response's status field to equal
+        expected_status (raises otherwise, failing the variant
+        loudly). Lets a variant stage PRIOR petitioner traffic whose
+        gateway-side effects must be real: the fund-burst variant's
+        first fund_ecash, whose gate-pass reservation (doc 07 §8)
+        must count against the allowance seen by the petcli-driven
+        second fund. Seeding internal state instead would bypass the
+        very reservation path under test.
     """
     op = precondition[0]
     if op == "deposit":
@@ -566,6 +581,25 @@ def _apply_precondition(precondition):
     elif op == "set_scenario":
         _, env_key, value = precondition
         os.environ[env_key] = value
+    elif op == "submit_gateway":
+        _, body, expected_status = precondition
+        if port is None:
+            raise ValueError(
+                "submit_gateway precondition requires a running arbiter"
+            )
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            reply = json.loads(resp.read().decode("utf-8"))
+        if reply.get("status") != expected_status:
+            raise RuntimeError(
+                f"submit_gateway precondition expected status "
+                f"{expected_status!r}, got {reply!r}"
+            )
     else:
         raise ValueError(f"unknown precondition op {op!r}")
 
@@ -1715,6 +1749,56 @@ VARIANTS = [
             "decision_allow."
         ),
     },
+    {
+        "path": ("advanced", "ecash", "fund", "refused-burst-inflight-allowance"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "50000",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            ("seed_ecash_allowance", 50000),
+            ("seed_standing_approvals", [
+                {"op": "fund_ecash",
+                 "destination": "mint",
+                 "max_amount_sats": 50000,
+                 "rationale": "exit-loop test rule"},
+            ]),
+            # Fund #1: the whole allowance, submitted through the real
+            # gate pipeline and acknowledged. The fake suite never
+            # drains the queue, so when fund #2 arrives this fund is
+            # still inside its action-delay window: executed-and-
+            # recorded outstanding is 0 and only the gate-pass
+            # reservation knows the headroom is gone.
+            ("submit_gateway",
+             {"op": "fund_ecash", "amount_sats": 50000}, "received"),
+        ],
+        "expected": lambda r: (
+            r.get("status") == "refused"
+            and r.get("_petcli_estimate_window_s") == 30.0
+        ),
+        "expected_audit_events": [
+            "ecash_reserved",             # fund #1's gate-pass reservation
+            "decision_allow",             # fund #1 acknowledged
+            "decision_refuse_allowance",  # fund #2 refused on in-flight
+        ],
+        "description": (
+            "The doc 07 §8 burst (TOCTOU) case, sp-mki: two fund_ecash "
+            "submits of the full 50_000-sat allowance inside one "
+            "action-delay window. Fund #1 passes every gate, reserves "
+            "the allowance at enqueue, and is acknowledged; fund #2 "
+            "sees settled outstanding 0 BUT in-flight reserved 50_000 "
+            "and refuses at the allowance gate - total exposure caps "
+            "at the allowance, not N x allowance. Without the "
+            "reservation both funds would read the same stale "
+            "outstanding=0 and both mint. arbiter-events.log carries "
+            "fund #1's ecash_reserved + decision_allow and fund #2's "
+            "decision_refuse_allowance (requested 50_000, outstanding "
+            "0, reserved 50_000, allowance 50_000; the runner asserts "
+            "all three event names)."
+        ),
+    },
     # --- defund_ecash gate pipeline: standing approvals -> dispatch
     # stub. No allowance check (defund only shrinks exposure), and no
     # gate-time amount (the token's value is the wallet's to decode at
@@ -1959,7 +2043,7 @@ def _run_variant(variant):
                 audit_path, state_path, registry_yaml_path
             )
             for pc in variant.get("preconditions", []):
-                _apply_precondition(pc)
+                _apply_precondition(pc, port)
 
         cmd = [str(PETCLI_BIN)] + list(variant["petcli_args"])
         if variant.get("uses_arbiter", True):
@@ -2048,9 +2132,11 @@ def _run_variant(variant):
                 "(the LND wallet backs query_balance in this mode, and "
                 "query_channels always) against the fake lncli at "
                 "$LNCLI_BIN; eCash writes stop at the allowance / "
-                "standing-approvals gates or the not_implemented dispatch "
-                "stub before any mint call - arbiter/src/ecash.py is "
-                "imported only for the fund_ecash allowance lookup and no "
+                "standing-approvals gates or the timing-layer "
+                "acknowledgment (the fake suite never drains the queue) "
+                "before any mint call - arbiter/src/ecash.py is imported "
+                "only for the fund_ecash allowance gate (the exposure "
+                "lookup and the gate-pass reservation, doc 07 §8) and no "
                 "cashu subprocess ever runs (CASHU_BIN / CASHU_MINT_URL "
                 "are deliberately unset; an unexpected arbiter-side mint "
                 "call would error loudly). No live bitcoind / LND / mint "

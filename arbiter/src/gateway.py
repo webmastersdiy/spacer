@@ -650,7 +650,7 @@ def _registry_write_params(op, resolved):
     }
 
 
-def _enqueue_write_and_ack(handler, op, params, deadline):
+def _enqueue_write_and_ack(handler, op, params, deadline, reserve_sats=None):
     """Hand a gate-passed write to the timing layer and acknowledge it -
     the single tail every write op shares (doc 05 §3, §4.6).
 
@@ -663,6 +663,16 @@ def _enqueue_write_and_ack(handler, op, params, deadline):
     call, and the not_implemented dispatch stub is gone from the write
     path entirely.
 
+    reserve_sats (fund_ecash only): reserve this amount against the
+    eCash allowance under the freshly-minted handle before enqueueing -
+    ecash.reserve() is the atomic check-and-insert that makes the
+    doc 07 §8 bound hard against submit bursts (sp-mki). The fund
+    branch's earlier read-only comparison decides refusal order; this
+    is the admission itself. A reserve refusal (raced config change)
+    refuses uniformly - ecash.reserve audits decision_refuse_allowance
+    itself. An enqueue that then fails must release the reservation:
+    nothing was admitted to the queue, so nothing may hold headroom.
+
     Production timing windows are not yet computable (doc 05 §4.6,
     doc 07 §7: blocked on the dynamic-window work), so enqueue_action
     raises NotImplementedError there. The safe failure mode is "does
@@ -670,9 +680,14 @@ def _enqueue_write_and_ack(handler, op, params, deadline):
     window. SPACER_TIMING_MODE=test supplies windows and reaches the
     executor."""
     handle = _new_handle()
+    if reserve_sats is not None and not _ecash().reserve(handle, reserve_sats):
+        _respond_refused(handler, deadline)
+        return
     try:
         timing.enqueue_action(handle, op, params)
     except NotImplementedError:
+        if reserve_sats is not None:
+            _ecash().release_reservation(handle)
         audit.record("decision_refuse_timing_unavailable", {"op": op})
         _respond_refused(handler, deadline)
         return
@@ -684,8 +699,9 @@ def _handle_ecash_write(handler, request, deadline):
     """Run an eCash write (fund_ecash / defund_ecash) through its
     gate pipeline (doc 07 §3, §8). Only reachable in ecash mode.
 
-    fund_ecash: allowance cap -> standing approvals -> dispatch.
-    defund_ecash: standing approvals -> dispatch (no allowance check -
+    fund_ecash: denomination ladder -> allowance cap (settled +
+    in-flight) -> standing approvals -> reserve + enqueue.
+    defund_ecash: standing approvals -> enqueue (no allowance check -
     defund only shrinks exposure).
 
     The allowance check precedes standing approvals BY DESIGN (doc 07
@@ -731,6 +747,7 @@ def _handle_ecash_write(handler, request, deadline):
             return
         ecash = _ecash()
         outstanding = ecash.outstanding_sats()
+        reserved = ecash.reserved_sats()
         allowance = ecash.allowance_sats()
         # A missing, non-integer, or non-positive amount fails the
         # allowance check: an amount the gate cannot bound is refused,
@@ -738,10 +755,19 @@ def _handle_ecash_write(handler, request, deadline):
         # fails any bounded rule. A missing config reads as allowance
         # 0 (ecash.allowance_sats), so the float cannot exist until
         # the operator explicitly writes its bound.
+        #
+        # In-flight funds count (sp-mki): reserved covers gate-passed
+        # funds still waiting in their action-delay window, whose
+        # ledger rows land only at execution. Without it, N submits
+        # inside one window would each see the same stale outstanding
+        # and all pass - up to N x allowance minted. This read-only
+        # comparison decides refusal ORDER (allowance before standing
+        # approvals, doc 07 §8); the hard edge is the atomic
+        # reservation taken at enqueue (_enqueue_write_and_ack).
         if (
             not isinstance(amount, int)
             or amount <= 0
-            or outstanding + amount > allowance
+            or outstanding + reserved + amount > allowance
         ):
             audit.record(
                 "decision_refuse_allowance",
@@ -749,6 +775,7 @@ def _handle_ecash_write(handler, request, deadline):
                     "op": op,
                     "requested_sats": amount,
                     "outstanding_sats": outstanding,
+                    "reserved_sats": reserved,
                     "allowance_sats": allowance,
                 },
             )
@@ -764,9 +791,12 @@ def _handle_ecash_write(handler, request, deadline):
         return
     # Gates passed: hand the write to the timing layer + executor, which
     # drains it against the pinned mint + our LND (doc 07 §3; doc 05 §3,
-    # §4.6, §4.8). Same enqueue-and-acknowledge tail every write shares.
+    # §4.6, §4.8). Same enqueue-and-acknowledge tail every write shares;
+    # a fund additionally reserves its amount against the allowance
+    # there (atomic check-and-reserve, the doc 07 §8 hard bound).
     _enqueue_write_and_ack(
-        handler, op, _ecash_action_params(op, request), deadline
+        handler, op, _ecash_action_params(op, request), deadline,
+        reserve_sats=amount if op == "fund_ecash" else None,
     )
 
 

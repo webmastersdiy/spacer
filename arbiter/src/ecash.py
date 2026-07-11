@@ -295,6 +295,21 @@ def info():
 # doc 07 §8) is deferred until the executor lands - the outstanding
 # cap is the hard bound; the rate cap refines it over time and needs
 # real funding traffic to tune against.
+#
+# The bound counts IN-FLIGHT funds, not just executed ones (sp-mki).
+# A fund sits in its action-delay window between gate-pass and
+# execution; the ledger row lands only at execution. If the gate
+# checked the executed-only ledger, N submits inside one window would
+# each see the same stale outstanding and all pass - up to N x
+# allowance minted. So gate-pass takes a RESERVATION (reserve(), one
+# atomic check-and-insert against settled + reserved + requested),
+# execution settles it into the ledger (record_funded deletes the
+# reservation and inserts the fund row in one transaction), and any
+# failure releases it (release_reservation) - a fund that minted
+# nothing hands its headroom back. The executor re-checks at the
+# drain moment (recheck_reservation) so an allowance lowered while
+# the fund waited still binds, and a fund with no reservation fails
+# closed.
 
 DEFAULT_ALLOWANCE_PATH = (
     Path.home() / "spacer" / "arbiter" / "config" / "ecash.yaml"
@@ -365,6 +380,12 @@ CREATE TABLE IF NOT EXISTS ecash_ledger (
     handle      TEXT NOT NULL,
     recorded_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ecash_reservations (
+    handle      TEXT PRIMARY KEY,
+    amount_sats INTEGER NOT NULL,
+    created_at  REAL NOT NULL
+);
 """
 state.register_schema(_SCHEMA)
 
@@ -385,9 +406,160 @@ def outstanding_sats():
     return max(0, int(row[0]))
 
 
+def reserved_sats():
+    """Return the total of active reservations: gate-passed funds
+    still waiting in their action-delay window. The in-flight half of
+    the doc 07 §8 exposure; the settled half is outstanding_sats()."""
+    with state.connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_sats), 0) FROM ecash_reservations"
+        ).fetchone()
+    return int(row[0])
+
+
+def _exposure_on(conn):
+    """(settled, reserved) read on one connection so callers that must
+    decide against a consistent snapshot (reserve, recheck) see both
+    sides of the exposure in the same transaction. The settled side
+    floors at 0 exactly like outstanding_sats(): a defund surplus must
+    not widen reserve headroom past the allowance."""
+    settled = conn.execute(
+        "SELECT COALESCE(SUM(CASE direction WHEN 'fund' THEN amount_sats "
+        "ELSE -amount_sats END), 0) FROM ecash_ledger"
+    ).fetchone()[0]
+    reserved = conn.execute(
+        "SELECT COALESCE(SUM(amount_sats), 0) FROM ecash_reservations"
+    ).fetchone()[0]
+    return max(0, int(settled)), int(reserved)
+
+
+def reserve(handle, amount_sats):
+    """Reserve amount_sats of allowance headroom for a gate-passed
+    fund, keyed by its acknowledgment handle. Returns True and inserts
+    the reservation row iff settled + reserved + amount fits the
+    allowance; returns False (audited decision_refuse_allowance, the
+    same event the gateway's gate emits, so the operator's refusal
+    count stays one series) otherwise.
+
+    The check and the insert run in ONE transaction: this is the hard
+    edge of the doc 07 §8 bound. The gateway's fund gate makes the
+    same comparison first for refusal ORDERING (allowance before
+    standing approvals); this call re-makes it atomically at enqueue
+    so nothing admitted between the two reads can overshoot the cap.
+
+    An amount the bound cannot price - non-int, non-positive -
+    refuses, mirroring the gate."""
+    allowance = allowance_sats()
+    with state.connect() as conn:
+        settled, reserved = _exposure_on(conn)
+        if (
+            not isinstance(amount_sats, int)
+            or isinstance(amount_sats, bool)
+            or amount_sats <= 0
+            or settled + reserved + amount_sats > allowance
+        ):
+            ok = False
+        else:
+            conn.execute(
+                "INSERT INTO ecash_reservations "
+                "(handle, amount_sats, created_at) VALUES (?, ?, ?)",
+                (handle, amount_sats, time.time()),
+            )
+            ok = True
+    if ok:
+        audit.record(
+            "ecash_reserved",
+            {
+                "handle": handle,
+                "amount_sats": amount_sats,
+                "outstanding_sats": settled,
+                "reserved_sats": reserved + amount_sats,
+                "allowance_sats": allowance,
+            },
+        )
+    else:
+        audit.record(
+            "decision_refuse_allowance",
+            {
+                "op": "fund_ecash",
+                "requested_sats": amount_sats,
+                "outstanding_sats": settled,
+                "reserved_sats": reserved,
+                "allowance_sats": allowance,
+            },
+        )
+    return ok
+
+
+def release_reservation(handle):
+    """Release a reservation whose fund will never settle: execution
+    failed, or enqueue was refused after the reservation was taken.
+    The headroom returns to the allowance. Idempotent - releasing a
+    missing (or already-settled) handle is a quiet no-op - so failure
+    paths can call it unconditionally. Returns True iff a row was
+    released (audited)."""
+    with state.connect() as conn:
+        row = conn.execute(
+            "SELECT amount_sats FROM ecash_reservations WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "DELETE FROM ecash_reservations WHERE handle = ?", (handle,)
+        )
+    audit.record(
+        "ecash_reservation_released",
+        {"handle": handle, "amount_sats": int(row[0])},
+    )
+    return True
+
+
+def recheck_reservation(handle, amount_sats):
+    """Executor-side re-check at the drain moment (doc 07 §8): the
+    submit-time reservation must still exist, match the enqueued
+    amount, and fit the CURRENT allowance before any mint contact.
+
+    Raises EcashError (the handler's failure path releases the
+    reservation and the petitioner sees a uniform failed result) when:
+    - no reservation exists for the handle: the fund was enqueued
+      outside the gate pipeline, or state diverged - fail closed;
+    - the reserved amount differs from the enqueued amount: state
+      diverged - fail closed;
+    - settled + reserved exceeds the allowance: the operator lowered
+      the bound while this fund sat in its action-delay window. The
+      new bound wins at the moment value would actually move."""
+    allowance = allowance_sats()
+    with state.connect() as conn:
+        row = conn.execute(
+            "SELECT amount_sats FROM ecash_reservations WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        settled, reserved = _exposure_on(conn)
+    if row is None:
+        raise EcashError(
+            "fund_ecash has no allowance reservation for this handle; "
+            "refusing to mint (doc 07 §8 hard bound fails closed)"
+        )
+    if int(row[0]) != amount_sats:
+        raise EcashError(
+            "fund_ecash reservation amount does not match the enqueued "
+            "amount; refusing to mint"
+        )
+    if settled + reserved > allowance:
+        raise EcashError(
+            "fund_ecash allowance re-check failed at execution: "
+            f"outstanding {settled} + reserved {reserved} exceeds "
+            f"allowance {allowance}"
+        )
+
+
 def record_funded(handle, amount_sats):
     """Record a successful fund execution. Executor-side: called after
     the mint flow completes and the handoff token is deposited.
+    Settles the fund's reservation in the same transaction as the
+    ledger insert - the reservation becomes the ledger row, so total
+    exposure (settled + reserved) is constant across the settle moment.
     Audit-logs amount and outstanding before/after per doc 07 §8."""
     return _record("fund", handle, amount_sats)
 
@@ -404,6 +576,15 @@ def _record(direction, handle, amount_sats):
         raise ValueError(f"amount_sats must be positive, got {amount}")
     before = outstanding_sats()
     with state.connect() as conn:
+        if direction == "fund":
+            # Settle: the reservation taken at gate-pass becomes the
+            # ledger row atomically - no instant where the fund is
+            # counted twice (reserved AND settled) or not at all.
+            # No-op for direct ledger writes with no reservation.
+            conn.execute(
+                "DELETE FROM ecash_reservations WHERE handle = ?",
+                (handle,),
+            )
         conn.execute(
             "INSERT INTO ecash_ledger "
             "(direction, amount_sats, handle, recorded_at) "
@@ -633,6 +814,90 @@ esac
         )
         assert first_fund["payload"]["outstanding_before_sats"] == 0
         assert first_fund["payload"]["outstanding_after_sats"] == 30000
+
+        # Reservations: the in-flight half of the hard bound (sp-mki).
+        # Ledger sum is negative here (35k funded - 50k defunded); the
+        # settled side of the exposure floors at 0 like
+        # outstanding_sats(), so a defund surplus cannot widen reserve
+        # headroom.
+        allowance_yaml.write_text("ecash_allowance_sats: 50000\n")
+        assert reserved_sats() == 0
+
+        # N-burst property (doc 07 §8): N reserve attempts inside one
+        # action-delay window cap total exposure at the allowance, not
+        # N x amount - only the attempts that fit are admitted.
+        wins = [reserve(f"h_burst_{i}", 20000) for i in range(10)]
+        assert wins == [True, True] + [False] * 8, wins
+        assert reserved_sats() == 40000
+        assert outstanding_sats() == 0  # settled side unchanged
+
+        # Boundary: an exactly-fitting reservation passes; +1 refuses.
+        assert reserve("h_fit", 10000)
+        assert not reserve("h_over", 1000)
+        assert reserved_sats() == 50000
+
+        # Release hands headroom back; idempotent on a missing handle.
+        assert release_reservation("h_fit")
+        assert not release_reservation("h_fit")
+        assert reserved_sats() == 40000
+
+        # Amounts the bound cannot price refuse outright.
+        assert not reserve("h_zero", 0)
+        assert not reserve("h_neg", -5)
+        assert not reserve("h_str", "9000")
+        assert not reserve("h_bool", True)
+
+        # recheck_reservation: the executor's drain-moment re-check.
+        raised = False
+        try:
+            recheck_reservation("h_missing", 20000)
+        except EcashError as e:
+            raised = "no allowance reservation" in str(e)
+        assert raised, "missing reservation must raise"
+        raised = False
+        try:
+            recheck_reservation("h_burst_0", 12345)
+        except EcashError as e:
+            raised = "does not match" in str(e)
+        assert raised, "amount mismatch must raise"
+        recheck_reservation("h_burst_0", 20000)  # fits: no raise
+        allowance_yaml.write_text("ecash_allowance_sats: 30000\n")
+        raised = False
+        try:
+            recheck_reservation("h_burst_0", 20000)  # exposure 40k > 30k
+        except EcashError as e:
+            raised = "re-check failed" in str(e)
+        assert raised, "lowered allowance must fail the drain-moment re-check"
+        allowance_yaml.write_text("ecash_allowance_sats: 50000\n")
+
+        # Settle: record_funded consumes the reservation and writes the
+        # ledger row in one transaction - reserved drops, settled rises,
+        # total exposure constant across the settle moment.
+        record_funded("h_burst_0", 20000)
+        assert reserved_sats() == 20000, reserved_sats()
+        assert outstanding_sats() == 5000  # -15000 ledger sum + 20000
+        release_reservation("h_burst_1")
+        assert reserved_sats() == 0
+
+        # Audit trail for the reservation lifecycle.
+        events = [
+            _json.loads(line)
+            for line in tmp_audit.read_text().splitlines()
+            if line.strip()
+        ]
+        names = [e["event"] for e in events]
+        assert names.count("ecash_reserved") == 3, names
+        assert names.count("ecash_reservation_released") == 2, names
+        # 8 over-cap burst attempts + h_over + zero/neg/str/bool = 13.
+        assert names.count("decision_refuse_allowance") == 13, names
+        reserved_ev = next(e for e in events if e["event"] == "ecash_reserved")
+        assert reserved_ev["payload"] == {
+            "handle": "h_burst_0",
+            "amount_sats": 20000,
+            "outstanding_sats": 0,
+            "reserved_sats": 20000,
+            "allowance_sats": 50000,
+        }, reserved_ev
 
         print(f"OK: ecash wrapper + allowance ledger round-trips at {work}")
     finally:
