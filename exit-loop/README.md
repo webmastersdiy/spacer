@@ -53,8 +53,12 @@ Artifact paths mirror the petcli command tree: Bitcoin on-chain
 commands are the primary surface (`submit/manage-bitcoin`,
 `query/balance`) and the Lightning and eCash commands live under the
 opt-in `advanced` namespace, so their artifacts live under
-`petcli/advanced/`. Read-only queries are validated end-to-end via
-the fake bitcoin-cli / fake lncli the runner installs;
+`petcli/advanced/`. Read-only queries are snapshot-served (design
+doc 15): each read variant stages its snapshot via the runner's
+refresh precondition - standing in for the executor drainer's
+randomized clock - whose sweep reads the fake bitcoin-cli / fake
+lncli the runner installs, while the petcli read itself never
+touches a backend;
 state-changing sends are validated on the registry-miss path
 (refused-unknown-token) and both standing-approvals branches
 (parked-no-standing-approval / allowed-by-standing-approval; the
@@ -85,7 +89,8 @@ and leaving `CASHU_BIN`/`CASHU_MINT_URL` unset means an unexpected
 arbiter-side mint call errors loudly instead of being absorbed.
 
 [Scale cloaking](../GLOSSARY.md#scale-cloaking) is wired for the
-read-only balance path. Four cloaked variants exercise the cloak's
+read-only balance path, with `present()` running at snapshot-refresh
+time (doc 15 invariant 2). Four cloaked variants exercise the cloak's
 distinct branches: `query/balance/cloaked-tier-1` (T1 init, real 150k
 presents 15k), `query/balance/cloaked-tier-2` (T2 init, real 1.5M
 presents the same 15k as tier-1 - the cloak's whole point), and the
@@ -93,8 +98,16 @@ transition state machine via `query/balance/transition-pending`
 (future due_at, presented value deliberately exceeds the 0-100k
 window per the GLOSSARY's `drift > range` property) and
 `query/balance/transition-applied` (past due_at, scale shifts
-atomically and audit-logs `scale_tier_shift_applied`). The runner
+atomically at the refresh boundary and audit-logs
+`scale_tier_shift_applied`). Four snapshot variants
+(`query/balance/snapshot-*`, doc 15 §6) prove the serving discipline
+itself: fresh serve, stale serve across a real backend change (the
+move stays invisible until the next refresh), the quantization edge
+(sub-grid churn produces no served transition at all), and a tier
+shift coming due mid-epoch that stays held until a refresh boundary.
+The runner
 sets `SPACER_SCALE_MODE=test` to unlock deterministic per-tier scales
-and 5-15s transition windows; production-mode delays are blocked
-behind a NotImplementedError pending the within-tier randomization
-work.
+and 5-15s transition windows (the snapshot refresh band rides the
+same `SPACER_TIMING_MODE=test` 5-15s convention); production-mode
+delays and refresh epochs are blocked behind a NotImplementedError
+pending the dynamic-window work.

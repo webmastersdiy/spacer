@@ -8,9 +8,9 @@ _ecash_mode) along the rail ladder of design doc 07: Bitcoin on-chain
 Lightning):
 
 - onchain (default): Bitcoin on-chain is the primary surface. The read
-  is query_balance (bitcoind wallet); the write is manage_bitcoin. The
-  gateway runs with NO LND dependency in this mode - lnd.py is never
-  imported (see _lnd).
+  is query_balance (the bitcoind wallet, snapshot-served); the write is
+  manage_bitcoin. The gateway runs with NO LND dependency in this mode -
+  lnd.py is never imported (module NOTE below).
 - advanced (SPACER_MODE=lightning|full): the Lightning extension layers
   query_channels (read) and manage_lightning (write) back on, reading the
   LND node via arbiter/src/lnd.py.
@@ -23,7 +23,10 @@ Lightning):
 The handler routes each inbound request through one of these branches
 based on op:
 
-- Known read ops: dispatch directly.
+- Known read ops: served from the per-op read snapshot (design doc 15,
+  arbiter/src/snapshots.py), refreshed on the executor drainer's
+  randomized event-independent clock. The request path never touches
+  bitcoind / LND, so polling at any rate only observes the snapshot.
 - Known write ops: resolve the recipient_token through the recipient
   address registry during pseudonymize-inbound; on miss, refuse
   uniformly. The registry IS the destination gate - there is no
@@ -69,19 +72,21 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
-import bitcoin
 import denominations
 import registry
 import results
-import scale
+import snapshots
 import standing_approvals
 import state
 import timing
 
-# NOTE: arbiter/src/lnd.py is deliberately NOT imported here. It is the
-# advanced Lightning extension's only dependency and is pulled in lazily
-# by _lnd(), so onchain (default) mode runs with no LND dependency at
-# all (scope item 1: "gateway must NOT import lnd unconditionally").
+# NOTE: arbiter/src/lnd.py is deliberately NOT imported here - or
+# anywhere in the gateway, since reads went snapshot-served (doc 15):
+# the only LND consumers are the executor's op handlers and the
+# snapshot refresh sweep (snapshots._read_backend), both of which
+# import it lazily in advanced modes only, so onchain (default) mode
+# runs with no LND dependency at all (scope item 1: "gateway must NOT
+# import lnd unconditionally").
 # arbiter/src/ecash.py follows the same rule one rung up the ladder:
 # pulled in lazily by _ecash() on ecash-mode calls only, so onchain AND
 # lightning deployments run with no nutshell dependency (doc 07 §9).
@@ -226,12 +231,22 @@ def process_request(handler):
         _handle_poll(handler, request, deadline)
         return
 
-    # Known read ops dispatch directly. No recipient_token, no
-    # destination universe to resolve against; the gateway just calls
-    # into the backend wrapper. Outbound filtering still applies. The
-    # exposed read set depends on the deployment mode (_known_read_ops).
+    # Known read ops serve from the read snapshot (doc 15). No
+    # recipient_token, no destination universe to resolve against, and
+    # no backend call either: the gateway reads the per-op snapshot row
+    # and returns the stored value verbatim. Outbound filtering still
+    # applies. The exposed read set depends on the deployment mode
+    # (_known_read_ops). Before the first refresh has ever completed
+    # (boot gap, or production mode where the refresh sweep is blocked
+    # on sp-77lxs.3) there is nothing to serve; refuse uniformly rather
+    # than fall back to a live backend read - the read path touching a
+    # backend even once is exactly what doc 15 removes.
     if op in _known_read_ops():
         response = _dispatch(request)
+        if response is None:
+            audit.record("decision_refuse_snapshot_unavailable", {"op": op})
+            _respond_refused(handler, deadline)
+            return
         response = _hide_secrets(response)
         response = _band_outbound(response)
         response = _aggregate_outbound(response)
@@ -409,38 +424,22 @@ def _ecash_mode():
     return _mode() in _ECASH_MODES
 
 
-def _lnd():
-    """Lazily import the LND extension module (arbiter/src/lnd.py).
-
-    The whole point of onchain mode (scope item 1) is "no LND dependency
-    at runtime": a deployment that does not run Lightning must not even
-    import lnd.py. Importing it here - inside the advanced-mode dispatch
-    path - rather than at module top is what makes that literally true.
-    Python caches the module in sys.modules after the first advanced-mode
-    call, so the import cost is paid once."""
-    import lnd
-    return lnd
-
-
 def _ecash():
     """Lazily import the eCash extension module (arbiter/src/ecash.py),
-    mirroring _lnd() one rung up the ladder: an onchain or lightning
-    deployment never imports it and carries no nutshell dependency at
-    runtime (doc 07 §9). First import also registers and applies the
-    ecash_ledger schema (see ecash.py's tail comment)."""
+    the same lazy-import rule lnd.py follows one rung down the ladder
+    (module NOTE at top): an onchain or lightning deployment never
+    imports it and carries no nutshell dependency at runtime (doc 07
+    §9). First import also registers and applies the ecash_ledger
+    schema (see ecash.py's tail comment)."""
     import ecash
     return ecash
 
 
-# Satoshis per bitcoin. bitcoin.getbalance() returns a Decimal in BTC;
-# the gateway presents satoshis (matching the LND path's integer-sat
-# wire shape), so it scales by 1e8 before scale.present(). Kept as an
-# int literal so Decimal * int stays exact - no float in the money path.
-_SATS_PER_BTC = 100_000_000
-
-# Read op exposed in onchain (default) mode. query_balance reads the
-# bitcoind wallet; it has no recipient_token and is not state-changing.
-# Outbound filters (hide-secrets / band / aggregate) still apply.
+# Read op exposed in onchain (default) mode. query_balance serves the
+# bitcoind-wallet snapshot (doc 15; the refresh sweep reads the wallet,
+# never this request path); it has no recipient_token and is not
+# state-changing. Outbound filters (hide-secrets / band / aggregate)
+# still apply.
 _ONCHAIN_READ_OPS = frozenset({"query_balance"})
 
 # Write op exposed in onchain (default) mode. manage_bitcoin resolves its
@@ -772,7 +771,8 @@ def _handle_ecash_write(handler, request, deadline):
 
 
 def _dispatch(request):
-    """Hand a read op to arbiter internals and return its response.
+    """Serve a read op from its snapshot row and return the response,
+    or None when no snapshot exists yet (the caller refuses uniformly).
 
     Only the read-only query ops reach here now. Every write op is
     enqueued on the timing layer and drained by executor.py
@@ -781,64 +781,52 @@ def _dispatch(request):
     unrecognized read op - a defensive default, since _known_read_ops()
     admits only query_balance / query_channels.
 
-    query_balance returns the wallet's total balance, routed through
-    scale.present() so the precise satoshi value AND the wallet's order
-    of magnitude are hidden from the petitioner. In onchain (default)
-    mode the figure comes from the bitcoind wallet (bitcoin.getbalance(),
-    a BTC Decimal scaled to integer sats); in the advanced Lightning
-    extension it comes from the LND on-chain wallet (lnd.walletbalance()).
-    Either way the wire shape is balance_sats. The cloak is on; numeric
-    banding (the old _band_sats step) is deliberately dropped for these
-    ops because the cloak's per-tier scale already provides 10x+
-    compression of the presented value - layering a fixed-resolution
-    band on top would muddy the math without adding meaningful privacy.
-    Banding remains the design for fields that are NOT cloak-eligible
-    (e.g., per-call fee amounts on send paths); those land with their
-    own beads.
+    Both ops serve the stored value verbatim (doc 15 §4): the refresh
+    sweep (snapshots.refresh_due, driven by the executor drainer on a
+    randomized event-independent clock) already ran the full
+    presentation - backend read -> scale.present() -> quantize to the
+    serve grid - at refresh time. Running present() here, per request,
+    would let a mid-epoch tier shift move the served value at poll
+    resolution, which is exactly the change-timing channel doc 15
+    closes. Wire shapes are unchanged: balance_sats / capacity_sats
+    carry the same integer-sat figures as before, only their freshness
+    semantics changed. Which backend feeds each op (bitcoind vs the
+    LND wallet for query_balance; LND channel totals, aggregated per
+    §4.3, for query_channels) is the refresh sweep's concern now
+    (snapshots._read_backend), mode-split exactly as dispatch used to.
 
-    query_channels (advanced extension only) returns the LND channel
-    pool's aggregate capacity (local + remote), also routed through
-    scale.present(). Aggregate-by-default per §4.3: per-channel detail
-    is suppressed without a per-call justification.
+    The per-request audit record is the served value plus the snapshot
+    age (doc 15 §4.8): the operator sees what was told and how stale it
+    was. The refresh-time real-vs-presented-vs-served pairing material
+    lives in the snapshot_refresh event, once per refresh instead of
+    once per read. The disclosure record is unchanged.
 
-    Per GLOSSARY 'Scale cloaking' and §4.3.
+    Per GLOSSARY 'Read snapshot' and 'Scale cloaking'.
     """
     op = request.get("op")
     if op == "query_balance":
-        if _advanced_mode():
-            # Advanced extension: the LND on-chain wallet total.
-            raw = _lnd().walletbalance()
-            total = int(raw.get("total_balance", "0"))
-        else:
-            # onchain (default): the bitcoind wallet's confirmed
-            # balance. getbalance() returns a Decimal in BTC; scale to
-            # integer sats (the same wire shape the LND path presents)
-            # before cloaking.
-            total = int(bitcoin.getbalance() * _SATS_PER_BTC)
-        presented = scale.present(total)
-        # Operator-side record of real-vs-presented for this read: the
-        # doc 13 column-2 material ("real (unbanded) amounts") the
-        # operator console pairs against the disclosed figure. Never
-        # crosses the gateway; the petitioner sees only presented.
+        snap = snapshots.serve("query_balance")
+        if snap is None:
+            return None
+        served, age_s = snap
         audit.record(
-            "balance_read",
-            {"real_sats": total, "presented_sats": presented},
+            "balance_served",
+            {"served_sats": served, "snapshot_age_s": round(age_s, 3)},
         )
-        return {"status": "ok", "balance_sats": presented}
+        return {"status": "ok", "balance_sats": served}
     if op == "query_channels":
         # query_channels is an advanced-extension read; the onchain
         # router gates it before dispatch, so this branch only runs in
-        # advanced mode and the lazy LND import is always satisfied.
-        raw = _lnd().channelbalance()
-        local = int(raw.get("local_balance", {}).get("sat", "0"))
-        remote = int(raw.get("remote_balance", {}).get("sat", "0"))
-        presented = scale.present(local + remote)
-        # Same operator-side real-vs-presented record as query_balance.
+        # advanced mode (where the refresh sweep keeps a capacity row).
+        snap = snapshots.serve("query_channels")
+        if snap is None:
+            return None
+        served, age_s = snap
         audit.record(
-            "capacity_read",
-            {"real_sats": local + remote, "presented_sats": presented},
+            "capacity_served",
+            {"served_sats": served, "snapshot_age_s": round(age_s, 3)},
         )
-        return {"status": "ok", "capacity_sats": presented}
+        return {"status": "ok", "capacity_sats": served}
     return {"status": "not_implemented", "op": op}
 
 
@@ -975,6 +963,10 @@ if __name__ == "__main__":
     audit.configure(tmp_audit)
     state.configure(tmp_state)
     state.migrate()
+    # Test mode for snapshots.seed_for_test (the read-path sub-test
+    # below); no write in this smoke reaches the timing layer (the
+    # manage_bitcoin probe refuses at the denomination gate first).
+    os.environ["SPACER_TIMING_MODE"] = "test"
 
     # Bind port 0 so the OS picks a free ephemeral port; avoids
     # collisions if the smoke test runs concurrently.
@@ -1034,6 +1026,40 @@ if __name__ == "__main__":
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+
+        # Read path, pre-first-refresh (doc 15): no snapshot row exists,
+        # so query_balance refuses uniformly - wire-indistinguishable
+        # from every other refusal - and never touches a backend (none
+        # is configured in this smoke; a live read would error, not
+        # refuse). Audit logs decision_refuse_snapshot_unavailable.
+        body = json.dumps({"op": "query_balance"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+
+        # Read path, snapshot present: the gateway serves the stored
+        # value verbatim (no present(), no quantize, no backend - all
+        # of that ran at refresh time) and audit-logs balance_served
+        # with the snapshot age.
+        snapshots.seed_for_test(
+            "query_balance", 14_000, time.time() - 2.0, time.time() + 100.0
+        )
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            served_body = json.loads(resp.read().decode("utf-8"))
+        assert served_body == {"status": "ok", "balance_sats": 14_000}, served_body
 
         # Result-poll path (§4.8). Deposit a result behind the gateway,
         # then exercise the poll fast-path end-to-end via HTTP. The
@@ -1110,20 +1136,26 @@ if __name__ == "__main__":
     with open(tmp_audit) as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert "gateway_start" in events, events
-    # 6 well-formed requests reach _parse_request: the original
-    # smoke_ping, the off-ladder manage_bitcoin, plus four polls. The
-    # malformed request is rejected before request_received via
+    # 8 well-formed requests reach _parse_request: the original
+    # smoke_ping, the off-ladder manage_bitcoin, the two query_balance
+    # reads (pre-snapshot refusal, snapshot-served), plus four polls.
+    # The malformed request is rejected before request_received via
     # send_error.
-    assert events.count("request_received") == 6, events
+    assert events.count("request_received") == 8, events
     # Every sent response lands in the disclosure record (doc 13 §3):
     # the smoke_ping refusal, the denomination refusal, the parse-
-    # failure refusal, and the four poll responses.
-    assert events.count("disclosure") == 7, events
+    # failure refusal, the two read responses, and the four poll
+    # responses.
+    assert events.count("disclosure") == 9, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
     # The off-ladder manage_bitcoin was refused at the amount gate,
     # ahead of the registry (doc 12 G2).
     assert "decision_refuse_denomination" in events, events
+    # Read path (doc 15): the pre-snapshot read refused with its own
+    # audit marker; the served read recorded the served value + age.
+    assert "decision_refuse_snapshot_unavailable" in events, events
+    assert "balance_served" in events, events
     # Poll path: deposit, ok, throttled, unknown, bad_input must all
     # appear. The bad-input case audit-logs at the gateway layer
     # (decision_poll_bad_input) without reaching results.poll().
@@ -1135,10 +1167,10 @@ if __name__ == "__main__":
         "decision_poll_bad_input",
     ):
         assert required in events, f"audit missing {required}: {events!r}"
-    # Three successful poll routings (ok, throttled, unknown) plus
-    # the bad-input case all log decision_allow / decision_poll_bad_input;
-    # decision_allow appears exactly 3 times (one per non-bad-input
-    # poll) - the bad-input path uses its own marker.
-    assert events.count("decision_allow") == 3, events
+    # Three successful poll routings (ok, throttled, unknown) plus the
+    # snapshot-served read log decision_allow; the bad-input poll uses
+    # its own marker (decision_poll_bad_input), so decision_allow
+    # appears exactly 4 times.
+    assert events.count("decision_allow") == 4, events
     print(f"OK: gateway pipeline round-trips at audit={tmp_audit}, port={bind_port}")
     sys.exit(0)

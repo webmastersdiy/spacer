@@ -38,17 +38,21 @@ acceptable because the runner lives next to the arbiter source in
 this repo and rebuilds in lockstep with it.
 
 Stdlib only. No bitcoind / LND / mint infrastructure is exercised
-through the gateway dispatch in the current code base for
-state-changing ops (no executor wires the timing layer to
-bitcoin.py / lnd.py / ecash.py yet), so infra-events.log records
-that fact rather than capturing real RPC traffic. Read-only
-query_balance exercises a fake bitcoin-cli in onchain (default)
-mode and a fake lncli in the advanced Lightning extension;
-query_channels exercises the fake lncli (advanced only). The local
-petcli eCash wallet commands exercise a fake cashu CLI (petitioner-
-side, $PETCLI_CASHU_BIN) - the arbiter-side cashu wrapper is never
-reached because eCash writes stop at the gateway gates or the
-not_implemented dispatch stub. All three fakes are installed below.
+for state-changing ops in the default suite (writes stop at the
+timing-layer acknowledgment; the runner never drains the queue -
+the executor's real round-trips run under --live), so
+infra-events.log records that fact rather than capturing real RPC
+traffic. The read ops are
+snapshot-served (doc 15): the gateway never reads a backend per
+request, so read variants stage their snapshot via the
+refresh_snapshots precondition, whose refresh sweep
+(snapshots.refresh_due) reads a fake bitcoin-cli in onchain
+(default) mode and a fake lncli in the advanced Lightning extension.
+The local petcli eCash wallet commands exercise a fake cashu CLI
+(petitioner-side, $PETCLI_CASHU_BIN) - the arbiter-side cashu
+wrapper is never reached because eCash writes stop at the gateway
+gates or the not_implemented dispatch stub. All three fakes are
+installed below.
 
 Per design-docs/origin/05--2026-05-05-0948-architecture-overview.md §10.
 """
@@ -91,16 +95,18 @@ import state  # noqa: E402
 # precondition (the gateway picks the path up via the env var).
 import registry  # noqa: E402
 import scale  # noqa: E402
+import snapshots  # noqa: E402
 import standing_approvals  # noqa: E402
 import timing  # noqa: E402, F401
 
 # Structural no-LND guarantee: importing the gateway (and every other
 # arbiter module above) must not pull in lnd.py. The LND wrapper is the
-# advanced Lightning extension's dependency, imported lazily by
-# gateway._lnd() only on an advanced-mode dispatch. If this fires, some
-# arbiter module regained a top-level lnd import and onchain (default)
-# mode no longer runs LND-free. A second, runtime check fires in main()
-# after all onchain-mode variants have run (see the no-lnd-import gate).
+# advanced Lightning extension's dependency, imported lazily only by
+# the executor's advanced-mode handlers and the snapshot refresh sweep
+# (snapshots._read_backend). If this fires, some arbiter module
+# regained a top-level lnd import and onchain (default) mode no longer
+# runs LND-free. A second, runtime check fires in main() after all
+# onchain-mode variants have run (see the no-lnd-import gate).
 assert "lnd" not in sys.modules, (
     "importing arbiter modules pulled in lnd.py; onchain (default) "
     "mode must carry no LND dependency"
@@ -299,6 +305,15 @@ case "$1" in
         # 1_500_000 sat -> natural cloak tier T2.
         printf '0.01500000'
         ;;
+      subgrid)
+        # 50_400 sat: floors to 50_000 on the doc 15 1k serve grid.
+        printf '0.00050400'
+        ;;
+      subgrid-moved)
+        # 50_900 sat: same grid cell as subgrid, so the move is
+        # sub-grid and the served value must not transition.
+        printf '0.00050900'
+        ;;
       *)
         # Default funded scenario: 50_000 sat, inside T0 so the
         # cloak is a no-op and the wire response is the raw figure.
@@ -463,6 +478,27 @@ def _apply_precondition(precondition):
         deliberately exceed) the allowance gate; omit and rely on
         the runner's per-variant clear for the missing-config
         default (allowance 0 = every fund refused).
+      ("refresh_snapshots",)
+        Run one read-snapshot refresh sweep (snapshots.refresh_due,
+        doc 15) - the arbiter-internal step the executor drainer
+        performs on its randomized clock in production. Every read
+        variant needs at least one: the gateway serves reads from
+        the snapshot row and refuses uniformly before the first
+        refresh. A missing row always counts as due, so the first
+        sweep refreshes unconditionally.
+      ("refresh_snapshots_forced",)
+        Same sweep with a far-future cutoff, forcing a refresh even
+        though the row's randomized next_refresh_at has not elapsed -
+        the runner's stand-in for "the next epoch tick arrived"
+        without a wall-clock wait (the drainer pattern used by
+        execute_due_actions(now=)).
+      ("set_scenario", env_key, value)
+        Point one of the fake-backend scenario vars (e.g.
+        BITCOIN_CLI_SCENARIO) at a different canned reply MID-
+        variant, between two refreshes, so a variant can move the
+        backend value underneath an existing snapshot. Only keys
+        already managed per-variant by env_overrides are safe here
+        (the teardown restore covers them).
     """
     op = precondition[0]
     if op == "deposit":
@@ -523,6 +559,13 @@ def _apply_precondition(precondition):
         _ECASH_ALLOWANCE_PATH.write_text(
             f"ecash_allowance_sats: {int(sats)}\n"
         )
+    elif op == "refresh_snapshots":
+        snapshots.refresh_due()
+    elif op == "refresh_snapshots_forced":
+        snapshots.refresh_due(now=time.time() + 1e9)
+    elif op == "set_scenario":
+        _, env_key, value = precondition
+        os.environ[env_key] = value
     else:
         raise ValueError(f"unknown precondition op {op!r}")
 
@@ -570,20 +613,24 @@ def _apply_precondition(precondition):
 #
 # Variants in this list are the ones that exercise distinct code
 # paths reachable in the current code base, across the deployment
-# modes (gateway SPACER_MODE):
+# modes (gateway SPACER_MODE). Read ops are snapshot-served (doc 15):
+# the refresh_snapshots precondition stands in for the executor
+# drainer's randomized refresh clock, and it is the REFRESH - never
+# the petitioner's request - that touches a backend:
 #
-# - onchain (default, SPACER_MODE unset): query_balance dispatches
-#   through arbiter/src/bitcoin.py against a fake bitcoin-cli the
+# - onchain (default, SPACER_MODE unset): the query_balance refresh
+#   reads arbiter/src/bitcoin.py against a fake bitcoin-cli the
 #   runner installs at module-import time; manage_bitcoin exercises the
 #   registry-miss refusal and both standing-approvals branches. The
 #   extension ops (query_channels / manage_lightning / fund_ecash /
 #   defund_ecash) are extension-gated: recognized but refused
 #   uniformly (decision_refuse_mode).
 # - advanced (SPACER_MODE=lightning|full): the Lightning extension
-#   layers query_channels / manage_lightning back on, and query_balance
-#   reads the LND wallet instead of bitcoind - all through
-#   arbiter/src/lnd.py against the fake lncli. The eCash ops remain
-#   extension-gated (doc 07 §9: full is frozen at onchain+lightning).
+#   layers query_channels / manage_lightning back on, and the
+#   query_balance refresh reads the LND wallet instead of bitcoind -
+#   all through arbiter/src/lnd.py against the fake lncli. The eCash
+#   ops remain extension-gated (doc 07 §9: full is frozen at
+#   onchain+lightning).
 # - ecash (SPACER_MODE=ecash): the full ladder. The Lightning surface
 #   stays on (the ladder regression variants assert it) and the eCash
 #   writes run their gate pipeline: allowance cap (fund only,
@@ -853,21 +900,28 @@ VARIANTS = [
         "path": ("query", "balance", "default"),
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 50000,
         },
+        "expected_audit_events": ["snapshot_refresh", "balance_served"],
+        "forbidden_audit_events": ["balance_read"],
         "description": (
-            "query_balance in onchain (default) mode: a known read op, "
-            "dispatch reads bitcoin.getbalance() via the fake "
-            "bitcoin-cli (0.00050000 BTC), the gateway scales the BTC "
-            "Decimal to 50_000 integer sats and routes it through "
-            "scale.present(). 50k is comfortably inside T0 [0, 100k) "
-            "so the cloak is a no-op (scale 1.0) and the wire response "
-            "is the raw figure. Confirms the no-cloak branch of the "
-            "bitcoind-backed dispatch is wired correctly. Audit logs "
-            "request_received, scale_tier_init, decision_allow."
+            "query_balance in onchain (default) mode, snapshot-served "
+            "(doc 15): the refresh precondition reads "
+            "bitcoin.getbalance() via the fake bitcoin-cli (0.00050000 "
+            "BTC), scales the BTC Decimal to 50_000 integer sats, "
+            "routes it through scale.present() (50k is inside T0 so "
+            "the cloak is a no-op), floors it onto the 1k serve grid "
+            "(already aligned), and stores it; the petitioner's read "
+            "then serves the row verbatim - the request path never "
+            "touches bitcoind. Audit logs snapshot_refresh at refresh "
+            "and balance_served (served value + snapshot age) at the "
+            "read; the per-request balance_read event is gone (the "
+            "runner asserts both directions)."
         ),
     },
     {
@@ -875,18 +929,21 @@ VARIANTS = [
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
         "bitcoin_cli_scenario": "empty",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 0,
         },
         "description": (
-            "Same onchain dispatch path as the funded variant, but the "
-            "fake bitcoin-cli reports 0.00000000 BTC under "
-            "BITCOIN_CLI_SCENARIO=empty. 0 is inside T0 so the cloak "
-            "is a no-op (scale 1.0) and the wire response is "
-            "balance_sats=0. Confirms the zero-balance edge without "
-            "leaking the precise (zero) figure as a different status."
+            "Same onchain refresh-then-serve path as the funded "
+            "variant, but the fake bitcoin-cli reports 0.00000000 BTC "
+            "under BITCOIN_CLI_SCENARIO=empty. 0 is inside T0 so the "
+            "cloak is a no-op (scale 1.0), on-grid, and the wire "
+            "response is balance_sats=0. Confirms the zero-balance "
+            "edge without leaking the precise (zero) figure as a "
+            "different status."
         ),
     },
     # --- scale cloaking: GLOSSARY 'Scale cloaking'. The first two
@@ -902,7 +959,9 @@ VARIANTS = [
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
         "bitcoin_cli_scenario": "tier-1",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 15000,
@@ -910,10 +969,11 @@ VARIANTS = [
         "description": (
             "Wallet real total 150_000 sat (0.00150000 BTC from the "
             "fake bitcoin-cli) -> natural tier T1. With no prior "
-            "scale_state row, scale.present() initializes the cloak "
-            "at T1 (test-mode deterministic scale 0.1) and presents "
-            "150_000 * 0.1 = 15_000. Confirms the cloak's init path "
-            "picks the natural tier from a non-T0 wallet and the "
+            "scale_state row, the refresh's scale.present() call "
+            "initializes the cloak at T1 (test-mode deterministic "
+            "scale 0.1) and presents 150_000 * 0.1 = 15_000 (on-grid); "
+            "the read serves it verbatim. Confirms the cloak's init "
+            "path picks the natural tier from a non-T0 wallet and the "
             "petitioner sees a sat figure compressed by an order of "
             "magnitude. Audit logs scale_tier_init."
         ),
@@ -923,19 +983,21 @@ VARIANTS = [
         "petcli_args": ["query", "balance"],
         "uses_arbiter": True,
         "bitcoin_cli_scenario": "tier-2",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 15000,
         },
         "description": (
             "Wallet real total 1_500_000 sat (0.01500000 BTC) -> "
-            "natural tier T2 (scale 0.01). scale.present() "
-            "initializes at T2 and presents 1_500_000 * 0.01 = "
-            "15_000. The wire response is IDENTICAL to the "
-            "cloaked-tier-1 variant despite the real total being 10x "
-            "larger - that is the point of the cloak (GLOSSARY 'Scale "
-            "cloaking'). Audit logs scale_tier_init."
+            "natural tier T2 (scale 0.01). The refresh initializes at "
+            "T2 and presents 1_500_000 * 0.01 = 15_000. The wire "
+            "response is IDENTICAL to the cloaked-tier-1 variant "
+            "despite the real total being 10x larger - that is the "
+            "point of the cloak (GLOSSARY 'Scale cloaking'). Audit "
+            "logs scale_tier_init."
         ),
     },
     {
@@ -946,13 +1008,14 @@ VARIANTS = [
         "preconditions": [
             # Seed: wallet was at T0 (scale 1.0); a transition to T1
             # (scale 0.1) has been scheduled for 1h in the future.
-            # present() must NOT apply it yet; presented value comes
-            # from the OLD active scale (1.0), so 150_000 * 1.0 =
-            # 150_000 is the wire response. This is the GLOSSARY's
-            # 'drift > range' property: real grew past 100k while
-            # active_tier is still T0, presented = 150_000 deliberately
-            # exceeds the 0-100k window.
+            # The refresh's present() must NOT apply it yet; the
+            # stored value comes from the OLD active scale (1.0), so
+            # 150_000 * 1.0 = 150_000 is the wire response. This is
+            # the GLOSSARY's 'drift > range' property: real grew past
+            # 100k while active_tier is still T0, presented = 150_000
+            # deliberately exceeds the 0-100k window.
             ("seed_scale_state", 0, 1.0, 1, 0.1, 3600.0),
+            ("refresh_snapshots",),
         ],
         "expected": lambda r: r == {
             "status": "ok",
@@ -962,15 +1025,16 @@ VARIANTS = [
         "description": (
             "Pending tier shift, future due_at. scale_state was seeded "
             "with active_tier=0 / target_tier=1 / due_at=now+1h before "
-            "the petitioner's call; present(150_000) sees the pending "
-            "transition is not yet due, uses the OLD active scale "
-            "(1.0), and returns 150_000. The presented value briefly "
-            "falls outside the 0-100k cloak window - this is the "
-            "GLOSSARY 'drift > range' property: privacy beats range-"
-            "fidelity because forcing the range immediately would "
-            "re-couple the tier shift to the underlying fund movement. "
-            "Audit log does NOT contain scale_tier_shift_applied for "
-            "this variant (the runner asserts the absence)."
+            "the snapshot refresh; present(150_000) at refresh time "
+            "sees the pending transition is not yet due, uses the OLD "
+            "active scale (1.0), and stores 150_000. The presented "
+            "value briefly falls outside the 0-100k cloak window - "
+            "this is the GLOSSARY 'drift > range' property: privacy "
+            "beats range-fidelity because forcing the range "
+            "immediately would re-couple the tier shift to the "
+            "underlying fund movement. Audit log does NOT contain "
+            "scale_tier_shift_applied for this variant (the runner "
+            "asserts the absence)."
         ),
     },
     {
@@ -980,10 +1044,11 @@ VARIANTS = [
         "bitcoin_cli_scenario": "tier-1",
         "preconditions": [
             # Seed: wallet was at T0; a transition to T1 was scheduled
-            # 5s AGO. present() must auto-apply the shift, audit-log
-            # scale_tier_shift_applied, and present at the new scale:
-            # 150_000 * 0.1 = 15_000.
+            # 5s AGO. The refresh's present() must auto-apply the
+            # shift, audit-log scale_tier_shift_applied, and store at
+            # the new scale: 150_000 * 0.1 = 15_000.
             ("seed_scale_state", 0, 1.0, 1, 0.1, -5.0),
+            ("refresh_snapshots",),
         ],
         "expected": lambda r: r == {
             "status": "ok",
@@ -991,17 +1056,155 @@ VARIANTS = [
         },
         "expected_audit_events": ["scale_tier_shift_applied"],
         "description": (
-            "Past-due tier shift. scale_state was seeded with "
-            "active_tier=0 / target_tier=1 / due_at=now-5s. The "
-            "petitioner's first call drives present(150_000), which "
-            "applies the pending shift atomically (active becomes T1 / "
-            "0.1, target_* cleared, audit-logs "
-            "scale_tier_shift_applied) and returns 150_000 * 0.1 = "
-            "15_000. The petitioner-visible drop from a presumably "
-            "higher pre-shift presented value (under the old T0 scale) "
-            "to 15_000 is by construction indistinguishable from a "
-            "real send. arbiter-events.log MUST contain a "
-            "scale_tier_shift_applied entry for this variant."
+            "Past-due tier shift applies at the epoch boundary (doc 15 "
+            "invariant 2). scale_state was seeded with active_tier=0 / "
+            "target_tier=1 / due_at=now-5s; the snapshot refresh "
+            "drives present(150_000), which applies the pending shift "
+            "atomically (active becomes T1 / 0.1, target_* cleared, "
+            "audit-logs scale_tier_shift_applied) and stores 150_000 * "
+            "0.1 = 15_000; the read serves it. The petitioner-visible "
+            "drop from a presumably higher pre-shift served value "
+            "(under the old T0 scale) to 15_000 lands exactly on a "
+            "refresh epoch boundary and is by construction "
+            "indistinguishable from a real send. arbiter-events.log "
+            "MUST contain a scale_tier_shift_applied entry for this "
+            "variant. The mid-epoch half of the invariant - a shift "
+            "coming due between refreshes stays invisible - is the "
+            "snapshot-shift-held-mid-epoch variant below."
+        ),
+    },
+    # --- read-path snapshot serving (doc 15 §6): the four variants the
+    # implementation bead names. Fresh serve is the baseline; the other
+    # three each prove one invariant the per-request read could never
+    # have provided: staleness across a real backend change (the whole
+    # point - change timing is localized to the refresh epoch),
+    # quantization hiding sub-grid churn entirely, and a tier shift
+    # coming due mid-epoch staying invisible until a refresh boundary.
+    # All four run onchain (default) mode; the treatment is rail-
+    # uniform, and the capacity analog rides the advanced channel
+    # variants' refresh preconditions.
+    {
+        "path": ("query", "balance", "snapshot-fresh-serve"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 50000,
+        },
+        "expected_audit_events": ["snapshot_refresh", "balance_served"],
+        "forbidden_audit_events": ["balance_read"],
+        "description": (
+            "Fresh serve (doc 15 §6 variant 1): one refresh (fake "
+            "bitcoind 50_000 sat -> T0 no-cloak -> on-grid), then one "
+            "read. The wire shape is unchanged from the pre-snapshot "
+            "gateway (status ok + integer balance_sats; petcli "
+            "untouched); what changed is where the figure came from - "
+            "the snapshot row, not a live backend call. Audit: "
+            "snapshot_refresh (refresh-time real/presented/served) "
+            "plus balance_served (served value + snapshot age); no "
+            "balance_read."
+        ),
+    },
+    {
+        "path": ("query", "balance", "snapshot-stale-across-change"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "preconditions": [
+            # Snapshot taken while the wallet held 50_000 sat...
+            ("refresh_snapshots",),
+            # ...then the real balance moves to 150_000 sat (a 3x
+            # change, and a tier-crossing one at that) with NO second
+            # refresh - the next epoch tick has not arrived.
+            ("set_scenario", "BITCOIN_CLI_SCENARIO", "tier-1"),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 50000,
+        },
+        "expected_audit_events": ["snapshot_refresh", "balance_served"],
+        "forbidden_audit_events": ["balance_read", "scale_tier_shift_scheduled"],
+        "description": (
+            "Stale serve across a change (doc 15 §6 variant 2): the "
+            "backend moved 50_000 -> 150_000 sat after the last "
+            "refresh, and the read still serves 50_000 - the change "
+            "is invisible until the next refresh epoch, which is the "
+            "entire mitigation (a poller cannot timestamp the move). "
+            "Had the read path touched the live backend it would have "
+            "returned 150_000 and scheduled a tier shift; the runner "
+            "asserts the wire value AND the absence of "
+            "scale_tier_shift_scheduled (present() never ran after "
+            "the change - reads do not drive the cloak)."
+        ),
+    },
+    {
+        "path": ("query", "balance", "snapshot-quantization-edge"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "bitcoin_cli_scenario": "subgrid",
+        "preconditions": [
+            # First refresh: real 50_400 -> presented 50_400 (T0) ->
+            # floors to 50_000 on the 1k serve grid.
+            ("refresh_snapshots",),
+            # The wallet churns by 500 sat WITHIN one grid cell...
+            ("set_scenario", "BITCOIN_CLI_SCENARIO", "subgrid-moved"),
+            # ...and the next epoch arrives (forced past the renewal
+            # clock): real 50_900 still floors to 50_000.
+            ("refresh_snapshots_forced",),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 50000,
+        },
+        "expected_audit_events": ["snapshot_refresh", "balance_served"],
+        "description": (
+            "Quantization edge (doc 15 §6 variant 3): two refreshes "
+            "bracket a sub-grid change (50_400 -> 50_900 sat, both "
+            "inside the [50_000, 51_000) cell of the 1k serve grid), "
+            "and the served value never transitions - 50_000 before "
+            "and after. Sub-grid operator churn produces NO petitioner-"
+            "observable event at all (doc 15 §4.5 delta hygiene: the "
+            "grid hides the existence of small changes, not just their "
+            "size). The non-round backend figures also prove the floor "
+            "quantization actually ran (nothing else in the pipeline "
+            "rounds 50_400 to 50_000)."
+        ),
+    },
+    {
+        "path": ("query", "balance", "snapshot-shift-held-mid-epoch"),
+        "petcli_args": ["query", "balance"],
+        "uses_arbiter": True,
+        "bitcoin_cli_scenario": "tier-1",
+        "preconditions": [
+            # A tier shift is pending but far from due when the epoch's
+            # refresh runs: present(150_000) stores under the OLD T0
+            # scale (drift > range), served 150_000.
+            ("seed_scale_state", 0, 1.0, 1, 0.1, 3600.0),
+            ("refresh_snapshots",),
+            # The shift comes due MID-epoch (due_at rewound to the
+            # past, no refresh afterwards). A live-read gateway would
+            # apply it on the next present() call and move the value
+            # at poll resolution - leaking the shift moment.
+            ("seed_scale_state", 0, 1.0, 1, 0.1, -5.0),
+        ],
+        "expected": lambda r: r == {
+            "status": "ok",
+            "balance_sats": 150000,
+        },
+        "forbidden_audit_events": ["scale_tier_shift_applied"],
+        "description": (
+            "Epoch-boundary tier shift, mid-epoch half (doc 15 §6 "
+            "variant 4, invariant 2): a pending tier shift becomes due "
+            "BETWEEN refreshes and the read still serves the pre-shift "
+            "150_000 - present() runs at refresh time only, so the "
+            "shift cannot become visible mid-epoch and the glossary's "
+            "fast-poller caveat (flagging the exact shift moment) is "
+            "closed. The runner asserts scale_tier_shift_applied is "
+            "absent: the petitioner's read did not drive the cloak. "
+            "The boundary half - the shift landing at the NEXT refresh "
+            "- is query/balance/transition-applied."
         ),
     },
     # --- extension gate: Lightning ops while the arbiter runs onchain
@@ -1118,8 +1321,9 @@ VARIANTS = [
     # variant below runs with the Lightning extension enabled; every
     # variant above runs onchain (SPACER_MODE unset). main()'s
     # no-lnd-import gate fires between the two groups. The first
-    # advanced-mode dispatch lazily imports lnd.py (gateway._lnd) and
-    # Python caches it for the rest of the run; that is expected.
+    # advanced-mode snapshot refresh lazily imports lnd.py
+    # (snapshots._read_backend) and Python caches it for the rest of
+    # the run; that is expected.
     # =================================================================
     {
         "path": ("query", "balance", "advanced-lnd-wallet"),
@@ -1127,19 +1331,21 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "lightning",
         "bitcoin_cli_scenario": "empty",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 50000,
         },
         "description": (
-            "query_balance in advanced mode reads the LND on-chain "
-            "wallet (lnd.walletbalance() via the fake lncli, "
-            "total_balance=50000) instead of bitcoind. The fake "
+            "query_balance in advanced mode: the refresh sweep reads "
+            "the LND on-chain wallet (lnd.walletbalance() via the fake "
+            "lncli, total_balance=50000) instead of bitcoind. The fake "
             "bitcoin-cli is pinned to the empty scenario (0 BTC) for "
-            "this variant, so the 50_000-sat response proves dispatch "
-            "took the LND path - had it read bitcoind, the wire "
-            "response would be balance_sats=0. Same T0 no-cloak "
+            "this variant, so the 50_000-sat response proves the "
+            "refresh took the LND path - had it read bitcoind, the "
+            "wire response would be balance_sats=0. Same T0 no-cloak "
             "presentation as query/balance/default."
         ),
     },
@@ -1148,20 +1354,29 @@ VARIANTS = [
         "petcli_args": ["advanced", "channels"],
         "uses_arbiter": True,
         "spacer_mode": "lightning",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "capacity_sats": 80000,
         },
+        "expected_audit_events": ["snapshot_refresh", "capacity_served"],
+        "forbidden_audit_events": ["capacity_read"],
         "description": (
             "query_channels (petcli: advanced channels) with the "
-            "extension enabled: dispatch reads lnd.channelbalance() "
-            "via the fake lncli (local=50000, remote=30000), "
-            "aggregates to 80000, and the gateway routes it through "
-            "scale.present(). 80k is inside T0 [0, 100k) so the cloak "
-            "is a no-op. Per-channel detail is suppressed (aggregate-"
-            "by-default, §4.3). Audit logs request_received, "
-            "scale_tier_init, decision_allow."
+            "extension enabled, snapshot-served (doc 15: capacity gets "
+            "the same treatment as balance - capacity changes are "
+            "public funding/closing txs, so their timestamps are "
+            "maximally identifying). The refresh reads "
+            "lnd.channelbalance() via the fake lncli (local=50000, "
+            "remote=30000), aggregates to 80000, presents (T0 no-op), "
+            "grids, and stores; the read serves it verbatim and audit-"
+            "logs capacity_served (+ age), with capacity_read gone. "
+            "Per-channel detail is suppressed (aggregate-by-default, "
+            "§4.3). In advanced mode the sweep refreshes BOTH read "
+            "ops, so this variant's audit also carries the balance "
+            "row's snapshot_refresh."
         ),
     },
     {
@@ -1170,20 +1385,22 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "full",
         "lncli_scenario": "no-channels",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "capacity_sats": 0,
         },
         "description": (
             "Channels query when lncli reports zero local + zero "
-            "remote capacity (LNCLI_SCENARIO=no-channels). 0 is "
-            "inside T0 so the cloak is a no-op; the gateway returns "
-            "capacity_sats=0, petitioner-visibly indistinguishable "
-            "from any wallet that has channels but real capacity "
-            "below the cloak's sub-tier resolution. Runs under "
-            "SPACER_MODE=full to confirm the second advanced value "
-            "enables the extension identically to 'lightning'."
+            "remote capacity (LNCLI_SCENARIO=no-channels) at refresh "
+            "time. 0 is inside T0 so the cloak is a no-op; the gateway "
+            "serves capacity_sats=0, petitioner-visibly "
+            "indistinguishable from any wallet that has channels but "
+            "real capacity below the cloak's sub-tier resolution. Runs "
+            "under SPACER_MODE=full to confirm the second advanced "
+            "value enables the extension identically to 'lightning'."
         ),
     },
     {
@@ -1333,19 +1550,22 @@ VARIANTS = [
         "uses_arbiter": True,
         "spacer_mode": "ecash",
         "bitcoin_cli_scenario": "empty",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "balance_sats": 50000,
         },
         "description": (
             "query_balance under SPACER_MODE=ecash keeps its "
-            "lightning-mode behavior - the LND on-chain wallet via "
-            "the fake lncli (50_000 sat), NOT bitcoind (pinned to "
-            "the empty scenario to prove which path dispatched) and "
-            "NOT any eCash figure (doc 07 §9: no new read ops; the "
-            "AI counts its own float locally). Ladder regression: "
-            "ecash mode is lightning mode plus the eCash writes."
+            "lightning-mode behavior - the refresh reads the LND "
+            "on-chain wallet via the fake lncli (50_000 sat), NOT "
+            "bitcoind (pinned to the empty scenario to prove which "
+            "path refreshed) and NOT any eCash figure (doc 07 §9: no "
+            "new read ops; the AI counts its own float locally). "
+            "Ladder regression: ecash mode is lightning mode plus the "
+            "eCash writes."
         ),
     },
     {
@@ -1353,7 +1573,9 @@ VARIANTS = [
         "petcli_args": ["advanced", "channels"],
         "uses_arbiter": True,
         "spacer_mode": "ecash",
-        "preconditions": [],
+        "preconditions": [
+            ("refresh_snapshots",),
+        ],
         "expected": lambda r: r == {
             "status": "ok",
             "capacity_sats": 80000,
@@ -1361,9 +1583,9 @@ VARIANTS = [
         "description": (
             "query_channels under SPACER_MODE=ecash: identical "
             "behavior to the lightning-mode default variant "
-            "(local 50000 + remote 30000 = 80000, T0 no-cloak). "
-            "Ladder regression: enabling the eCash rung leaves the "
-            "Lightning read surface exactly as it was."
+            "(local 50000 + remote 30000 = 80000, T0 no-cloak, "
+            "snapshot-served). Ladder regression: enabling the eCash "
+            "rung leaves the Lightning read surface exactly as it was."
         ),
     },
     # --- fund_ecash gate pipeline (doc 07 §3, §8): allowance cap ->
@@ -1804,9 +2026,11 @@ def _run_variant(variant):
                 )
         elif variant.get("spacer_mode") is None:
             infra_note = (
-                "# onchain (default) mode - SPACER_MODE unset. Read "
-                "variants dispatch through arbiter/src/bitcoin.py to the "
-                "fake bitcoin-cli at $BITCOIN_CLI_BIN; write variants stop "
+                "# onchain (default) mode - SPACER_MODE unset. Reads are "
+                "snapshot-served (doc 15): the refresh_snapshots "
+                "precondition reads arbiter/src/bitcoin.py against the "
+                "fake bitcoin-cli at $BITCOIN_CLI_BIN, and the petcli "
+                "read itself never touches a backend; write variants stop "
                 "at the recipient-address-registry / standing-approvals "
                 "gates or the not_implemented dispatch stub before "
                 "reaching bitcoin.py; Lightning- and eCash-extension ops "
@@ -1819,31 +2043,34 @@ def _run_variant(variant):
         elif variant.get("spacer_mode") == "ecash":
             infra_note = (
                 "# ecash mode - SPACER_MODE=ecash (the full ladder, doc 07 "
-                "§9). Lightning reads (and query_balance, which reads the "
-                "LND wallet in this mode) dispatch through "
-                "arbiter/src/lnd.py to the fake lncli at $LNCLI_BIN; eCash "
-                "writes stop at the allowance / standing-approvals gates "
-                "or the not_implemented dispatch stub before any mint "
-                "call - arbiter/src/ecash.py is imported only for the "
-                "fund_ecash allowance lookup and no cashu subprocess ever "
-                "runs (CASHU_BIN / CASHU_MINT_URL are deliberately unset; "
-                "an unexpected arbiter-side mint call would error loudly). "
-                "No live bitcoind / LND / mint traffic for any variant in "
-                "the current manifest.\n"
+                "§9). Reads are snapshot-served (doc 15): the "
+                "refresh_snapshots precondition reads arbiter/src/lnd.py "
+                "(the LND wallet backs query_balance in this mode, and "
+                "query_channels always) against the fake lncli at "
+                "$LNCLI_BIN; eCash writes stop at the allowance / "
+                "standing-approvals gates or the not_implemented dispatch "
+                "stub before any mint call - arbiter/src/ecash.py is "
+                "imported only for the fund_ecash allowance lookup and no "
+                "cashu subprocess ever runs (CASHU_BIN / CASHU_MINT_URL "
+                "are deliberately unset; an unexpected arbiter-side mint "
+                "call would error loudly). No live bitcoind / LND / mint "
+                "traffic for any variant in the current manifest.\n"
             )
         else:
             infra_note = (
                 f"# advanced mode - SPACER_MODE={variant['spacer_mode']}. "
-                "Lightning reads (and query_balance, which reads the LND "
-                "wallet in this mode) dispatch through arbiter/src/lnd.py "
-                "to the fake lncli at $LNCLI_BIN; Lightning writes stop "
-                "at the registry / standing-approvals gates or the "
-                "not_implemented dispatch stub; eCash-extension ops "
-                "refuse at the mode gate (decision_refuse_mode - the "
-                "eCash rung is its own opt-in; arbiter/src/ecash.py "
-                "stays unimported, the runner asserts it). No live "
-                "bitcoind / LND / mint traffic for any variant in the "
-                "current manifest.\n"
+                "Reads are snapshot-served (doc 15): the "
+                "refresh_snapshots precondition reads arbiter/src/lnd.py "
+                "(the LND wallet backs query_balance in this mode, and "
+                "query_channels always) against the fake lncli at "
+                "$LNCLI_BIN, and the petcli read itself never touches a "
+                "backend; Lightning writes stop at the registry / "
+                "standing-approvals gates or the not_implemented dispatch "
+                "stub; eCash-extension ops refuse at the mode gate "
+                "(decision_refuse_mode - the eCash rung is its own "
+                "opt-in; arbiter/src/ecash.py stays unimported, the "
+                "runner asserts it). No live bitcoind / LND / mint "
+                "traffic for any variant in the current manifest.\n"
             )
         (artifact_dir / "infra-events.log").write_text(infra_note)
 

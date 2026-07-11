@@ -7,7 +7,8 @@ Per design-docs/origin/07--2026-06-12-0916-ecash-extension.md §2, §3,
 
 THIS MODULE IS LAZILY IMPORTED. The gateway pulls it in via
 gateway._ecash() only on an ecash-mode (SPACER_MODE=ecash) dispatch,
-mirroring how lnd.py is pulled in by gateway._lnd(). An onchain or
+mirroring how lnd.py is pulled in only inside the executor's
+advanced-mode handlers and the snapshot refresh sweep. An onchain or
 lightning deployment never loads it and carries no nutshell
 dependency at runtime (doc 07 §9). The exit-loop runner asserts this
 with a no-ecash-import gate, the eCash analogue of the no-lnd-import

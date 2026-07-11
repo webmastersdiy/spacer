@@ -560,6 +560,9 @@ Mitigation lives in the band of randomized scale factors plus the
 random delay: the shift is deferred so it does not align with the
 known fund movement, and the band makes the magnitude variable
 across wallets and across shifts.
+[Read snapshot](#read-snapshot-snapshot-served-reads) serving
+(doc 15) additionally quantizes shift visibility to refresh
+epochs, removing the fast-poll observation channel itself.
 
 ### Recipient address registry
 
@@ -942,7 +945,10 @@ side reasoning to chain-side events. Composes with
 Subsumes per-poll cadence concerns. The arbiter polls local bitcoind
 / LND on its own schedule to drive its internal state machine, but
 the petitioner only learns anything through the result-delivery path
-gated by this delay. By the time a result surfaces, hours have
+gated by this delay. (True for write outcomes; the live read ops
+were an ungated second learning channel until snapshot serving
+closed them - see [Read snapshot](#read-snapshot-snapshot-served-reads),
+doc 15.) By the time a result surfaces, hours have
 elapsed and the original poll/RPC pattern is decorrelated from the
 petitioner's view; an earlier "anti-cadence" mitigation that
 randomized the arbiter's poll interval is no longer needed as a
@@ -966,6 +972,49 @@ between action and result-knowledge, so the floor is a tradeoff
 with operational reliability, not just a knob to turn up.
 
 See also: [Architecture overview, §4.6](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#46-timing-layer) and [§7](design-docs/origin/05--2026-05-05-0948-architecture-overview.md#7-open-design-questions).
+
+### Read snapshot (snapshot-served reads)
+
+> **Status: wired** (doc 15; sp-ksx) - test-mode 5-15s band; production refresh
+> epochs gated with the dynamic-window work (sp-77lxs.3).
+
+The petitioner-facing read ops (`query_balance`, `query_channels`)
+are served from a per-op snapshot in arbiter state, refreshed on a
+randomized, event-independent clock, instead of reading live
+backend state per request. Polling at any rate only ever observes
+the snapshot, so a balance or capacity change is localized to one
+refresh epoch rather than to the moment it happened. Closes the
+one live observation channel the timing layer left open:
+[action delay](#action-delay) scopes reads out by definition,
+[result delay](#result-delay) gates only the result-registry path,
+and [latency normalization](#latency-normalization) hides
+processing time, not state-change time.
+
+Mechanics (doc 15 is the authority): refresh = backend read ->
+`scale.present()` -> quantize the presented value to a coarse
+grid -> store; serve the stored value verbatim. The refresh clock
+is a randomized renewal process (uniform within a band), sized per
+the [delay-scaling principle](#delay-scaling-principle) like every
+other timing window; test mode uses the standard 5-15s band. The
+clock must never be advanced or triggered by wallet events - an
+event-triggered refresh reintroduces the leak exactly. Refreshes
+that serve an unchanged value are wire-invisible, so the schedule
+cannot be learned from outside.
+
+Purpose: without it a poller pins its own write's execution moment
+(collapsing the action delay's anonymity set), bypasses the result
+delay by watching for the balance drop, timestamps operator-
+initiated moves for public-chain correlation, and calibrates the
+scale cloak from one known delta. Side benefits: intra-epoch churn
+aggregates into one observed delta, and a backend outage no longer
+shows on the read path (the last snapshot keeps serving).
+
+Caveat: a served-value transition is still the first refresh after
+a change, so change-time correlation is bounded by the epoch, not
+eliminated; the epoch must be sized against the same anonymity-set
+targets as the action window. The served-value grid bounds but
+does not eliminate delta inference for moves much larger than the
+grid.
 
 ### Latency normalization
 
@@ -1054,7 +1103,10 @@ Metronomic polling signals automation; irregular intervals signal a
 human. The arbiter <-> bitcoind / LND poll path is inside the trust
 boundary, so this side-channel does not reach the petitioner; it is
 covered by **Result delay** (which decorrelates any internal poll
-timing from anything the petitioner can observe). Daemon-level
+timing from anything the petitioner can observe) and, on the read
+path, by [Read snapshot](#read-snapshot-snapshot-served-reads)
+serving (the refresh sweep's cadence is equally unobservable
+there; doc 15). Daemon-level
 protocol cadence (block fetch, gossip, ping) is governed by
 bitcoind / LND themselves and is out of scope at the RPC layer.
 

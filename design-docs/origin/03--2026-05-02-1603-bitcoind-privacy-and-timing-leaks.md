@@ -121,7 +121,7 @@ Severity: **HIGH** = full identifier, key material, or balance reveal; **MED** =
 
 ## 4. Timing as a leak channel
 
-In the implemented async-result model the AI never polls chain state - it submits an action and polls the [result registry](../../GLOSSARY.md#result-delay) at a fixed 10-min floor (doc 05 §4.8). So §4.1 (polling cadence) and §4.5 (request-gap) apply to a *passthrough-proxy* model, not the live arbiter; the rest are intrinsic to any model. Either way the [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) layer closes these inside the trust boundary; the values below are what an unmitigated proxy would expose.
+In the implemented async-result model the AI never polls chain state - it submits an action and polls the [result registry](../../GLOSSARY.md#result-delay) at a fixed 10-min floor (doc 05 §4.8). So §4.1 (polling cadence) and §4.5 (request-gap) apply to a *passthrough-proxy* model, not the live arbiter; the rest are intrinsic to any model. Reads are snapshot-served ([Read snapshot](../../GLOSSARY.md#read-snapshot-snapshot-served-reads); doc 15 owns the read-freshness leak and its closure), so "never polls chain state" holds for the whole petitioner-reachable surface - only the arbiter-internal refresh sweep touches bitcoind, on its own clock. Either way the [action delay](../../GLOSSARY.md#action-delay) / [result delay](../../GLOSSARY.md#result-delay) layer closes these inside the trust boundary; the values below are what an unmitigated proxy would expose.
 
 | # | Channel | What the AI can infer |
 |---|---------|------------------------|

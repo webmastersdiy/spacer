@@ -89,6 +89,11 @@ de-coupling submit from execute against a colluding recipient. That is why a ~1h
 one, is adequate on Lightning - and why the inverse (using the safe-because-large onchain floor
 everywhere) is the laziness doc 07 §7 forbids.
 
+That premise requires the read path to be gated too: an ungated live `query_balance` /
+`query_channels` is precisely such an observable consequence, open at poll resolution until
+[Read snapshot](../../GLOSSARY.md#read-snapshot-snapshot-served-reads) serving (doc 15, which owns
+the closure). The floor reasoning here assumes it.
+
 ---
 
 ## 4. The dynamic window calculation

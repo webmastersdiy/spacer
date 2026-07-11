@@ -207,8 +207,11 @@ the two-column grid live. What the design pins, and the implementation honors:
 
 - **Disclosure record producer.** The gateway audit-records a `disclosure` event carrying the verbatim
   body of every reply it sends (`_respond_ok` / `_respond_refused` / the protocol-error path); column 1
-  is a straight projection of those events (§3). Reads additionally emit `balance_read` / `capacity_read`
-  with the **real** and the presented figure, the column-2 material paired against the disclosed number.
+  is a straight projection of those events (§3). For reads, the column-2 material follows the doc 15
+  §4.8 audit split: `snapshot_refresh` carries the **real** and presented figures once per refresh, and
+  the per-request `balance_served` / `capacity_served` add the snapshot age, so the §2 pairing re-prints
+  the latest refresh's ground truth beside each disclosed number with age as a visible health fact (the
+  pre-snapshot `balance_read` / `capacity_read` events still pair when rendering historical logs).
   (The full disclosure-record formalization in doc 05 / the protocol is tracked separately; these events
   are the minimal producer.)
 - **Left-column exposure safety (§2.1)** is the load-bearing part and is enforced structurally: per-column

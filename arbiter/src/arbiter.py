@@ -31,6 +31,7 @@ import state
 # lazily inside its handlers, so importing it here does not pull in the
 # nutshell or lncli dependency (doc 07 §9).
 import results  # noqa: F401  (registers results, result_poll_floor)
+import snapshots  # noqa: F401  (registers read_snapshots, doc 15)
 import timing  # noqa: F401  (registers pending_actions, pending_results)
 
 
