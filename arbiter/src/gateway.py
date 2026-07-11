@@ -199,7 +199,13 @@ def process_request(handler):
         return
 
     op = request.get("op")
-    audit.record("request_received", {"op": op})
+    # Record the full request, not just the op. Everything the
+    # petitioner sends is by definition petitioner-known (the AI chose
+    # it), so the complete request - amount, recipient_token, poll
+    # handle, defund token - is safe to surface in the operator
+    # console's petitioner-known (left) column and is useful forensic
+    # detail in the audit log. It is bounded by MAX_REQUEST_BYTES.
+    audit.record("request_received", request)
 
     # Read-only result poll (§4.8). The poll path is the only
     # petitioner-reachable read into arbiter state and is structurally

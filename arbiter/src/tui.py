@@ -436,8 +436,15 @@ class Renderer:
             self.flush_pending(force_empty=self.always_pad)
             op = payload.get("op")
             self._last_op = op
+            # Show the full request the petitioner sent - op first, then
+            # every other field (amount, recipient_token, handle, defund
+            # token). All of it is petitioner-known, so it belongs in the
+            # left column beside the reply. Long values (a defund token)
+            # truncate to the cell width like any other content.
+            rest = _compact({k: v for k, v in payload.items() if k != "op"})
+            text = f"-> op={op}" + (f" {rest}" if rest else "")
             self._row(_hhmmss(self._cur_ts), _TAGS.get(_LAYER_BY_OP.get(op), _TAGS[None]),
-                      f"-> op={op}", _DIM_GREEN)
+                      text, _DIM_GREEN)
             return
 
         # Never-known (column 2). Pairing-only reads are consumed for the
@@ -603,7 +610,7 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
         {"ts": "2026-07-10T12:00:00Z", "event": "balance_read", "payload": {"real_sats": 142686, "presented_sats": 14268}},
         {"ts": "2026-07-10T12:00:00Z", "event": "decision_allow", "payload": {"op": "query_balance"}},
         {"ts": "2026-07-10T12:00:00Z", "event": "disclosure", "payload": {"body": {"balance_sats": 14268, "status": "ok"}}},
-        {"ts": "2026-07-10T12:00:01Z", "event": "request_received", "payload": {"op": "manage_bitcoin"}},
+        {"ts": "2026-07-10T12:00:01Z", "event": "request_received", "payload": {"op": "manage_bitcoin", "recipient_token": "ABCDE4", "amount_sats": 1500}},
         {"ts": "2026-07-10T12:00:01Z", "event": "decision_allow", "payload": {"op": "manage_bitcoin"}},
         {"ts": "2026-07-10T12:00:01Z", "event": "disclosure", "payload": {"body": {"status": "received", "handle": "H1"}}},
         {"ts": SECRET_TS, "event": "manage_bitcoin_executed", "payload": {"handle": "H1", "amount_sats": 1500, "txid": "ab" * 32}},
@@ -647,6 +654,11 @@ if __name__ == "__main__" and os.environ.get("TUI_SMOKE") == "1":
     req = [ln for ln in body if "-> op=query_balance" in left(ln)]
     assert req and "12:00:00" in left(req[0]) and "[chain]" in left(req[0])
     assert right(req[0]).strip() == "", "petitioner request has no right content"
+    # A request carrying params renders them all on the left (op first),
+    # since everything the petitioner sent is petitioner-known.
+    mbreq = [ln for ln in body if "-> op=manage_bitcoin" in left(ln)]
+    assert mbreq, "manage_bitcoin request row missing"
+    assert "amount_sats=1500" in left(mbreq[0]) and "recipient_token=ABCDE4" in left(mbreq[0]), mbreq[0]
 
     # Read pairing (rule 3): the balance disclosure shows the presented
     # figure on the left and the REAL figure on the right, same row.
