@@ -235,7 +235,7 @@ The logical architecture only. Deliberately out of scope, each to get its own de
 
 ## 9. Current physical layout
 
-Parent folders under `~/spacer/` live under one of three homes - `arbiter/`, `petitioner/`, `test-harness/` - with project-level artifacts (`design-docs/`, `archive/`, `GLOSSARY.md`) at the root. The tree is itself vocabulary: "under `arbiter/`", "in `test-harness/state/`" are precise role references.
+Parent folders under `~/spacer/` live under one of three homes - `arbiter/`, `petitioner/`, `test-harness/` - with project-level artifacts (`design-docs/`, `archive/`, `GLOSSARY.md`) at the root. The tree is itself vocabulary: "under `arbiter/`" is a precise role reference.
 
 ```
 ~/spacer/
@@ -245,21 +245,18 @@ Parent folders under `~/spacer/` live under one of three homes - `arbiter/`, `pe
     lnd/                  # LND credentials (admin.macaroon, tls.cert)
     ecash/                # nutshell wallet datadir (eCash extension; arrives with the live mint, sp-2hwco4.4)
   petitioner/             # client-side process: petcli, the protocol shim (§5.1)
-  test-harness/           # testbed scaffolding: wrappers, smoke tests, session ledger, tooling
+  test-harness/           # testbed scaffolding: wrappers, smoke tests, tooling
     bin/                  # test-harness tooling: uv, uvx
     cache/                # uv install cache
-    downloads/            # source tarballs and checksums
-    ldk-data/             # ldk-node data directory (currently unused; ldk-node install blocked)
     python/               # uv-managed CPython interpreters
     scripts/              # wrappers (lncliA, btccli) and smoke tests (ldk_smoke.py)
-    state/                # session ledger, env files, RPC notes
     venv/                 # Python venv (uv-managed)
   archive/                # long-term archive of historical project files
   design-docs/            # origin/ + findings/ + implementation/; naming per design-docs/README.md
   GLOSSARY.md             # project vocabulary
 ```
 
-Also at the root, outside that split: `go/` and `go-cache/` (Go build caches from other tooling) and `first-game/` (an unrelated C# project predating spacer). This is a snapshot; cited paths may move, but the logical architecture above is the load-bearing description.
+This is a snapshot; cited paths may move, but the logical architecture above is the load-bearing description.
 
 ---
 
@@ -271,7 +268,7 @@ A process-side gate (here for convenience; it references components above). **Do
 
 **Test-mode timing:** production windows have ~12h floors (rejection 1h ± 30 min, scale-cloak transition multi-day), impractical to validate against. Three orthogonal test opt-ins compress them - `SPACER_TIMING_MODE=test` (action / result 5-15s, rejection 1-5s), `SPACER_SCALE_MODE=test` (5-15s transitions, deterministic `0.1^tier`), and `PETCLI_TEST_TIMING=1` (30s petitioner estimate). Because each production path is a `NotImplementedError` until the dynamic-window and scale-transition work lands, a misconfigured environment that does not opt in cannot run with compressed windows - it cannot run at all (the safe failure mode).
 
-**Execution:** validations are state-independent and parallelize in principle (target: the `.beads/` queue via the Gas City rigs), but the current runner (`test-harness/scripts/exit_loop_runner.py`) is sequential - 42 variants plus the no-lnd-import and no-ecash-import gates (44 checks), ~25s per pass, each spinning a fresh in-thread arbiter on an ephemeral port (per-variant `SPACER_MODE` across all three modes; unset = onchain default) and running `petcli` as a subprocess. The loop is binary with no manual sign-off: a failure's raw output is captured under `exit-loop/`, fixed, and re-run until every variant passes.
+**Execution:** validations are state-independent and parallelize in principle, but the current runner (`test-harness/scripts/exit_loop_runner.py`) is sequential - 42 variants plus the no-lnd-import and no-ecash-import gates (44 checks), ~25s per pass, each spinning a fresh in-thread arbiter on an ephemeral port (per-variant `SPACER_MODE` across all three modes; unset = onchain default) and running `petcli` as a subprocess. The loop is binary with no manual sign-off: a failure's raw output is captured under `exit-loop/`, fixed, and re-run until every variant passes.
 
 **Artifacts** live under `exit-loop/petcli/<command>/<variant>/` (`stdout.log`, `stderr.log`, `arbiter-events.log`, `infra-events.log`, `result.json`), mirroring the petcli tree - Lightning artifacts sit under `petcli/advanced/`; the runner rebuilds the tree from its manifest each pass. In the current pass `infra-events.log` is a marker file: onchain reads dispatch through `bitcoin.py` against a runner-installed fake `bitcoin-cli` (canned replies via `$BITCOIN_CLI_SCENARIO`), advanced-mode variants through `lnd.py` against a fake `lncli` (`$LNCLI_SCENARIO`), the eCash local wallet variants through a fake petitioner-side `cashu` (`$CASHU_SCENARIO` at `$PETCLI_CASHU_BIN`), and write variants stop at the mode / allowance / registry / standing-approvals gates or assert the timing-layer acknowledgment against the fakes - no manifest variant reaches a real daemon (only `--live` does). Deliberately, no fake exists for the arbiter-side cashu wrapper: no manifest variant can reach it, and unset `CASHU_BIN` / `CASHU_MINT_URL` make an unexpected arbiter-side mint call error loudly instead of being absorbed (doc 07 §9). No variant exercises live bitcoind / LND / mint yet.
 

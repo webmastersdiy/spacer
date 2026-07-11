@@ -255,9 +255,8 @@ to make it obvious to future readers that this wallet is exploratory.
 
 The Lightning Dev Kit node implementation. Considered as an alternative
 local LN backend in the test flow but blocked because the Python
-bindings are not on PyPI and require a Rust toolchain to build (see
-`state/INSTALL_BLOCKER.md`). Its API surface is documented in
-`state/ldk_notes.md`; the gateway design treats ldk-node and LND as
+bindings are not on PyPI and require a Rust toolchain to build.
+The gateway design treats ldk-node and LND as
 equivalent backends for filter-rule purposes since their privacy
 surfaces overlap heavily.
 
@@ -449,9 +448,8 @@ operator-unaffiliated so its other users form our anonymity set.
 ## Mitigations
 
 Each entry below is a specific filtering or policy mechanism the
-arbiter applies. The names are short for the same reason "wisp" or
-"sling" are short in Gas City: a one-word handle costs less than a
-phrase every time the concept comes up.
+arbiter applies. The names are short: a one-word handle costs less
+than a phrase every time the concept comes up.
 
 ### Pseudonymize (Identifier pseudonymization)
 
@@ -1172,8 +1170,7 @@ authority; this entry is just the pointer.
 ### Layout
 
 The current physical layout of `~/spacer/` (the
-arbiter/petitioner/test-harness directory tree, with notes on the
-non-conforming `go/`, `go-cache/`, and `first-game/` directories)
+arbiter/petitioner/test-harness directory tree)
 is documented in the architecture doc. The naming convention -
 parent folders live under `arbiter/`, `petitioner/`, or
 `test-harness/`, with project-level artifacts at the root - is
@@ -1241,6 +1238,3 @@ See also: [Architecture overview, §9](design-docs/origin/05--2026-05-05-0948-ar
   the per-API leak maps that the mitigation terms target.
 - [`archive/2026-05-02-1428-privacy-notes.md`](archive/2026-05-02-1428-privacy-notes.md) -
   the original session ledger that seeded the AI-facing design.
-- `~/spacer/test-harness/state/INSTALL_BLOCKER.md` (testbed runtime
-  tree, outside this repo) - context on why ldk-node is not in
-  active use despite being in the design surface.
