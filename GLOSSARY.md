@@ -975,7 +975,7 @@ See also: [Architecture overview, §4.6](design-docs/origin/05--2026-05-05-0948-
 
 ### Read snapshot (snapshot-served reads)
 
-> **Status: designed** (doc 15), not yet wired; production refresh
+> **Status: wired** (doc 15; sp-ksx) - test-mode 5-15s band; production refresh
 > epochs gated with the dynamic-window work (sp-77lxs.3).
 
 The petitioner-facing read ops (`query_balance`, `query_channels`)
