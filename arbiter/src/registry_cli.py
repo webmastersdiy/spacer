@@ -29,6 +29,7 @@ Two subcommands:
 Stdlib only.
 """
 import argparse
+import os
 import sys
 import time
 
@@ -122,7 +123,17 @@ def main(argv=None):
     return args.handler(args)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and os.environ.get("REGISTRY_CLI_SMOKE") != "1":
+    # Default invocation IS the operator console command (the
+    # arbiter/bin/registry launcher and config/README.md's documented
+    # flow both exec this file). The smoke test below runs only under
+    # REGISTRY_CLI_SMOKE=1, mirroring tui.py's TUI_SMOKE split -
+    # before this split, `registry add` at the console ran the smoke
+    # test instead of adding anything (caught by the live loop).
+    sys.exit(main())
+
+
+if __name__ == "__main__" and os.environ.get("REGISTRY_CLI_SMOKE") == "1":
     # Smoke test: invoke add via argv (non-prompt mode) and list via
     # the same in-process registry, verify both paths against a temp
     # YAML file.

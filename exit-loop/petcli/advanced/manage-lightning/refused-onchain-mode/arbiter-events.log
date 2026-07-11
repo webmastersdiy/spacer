@@ -1,3 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":61737},"ts":"2026-07-07T03:54:38Z"}
-{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-07T03:54:38Z"}
-{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-07T03:54:38Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":52979},"ts":"2026-07-10T15:47:28Z"}
+{"event":"request_received","payload":{"op":"manage_lightning"},"ts":"2026-07-10T15:47:28Z"}
+{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-10T15:47:28Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-10T15:47:28Z"}

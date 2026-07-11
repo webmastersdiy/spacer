@@ -105,6 +105,31 @@ with a funding event" (doc 07 §5.2), and a total-holdings bound is unobtainable
 instrument anyway (doc 07 §8). So the PET learns the float's scale, **not** whether the operator is
 rich or poor. The trade is deliberate: the float's amount-scale privacy for AI payment autonomy.
 
+### 4.1 The submission-side complement: quantized amounts
+
+§4 above and §3's "correlation vector" both concern what the PET *reads* or what a *recipient*
+correlates. There is a symmetric ingress channel they do not close: the amount the PET **submits**.
+A state-changing amount is executed *exactly* on the public LN / BTC / mint surface, and the PET
+chose it - so a distinctive value (the PET picks 47,317) that later appears on the network is a
+self-planted fingerprint tying the PET's request to the arbiter's node / UTXOs / float, defeating
+G1 regardless of the timing windows (which de-correlate *time*, never *amount*). Egress cloaking
+(§4) does not help: the leak is the number going *out*, not a number read back.
+
+The fix is a **quantization gate**: the PET may submit only amounts drawn from a fixed ladder of
+standard round-number denominations (the 1-2-5 series - the amounts a large population of other
+users also transacts). Any off-ladder amount is refused at the gateway before anything reaches the
+network, ahead of the registry / allowance / standing-approval gates
+([GLOSSARY 'Quantized denominations'](../../GLOSSARY.md#quantized-denominations), `arbiter/src/denominations.py`).
+Because every executed amount is then one of a handful of common figures, the amount alone carries
+no correlation signal - it sits inside a large anonymity set by construction. The ladder is
+operator-configurable; a missing config fails safe to the built-in ladder (quantization is a
+privacy *enabler*, so the default is "on," unlike the allowance's "refuse all"). Note the eCash
+wallet still decomposes a funded ladder amount into power-of-2 proofs internally - invisible on the
+LN leg, which sees only the ladder total; power-of-2 amounts are deliberately *not* the ladder,
+since they would stand out against human round-number traffic. Residual: `manage_lightning` executes
+the operator's registered invoice amount, so full effect there also needs the operator's invoices to
+be ladder amounts - the gate bounds the PET, the registry bounds the operator.
+
 ---
 
 ## 5. Net posture

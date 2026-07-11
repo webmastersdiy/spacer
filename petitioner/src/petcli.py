@@ -266,7 +266,15 @@ def _do_advanced_ecash_balance(args):
 
 
 def _do_advanced_ecash_send(args):
-    _run_local_cashu(["send", args.amount_sats])
+    # -y: no operator sits at the wallet's stdin (the AI drives petcli
+    # programmatically), so nutshell's interactive confirmation would
+    # block forever - the petitioner-side mirror of the arbiter
+    # wrapper's rule (arbiter/src/ecash.py send()).
+    # -d: embed DLEQ proofs in the serialized token. Doc 07 §2 makes
+    # DLEQ mandatory in BOTH wallets; without it a token handed back
+    # across the custody boundary (defund) carries nothing the
+    # receiving wallet can verify offline.
+    _run_local_cashu(["send", "-y", "-d", args.amount_sats])
 
 
 def _do_advanced_ecash_receive(args):

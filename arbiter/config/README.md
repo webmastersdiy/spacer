@@ -29,6 +29,13 @@ Files:
   approvals so no approval can exceed it. Ships absent (missing file =
   allowance 0 = every fund refused); copy `ecash.yaml.example` and
   edit. Only consulted in ecash mode (`SPACER_MODE=ecash`).
+- `denominations.yaml` - the allowed submission denominations (design
+  doc 12 §4.1): the ladder of standard amounts the AI may submit; any
+  off-ladder amount is refused at the gateway before the other gates.
+  Ships absent, but unlike the allowance a missing file fails SAFE to
+  the built-in 1-2-5 ladder (quantization is a privacy enabler, so the
+  default is "on"); copy `denominations.yaml.example` to override.
+  Overridable per-process by `SPACER_DENOMINATIONS`.
 - `cashu-pin.yaml` - the pinned nutshell (cashu) CLI version the
   eCash parse contract was verified against (design doc 10 §3). The
   one exception to "operator-editable" in this directory: it is

@@ -468,7 +468,44 @@ Surface balances, fees, amounts as buckets like `<10k / 10k-100k /
 capability ("can fund a channel of size X?") not precision. Caveat:
 bands themselves are a fingerprint, and an AI that can probe
 "can fund X?" across many X values can binary-search the exact
-balance unless paired with rate limits and noise.
+balance unless paired with rate limits and noise. Banding is the
+**read-side** (egress) sibling of [Quantized
+denominations](#quantized-denominations), which restricts the
+**write-side** (ingress) amounts the AI may submit.
+
+### Quantized denominations
+
+The **submission-side amount gate**: the petitioner may only submit a
+state-changing amount drawn from a fixed ladder of standard
+denominations; any other amount is refused at the gateway (audit
+`decision_refuse_denomination`, uniform refusal) before it reaches the
+registry, allowance, or standing-approval gates. Rationale: an amount
+the AI submits is executed *exactly* on the public LN / BTC / mint
+surface, so a distinctive AI-chosen value that later appears on the
+network is a self-planted fingerprint linking the AI's request to the
+arbiter's node / UTXOs / float - an amount-correlation break that the
+[timing windows](#action-delay) do not close (they de-correlate time,
+not amount). Restricting submissions to a small ladder of round numbers
+- the **1-2-5 series** (1k, 2k, 5k, 10k, ... - the banknote-denomination
+pattern, the amounts a large population of other users also transacts) -
+keeps every executed amount inside a large anonymity set, so the amount
+alone carries no signal. Round numbers, deliberately **not** powers of 2:
+powers of 2 are eCash-native (proofs are power-of-2) but would stand out
+against human round-number traffic; the eCash wallet still decomposes a
+funded ladder amount into power-of-2 proofs internally, invisible on the
+LN leg. Scope: `manage_bitcoin`, `manage_lightning`, `fund_ecash` (every
+op where the AI chooses the network amount); `defund_ecash` is exempt (no
+gate-time amount - the token's value is already ladder-funded). The
+ladder is operator config (`arbiter/config/denominations.yaml`,
+overridable by `SPACER_DENOMINATIONS`); unlike the [eCash
+allowance](#ecash-allowance), a **missing** config fails safe to the
+built-in ladder ("privacy on with sane defaults"), because quantization
+is a privacy *enabler*, not a spend cap. Landed at
+`arbiter/src/denominations.py` and enforced in `arbiter/src/gateway.py`;
+design authority is doc 12 §4.1. Caveat: `manage_lightning` executes the
+operator's registered invoice amount, so full effect there also requires
+the operator to register ladder-amount invoices - the gate bounds the
+AI, the registry bounds the operator.
 
 ### Scale cloaking
 

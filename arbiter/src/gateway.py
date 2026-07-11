@@ -70,6 +70,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import audit
 import bitcoin
+import denominations
 import registry
 import results
 import scale
@@ -167,6 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(_REFUSED_BODY)
+            audit.record("disclosure", {"body": {"status": "refused"}})
         except Exception:
             # If the connection is already broken there is nothing to
             # write; swallow the secondary failure rather than emit a
@@ -197,7 +199,13 @@ def process_request(handler):
         return
 
     op = request.get("op")
-    audit.record("request_received", {"op": op})
+    # Record the full request, not just the op. Everything the
+    # petitioner sends is by definition petitioner-known (the AI chose
+    # it), so the complete request - amount, recipient_token, poll
+    # handle, defund token - is safe to surface in the operator
+    # console's petitioner-known (left) column and is useful forensic
+    # detail in the audit log. It is bounded by MAX_REQUEST_BYTES.
+    audit.record("request_received", request)
 
     # Read-only result poll (§4.8). The poll path is the only
     # petitioner-reachable read into arbiter state and is structurally
@@ -231,7 +239,14 @@ def process_request(handler):
         _respond_ok(handler, response, deadline)
         return
 
-    # Known write ops are gated twice. First the registry (§4.7) -
+    # Known write ops are gated three ways. First the amount gate
+    # (denominations, doc 12 G2) - the HOW-MUCH gate - refuses any
+    # amount off the standard denomination ladder before anything else
+    # runs, so a distinctive AI-chosen amount can never reach the
+    # network as a correlation fingerprint; checked first (ahead of the
+    # registry lookup) because a malformed amount is refusable without
+    # resolving a destination, and it collapses to the uniform refusal
+    # audited as decision_refuse_denomination. Then the registry (§4.7) -
     # the WHO gate - resolves the recipient_token; a non-`ok` lookup
     # collapses to the uniform "destination unavailable" refusal,
     # audit-logged as decision_refuse_registry so the operator can
@@ -242,9 +257,17 @@ def process_request(handler):
     # audit-logged as decision_defer_hitl with reason
     # no_standing_approval so the operator can distinguish the
     # default-pause from the registry miss and from an unknown op.
-    # Both gates must pass for dispatch to fire. The exposed write set
-    # depends on the deployment mode (_known_write_ops).
+    # All three gates must pass for dispatch to fire. The exposed write
+    # set depends on the deployment mode (_known_write_ops).
     if op in _known_write_ops():
+        amount = _request_amount_sats(request)
+        if not denominations.is_allowed(amount):
+            audit.record(
+                "decision_refuse_denomination",
+                {"op": op, "requested_sats": amount},
+            )
+            _respond_refused(handler, deadline)
+            return
         resolved = _pseudonymize_inbound(request)
         if resolved is None:
             audit.record("decision_refuse_registry", {"op": op})
@@ -615,12 +638,15 @@ def _registry_write_params(op, resolved):
     (manage_bitcoin / manage_lightning). Both carry the registry-resolved
     real destination - a Bitcoin address for manage_bitcoin, a bolt11 for
     manage_lightning (_pseudonymize_inbound wrote it into
-    recipient_address) - and the AI's declared amount in sats
+    recipient_address) - the AI's declared amount in sats
     (informational for manage_lightning, whose bolt11 carries its own
-    amount). Only what the action requires reaches the timing queue, not
+    amount), and the original recipient_token so the executor can flip
+    the registry entry used after a successful send (one-time-use,
+    §4.7). Only what the action requires reaches the timing queue, not
     the whole request."""
     return {
         "recipient_address": resolved.get("recipient_address"),
+        "recipient_token": resolved.get("recipient_token"),
         "amount_sats": _request_amount_sats(resolved),
     }
 
@@ -691,6 +717,19 @@ def _handle_ecash_write(handler, request, deadline):
     op = request.get("op")
     amount = _request_amount_sats(request)
     if op == "fund_ecash":
+        # Amount gate first (doc 12 G2): the funded amount is minted and
+        # paid over LN exactly, so it must be a standard ladder
+        # denomination or it is a fingerprint. Checked ahead of the
+        # allowance cap - a malformed amount is refused on shape before
+        # any float-headroom question. defund_ecash is exempt (no
+        # gate-time amount; the token's value is already ladder-funded).
+        if not denominations.is_allowed(amount):
+            audit.record(
+                "decision_refuse_denomination",
+                {"op": op, "requested_sats": amount},
+            )
+            _respond_refused(handler, deadline)
+            return
         ecash = _ecash()
         outstanding = ecash.outstanding_sats()
         allowance = ecash.allowance_sats()
@@ -770,12 +809,22 @@ def _dispatch(request):
             # Advanced extension: the LND on-chain wallet total.
             raw = _lnd().walletbalance()
             total = int(raw.get("total_balance", "0"))
-            return {"status": "ok", "balance_sats": scale.present(total)}
-        # onchain (default): the bitcoind wallet's confirmed balance.
-        # getbalance() returns a Decimal in BTC; scale to integer sats
-        # (the same wire shape the LND path presents) before cloaking.
-        total = int(bitcoin.getbalance() * _SATS_PER_BTC)
-        return {"status": "ok", "balance_sats": scale.present(total)}
+        else:
+            # onchain (default): the bitcoind wallet's confirmed
+            # balance. getbalance() returns a Decimal in BTC; scale to
+            # integer sats (the same wire shape the LND path presents)
+            # before cloaking.
+            total = int(bitcoin.getbalance() * _SATS_PER_BTC)
+        presented = scale.present(total)
+        # Operator-side record of real-vs-presented for this read: the
+        # doc 13 column-2 material ("real (unbanded) amounts") the
+        # operator console pairs against the disclosed figure. Never
+        # crosses the gateway; the petitioner sees only presented.
+        audit.record(
+            "balance_read",
+            {"real_sats": total, "presented_sats": presented},
+        )
+        return {"status": "ok", "balance_sats": presented}
     if op == "query_channels":
         # query_channels is an advanced-extension read; the onchain
         # router gates it before dispatch, so this branch only runs in
@@ -783,7 +832,13 @@ def _dispatch(request):
         raw = _lnd().channelbalance()
         local = int(raw.get("local_balance", {}).get("sat", "0"))
         remote = int(raw.get("remote_balance", {}).get("sat", "0"))
-        return {"status": "ok", "capacity_sats": scale.present(local + remote)}
+        presented = scale.present(local + remote)
+        # Same operator-side real-vs-presented record as query_balance.
+        audit.record(
+            "capacity_read",
+            {"real_sats": local + remote, "presented_sats": presented},
+        )
+        return {"status": "ok", "capacity_sats": presented}
     return {"status": "not_implemented", "op": op}
 
 
@@ -819,18 +874,23 @@ def _aggregate_outbound(response):
 def _respond_refused(handler, deadline):
     """Single uniform refusal. No reason field in the body, no
     distinguishing status code. Latency-normalized to the request
-    deadline."""
+    deadline. Records the sent body in the disclosure record (doc 13
+    §3: the petitioner-known column is projected from what actually
+    crossed the gateway; this event is the minimal producer, its
+    formalization tracked by sp-gm4)."""
     _wait_until(deadline)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(_REFUSED_BODY)))
     handler.end_headers()
     handler.wfile.write(_REFUSED_BODY)
+    audit.record("disclosure", {"body": {"status": "refused"}})
 
 
 def _respond_ok(handler, response, deadline):
     """Emit a well-formed response. Latency-normalized to the request
-    deadline."""
+    deadline. Records the sent body verbatim in the disclosure record
+    (doc 13 §3; see _respond_refused)."""
     body = json.dumps(response, separators=(",", ":"), sort_keys=True).encode("utf-8")
     _wait_until(deadline)
     handler.send_response(200)
@@ -838,6 +898,7 @@ def _respond_ok(handler, response, deadline):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+    audit.record("disclosure", {"body": response})
 
 
 def _wait_until(deadline):
@@ -944,6 +1005,24 @@ if __name__ == "__main__":
         decoded = json.loads(response_body.decode("utf-8"))
         assert decoded == {"status": "refused"}, f"unexpected body: {decoded!r}"
 
+        # Send a known write op (manage_bitcoin) with an off-ladder
+        # amount. The denomination gate (doc 12 G2) is checked first,
+        # ahead of the registry, so an off-ladder amount refuses
+        # uniformly and audits decision_refuse_denomination without
+        # needing a configured registry. 1234 is not on DEFAULT_LADDER.
+        body = json.dumps(
+            {"op": "manage_bitcoin", "recipient_token": "ABCDE4", "amount_sats": 1234}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{bind_port}/",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode("utf-8")) == {"status": "refused"}
+
         # Send a malformed request (not JSON). Should also refuse
         # uniformly, with no information about the parse failure.
         req = urllib.request.Request(
@@ -1031,12 +1110,20 @@ if __name__ == "__main__":
     with open(tmp_audit) as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert "gateway_start" in events, events
-    # 5 well-formed requests reach _parse_request: the original
-    # smoke_ping, plus four polls. The malformed request is rejected
-    # before request_received via send_error.
-    assert events.count("request_received") == 5, events
+    # 6 well-formed requests reach _parse_request: the original
+    # smoke_ping, the off-ladder manage_bitcoin, plus four polls. The
+    # malformed request is rejected before request_received via
+    # send_error.
+    assert events.count("request_received") == 6, events
+    # Every sent response lands in the disclosure record (doc 13 §3):
+    # the smoke_ping refusal, the denomination refusal, the parse-
+    # failure refusal, and the four poll responses.
+    assert events.count("disclosure") == 7, events
     assert "decision_defer_hitl" in events, events
     assert events.count("decision_refuse") == 1, events
+    # The off-ladder manage_bitcoin was refused at the amount gate,
+    # ahead of the registry (doc 12 G2).
+    assert "decision_refuse_denomination" in events, events
     # Poll path: deposit, ok, throttled, unknown, bad_input must all
     # appear. The bad-input case audit-logs at the gateway layer
     # (decision_poll_bad_input) without reaching results.poll().

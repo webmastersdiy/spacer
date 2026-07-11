@@ -137,6 +137,20 @@ os.environ["SPACER_SCALE_MODE"] = "test"
 # rather than the 24h production-placeholder default.
 os.environ["PETCLI_TEST_TIMING"] = "1"
 
+# Allowed submission denominations (doc 12 G2, arbiter/src/denominations.py).
+# The gateway refuses any state-changing amount off this set before the
+# registry / allowance / standing-approvals gates. This test deployment
+# declares the exact sat-amounts its write variants submit as its
+# allowed set (the union of every --amount-sats value and every
+# --amount-msats value divided to sats: 1, 100, 500, 1000, 2000, 5000,
+# 50000, 100000, 200000), so the denomination gate always PASSES here
+# and every existing variant keeps exercising the registry / allowance /
+# standing-approval / HITL path it was written for. The gate's own
+# refusal path is covered by the gateway smoke, the denominations smoke,
+# and the live sequence runner. Overrides the built-in ladder for this
+# process only.
+os.environ["SPACER_DENOMINATIONS"] = "1,100,500,1000,2000,5000,50000,100000,200000"
+
 # Standing-approvals config path (GLOSSARY 'Standing approvals' / §6).
 # One temp file per runner process; each variant clears it before
 # preconditions run, so a variant without seed_standing_approvals

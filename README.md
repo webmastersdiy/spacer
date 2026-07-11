@@ -18,14 +18,19 @@ operator allowance. (The foundational-posture doc, doc 12, states why.)
 
 ## The rail ladder
 
-`SPACER_MODE` selects the op surface; each rail is an explicit opt-in
-on top of the one below it:
+`SPACER_MODE` selects the op surface. The rails are cumulative - each
+mode is the one below it plus one more rail - so there are exactly three
+choices:
 
-| Mode | Surface | Role |
+1. **`onchain`** (default) - bitcoind only.
+2. **`lightning`** - onchain + Lightning (adds LND).
+3. **`ecash`** - onchain + Lightning + eCash (adds the Cashu mint).
+
+| `SPACER_MODE` | Rails enabled | Role of the added rail |
 |---|---|---|
-| `onchain` (default) | bitcoind only | internal management |
-| `lightning` | + LND | internal management |
-| `ecash` | + Cashu mint | the sole external-value rail |
+| `onchain` (default) | bitcoind | internal management |
+| `lightning` | bitcoind + LND | internal management |
+| `ecash` | bitcoind + LND + Cashu mint | the sole external-value rail |
 
 **No mainnet yet.** Spacer is developed and live-tested entirely on
 signet / Mutinynet / test-mint, and the registry refuses mainnet

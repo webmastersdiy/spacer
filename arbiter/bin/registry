@@ -1,0 +1,9 @@
+#!/bin/sh
+# recipient-address-registry console launcher: locate src/registry_cli.py
+# relative to this wrapper and run it under python3. The documented
+# operator flow (config/README.md, destinations.yaml header) invokes
+# `arbiter/bin/registry add <real-address>` at the directly-attached
+# console. Mirrors bin/arbiter.
+set -e
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../src/registry_cli.py" "$@"
