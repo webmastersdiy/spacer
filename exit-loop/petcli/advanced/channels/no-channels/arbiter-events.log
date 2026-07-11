@@ -1,8 +1,8 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51658},"ts":"2026-07-11T23:33:00Z"}
-{"event":"scale_tier_init","payload":{"real_sats":50000,"scale":1.0,"tier":0},"ts":"2026-07-11T23:33:00Z"}
-{"event":"snapshot_refresh","payload":{"op":"query_balance","presented_sats":50000,"real_sats":50000,"served_sats":50000},"ts":"2026-07-11T23:33:00Z"}
-{"event":"snapshot_refresh","payload":{"op":"query_channels","presented_sats":0,"real_sats":0,"served_sats":0},"ts":"2026-07-11T23:33:00Z"}
-{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-07-11T23:33:00Z"}
-{"event":"capacity_served","payload":{"served_sats":0,"snapshot_age_s":0.272},"ts":"2026-07-11T23:33:00Z"}
-{"event":"decision_allow","payload":{"op":"query_channels"},"ts":"2026-07-11T23:33:00Z"}
-{"event":"disclosure","payload":{"body":{"capacity_sats":0,"status":"ok"}},"ts":"2026-07-11T23:33:00Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54829},"ts":"2026-07-11T23:37:41Z"}
+{"event":"scale_tier_init","payload":{"real_sats":50000,"scale":1.0,"tier":0},"ts":"2026-07-11T23:37:41Z"}
+{"event":"snapshot_refresh","payload":{"op":"query_balance","presented_sats":50000,"real_sats":50000,"served_sats":50000},"ts":"2026-07-11T23:37:41Z"}
+{"event":"snapshot_refresh","payload":{"op":"query_channels","presented_sats":0,"real_sats":0,"served_sats":0},"ts":"2026-07-11T23:37:41Z"}
+{"event":"request_received","payload":{"op":"query_channels"},"ts":"2026-07-11T23:37:41Z"}
+{"event":"capacity_served","payload":{"served_sats":0,"snapshot_age_s":0.11},"ts":"2026-07-11T23:37:41Z"}
+{"event":"decision_allow","payload":{"op":"query_channels"},"ts":"2026-07-11T23:37:41Z"}
+{"event":"disclosure","payload":{"body":{"capacity_sats":0,"status":"ok"}},"ts":"2026-07-11T23:37:41Z"}

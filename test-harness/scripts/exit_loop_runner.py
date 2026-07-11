@@ -2303,6 +2303,15 @@ def _live_env():
     os.environ["CASHU_TIMEOUT_S"] = "120"
     os.environ["SPACER_MODE"] = "ecash"
     os.environ["SPACER_TIMING_MODE"] = "test"
+    # Run-scoped allowance, like the fresh CASHU_DIR: the live fund's
+    # gate-pass reservation (doc 07 §8, sp-mki) must check against a
+    # bound this test controls, not whatever ecash.yaml the host
+    # deployment has (missing = allowance 0 = the fund refuses).
+    live_allowance = (
+        Path(tempfile.mkdtemp(prefix="exit-loop-live-alw-")) / "ecash.yaml"
+    )
+    live_allowance.write_text("ecash_allowance_sats: 50000\n")
+    os.environ["SPACER_ECASH_ALLOWANCE_PATH"] = str(live_allowance)
 
 
 def _ai_custody_hop(token):
@@ -2461,6 +2470,11 @@ def run_live_roundtrips():
     # defund melts back a fresh invoice sized below 5000 for the mint's
     # melt-fee reserve, so funded (5000) != received (credited).
     try:
+        # Gate-pass reservation first, exactly as the gateway takes it
+        # at enqueue (doc 07 §8, sp-mki): the executor's drain-moment
+        # re-check fails an unreserved fund closed.
+        if not ecash.reserve("live_fund_ecash", 5000):
+            raise RuntimeError("live fund allowance reservation refused")
         s_fund, p_fund = _drive_executor(
             "live_fund_ecash", "fund_ecash", {"amount_sats": 5000}, far,
         )

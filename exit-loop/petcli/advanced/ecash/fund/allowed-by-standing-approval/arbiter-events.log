@@ -1,6 +1,6 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51747},"ts":"2026-07-11T23:33:09Z"}
-{"event":"request_received","payload":{"amount_sats":1000,"op":"fund_ecash"},"ts":"2026-07-11T23:33:10Z"}
-{"event":"standing_approval_match","payload":{"op":"fund_ecash","rationale":"exit-loop test rule"},"ts":"2026-07-11T23:33:10Z"}
-{"event":"ecash_reserved","payload":{"allowance_sats":50000,"amount_sats":1000,"handle":"XY53zpDHg3HLKdcAWkvOQA","outstanding_sats":0,"reserved_sats":1000},"ts":"2026-07-11T23:33:10Z"}
-{"event":"decision_allow","payload":{"op":"fund_ecash"},"ts":"2026-07-11T23:33:10Z"}
-{"event":"disclosure","payload":{"body":{"handle":"XY53zpDHg3HLKdcAWkvOQA","status":"received"}},"ts":"2026-07-11T23:33:10Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54919},"ts":"2026-07-11T23:37:49Z"}
+{"event":"request_received","payload":{"amount_sats":1000,"op":"fund_ecash"},"ts":"2026-07-11T23:37:49Z"}
+{"event":"standing_approval_match","payload":{"op":"fund_ecash","rationale":"exit-loop test rule"},"ts":"2026-07-11T23:37:49Z"}
+{"event":"ecash_reserved","payload":{"allowance_sats":50000,"amount_sats":1000,"handle":"2gJLfS8C5x1O67UV7SMSQw","outstanding_sats":0,"reserved_sats":1000},"ts":"2026-07-11T23:37:49Z"}
+{"event":"decision_allow","payload":{"op":"fund_ecash"},"ts":"2026-07-11T23:37:49Z"}
+{"event":"disclosure","payload":{"body":{"handle":"2gJLfS8C5x1O67UV7SMSQw","status":"received"}},"ts":"2026-07-11T23:37:49Z"}

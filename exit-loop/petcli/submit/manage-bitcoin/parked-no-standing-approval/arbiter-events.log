@@ -1,5 +1,5 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51495},"ts":"2026-07-11T23:32:44Z"}
-{"event":"request_received","payload":{"amount_sats":1000,"op":"manage_bitcoin","recipient_token":"0NNQ1T"},"ts":"2026-07-11T23:32:44Z"}
-{"event":"registry_lookup_ok","payload":{"id":1,"token":"0NNQ1T"},"ts":"2026-07-11T23:32:44Z"}
-{"event":"decision_defer_hitl","payload":{"op":"manage_bitcoin","reason":"no_standing_approval"},"ts":"2026-07-11T23:32:44Z"}
-{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-11T23:32:44Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54687},"ts":"2026-07-11T23:37:28Z"}
+{"event":"request_received","payload":{"amount_sats":1000,"op":"manage_bitcoin","recipient_token":"T13BC4"},"ts":"2026-07-11T23:37:28Z"}
+{"event":"registry_lookup_ok","payload":{"id":1,"token":"T13BC4"},"ts":"2026-07-11T23:37:28Z"}
+{"event":"decision_defer_hitl","payload":{"op":"manage_bitcoin","reason":"no_standing_approval"},"ts":"2026-07-11T23:37:28Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-11T23:37:28Z"}

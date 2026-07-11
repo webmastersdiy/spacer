@@ -1,4 +1,4 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51597},"ts":"2026-07-11T23:32:54Z"}
-{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"0NNQ1T"},"ts":"2026-07-11T23:32:55Z"}
-{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-11T23:32:55Z"}
-{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-11T23:32:55Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":54779},"ts":"2026-07-11T23:37:36Z"}
+{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"T13BC4"},"ts":"2026-07-11T23:37:36Z"}
+{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-11T23:37:36Z"}
+{"event":"disclosure","payload":{"body":{"status":"refused"}},"ts":"2026-07-11T23:37:37Z"}
