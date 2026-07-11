@@ -101,7 +101,7 @@ The §4 timing channels are **not** addressed by per-response padding. Earlier d
 1. **Hop-count latency through the proxy.** Run `payinvoice` over known 1/2/3-hop Mutinynet routes; confirm whether the 0.22 s baseline is visible before the timing layer absorbs it.
 2. **`listpayments` vs. event stream.** Quantify the privacy cost of a full-history call versus the forward-only `next_event` window (which never exposes settled-payment preimages).
 3. **Private-channel close behavior.** When a `--private` channel closes, can the AI infer the final balance split from the pending-channel-disappears / balance-rises sequence alone, without the closing txid?
-4. **Binary-search balance probing.** Test [scale cloaking](../../GLOSSARY.md#scale-cloaking) and banding against a sequence of "can fund X?" capability queries; design the rate-limit + noise policy that makes it infeasible per session.
+4. **Binary-search balance probing.** Test [scale cloaking](../../GLOSSARY.md#scale-cloaking) and banding against a sequence of "can fund X?" capability queries; design the rate-limit + noise policy that makes it infeasible per session. The read side of this is narrowed by [Read snapshot](../../GLOSSARY.md#read-snapshot-snapshot-served-reads) serving (doc 15): reads freeze within a refresh epoch, so only write-attempt probing remains to design against.
 5. **`export_pathfinding_scores` fingerprint.** Measure how distinguishable two nodes' score exports are after an identical payment sequence.
 
 ## 7. Implementation learnings

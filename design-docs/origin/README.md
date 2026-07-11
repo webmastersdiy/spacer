@@ -33,6 +33,7 @@ never override).
 | 12 | Foundational privacy posture: internal-only BTC/LN, eCash-only external value - the two guardrails (G1/G2) and the eCash exception |
 | 13 | Operator-visibility TUI: the two-column console - petitioner-known vs never-known, fed by the disclosure record |
 | 14 | LN availability probing + autonomous channel management under `manage_lightning` |
+| 15 | Petitioner read freshness: snapshot-served balance/capacity reads (authority: the read-path freshness mitigation) |
 
 ## Rule: AI-facing vs world-facing privacy
 
