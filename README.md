@@ -19,7 +19,7 @@ operator allowance. (The foundational-posture doc, doc 12, states why.)
 ## The rail ladder
 
 `SPACER_MODE` selects the op surface. The rails are cumulative - each
-mode is the one below it plus one more rail - so there are exactly three
+mode adds one rail to the previous one - so there are exactly three
 choices:
 
 1. **`onchain`** (default) - bitcoind only.
