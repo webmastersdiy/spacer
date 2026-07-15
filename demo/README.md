@@ -19,13 +19,25 @@ A single `query_balance` round-trip, split across the gateway boundary: the left
 
 ## Deployment-mode walkthroughs (sequence D)
 
-`SPACER_MODE` selects the op surface; the rails are cumulative. Three demos, one per mode, each showing its own rail working and the higher rails refused by the mode gate:
+`SPACER_MODE` selects the op surface; the rails are cumulative. Three demos, one per mode, each showing its own rail working and the higher rails refused by the mode gate. Every value in every panel is a real capture from the live captain-loop on Mutinynet signet.
 
-1. **D1-onchain** - bitcoind only.
-2. **D2-onchain-lightning** - onchain + Lightning.
-3. **D3-onchain-lightning-ecash** - onchain + Lightning + eCash.
+### [D1 - onchain mode: a Bitcoin-only Pet](D1-onchain.md)
 
-_These are being produced against live Mutinynet infra; each doc + image links here once it is verified against its captured audit log._
+A cloaked `query_balance` read, a tokenized on-chain send cleared by standing approval, and Lightning refused at the mode gate - the rail doesn't exist yet.
+
+![D1 - onchain mode](D1-onchain.png)
+
+### [D2 - onchain + lightning mode: the fast rail layers on](D2-onchain-lightning.md)
+
+Everything D1 shows, plus a cloaked `query_channels` capacity read and a tokenized Lightning payment on the same handle-and-approval flow. eCash still refuses at the mode gate.
+
+![D2 - onchain + lightning mode](D2-onchain-lightning.png)
+
+### [D3 - onchain + lightning + ecash mode: bearer-money custody, capped](D3-onchain-lightning-ecash.md)
+
+The full eCash custody lifecycle - fund, then defund back through the AI custody hop - plus the allowance cap refusing an over-limit fund *before* any standing approval is even consulted.
+
+![D3 - onchain + lightning + ecash mode](D3-onchain-lightning-ecash.png)
 
 ---
 
