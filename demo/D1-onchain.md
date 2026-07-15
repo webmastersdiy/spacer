@@ -1,12 +1,13 @@
 # D1 - onchain mode: a Bitcoin-only Pet
 
-Spacer is the operator's own Bitcoin self-custody research system, on the
-operator's own hardware, against Mutinynet / signet test networks - every sat
-here is a valueless test sat. It exposes a hardened, permissioned gateway so a
-sandboxed AI client (the "petitioner", or "Pet") can drive the wallet without
-learning the operator's real balances, addresses, or tx identifiers. The
-adversary in the threat model is the operator's own sandboxed AI, or a passive
-test-chain observer.
+Spacer lets an AI client drive a Bitcoin node without learning more about the
+operator's wallet, balances, or identifiers than the task requires. It exists
+so people can delegate work to a sandboxed AI agent without leaking sensitive
+financial data to it: a hardened, permissioned gateway sits between the AI
+client (the "petitioner", or "Pet") and the real wallet. This instance runs on
+the operator's own hardware against Mutinynet / signet test networks - every
+sat here is a valueless test sat. The threat model treats the petitioner
+itself as the adversary, alongside a passive test-chain observer.
 
 `SPACER_MODE=onchain` is the base rail: only the Bitcoin on-chain surface
 exists. This walkthrough shows an onchain Pet reading a cloaked balance,
