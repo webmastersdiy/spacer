@@ -1,0 +1,6 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59081},"ts":"2026-07-23T15:38:11Z"}
+{"event":"request_received","payload":{"amount_sats":1234,"op":"manage_bitcoin","recipient_token":"ABCDEF"},"ts":"2026-07-23T15:38:11Z"}
+{"event":"decision_refuse_denomination","payload":{"op":"manage_bitcoin","requested_sats":1234},"ts":"2026-07-23T15:38:11Z"}
+{"event":"decision_defer_rejection","payload":{"handle":"ToA46yrGGXcE-Y1MSc7aHg","hold_s":4.538,"op":"manage_bitcoin","ready_at":1784821095.92},"ts":"2026-07-23T15:38:11Z"}
+{"event":"latency_normalized","payload":{"floor_s":0.05,"held_s":0.0463,"work_s":0.0037},"ts":"2026-07-23T15:38:11Z"}
+{"event":"disclosure","payload":{"body":{"handle":"ToA46yrGGXcE-Y1MSc7aHg","status":"received"}},"ts":"2026-07-23T15:38:11Z"}

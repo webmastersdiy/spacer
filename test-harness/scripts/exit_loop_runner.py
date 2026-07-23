@@ -152,9 +152,12 @@ os.environ["PETCLI_TEST_TIMING"] = "1"
 # 50000, 100000, 200000), so the denomination gate always PASSES here
 # and every existing variant keeps exercising the registry / allowance /
 # standing-approval / HITL path it was written for. The gate's own
-# refusal path is covered by the gateway smoke, the denominations smoke,
-# and the live sequence runner. Overrides the built-in ladder for this
-# process only.
+# refusal path is exercised in-loop by the refused-denomination
+# variants, whose amount 1234 is deliberately OFF this set (and stays
+# off it: adding 1234 here would silently turn those variants into
+# registry/allowance tests). Also covered by the gateway smoke, the
+# denominations smoke, and the live sequence runner. Overrides the
+# built-in ladder for this process only.
 os.environ["SPACER_DENOMINATIONS"] = "1,100,500,1000,2000,5000,50000,100000,200000"
 
 # Standing-approvals config path (GLOSSARY 'Standing approvals' / §6).
@@ -809,11 +812,49 @@ VARIANTS = [
             "wire."
         ),
     },
-    # --- submit manage-bitcoin: the primary (onchain) write op. State-
-    # changing ops resolve through the recipient address registry
-    # (§4.7). Sending with a token that is not in the registry (here,
-    # the made-up 'ABCDEF') fails at the registry gate. The refusal is
-    # DEFERRED (sp-tb0): the wire shape is the same received-ack a pass
+    # --- submit manage-bitcoin: the denomination gate (doc 12 G2) is
+    # the FIRST write gate, ahead of the registry, so an off-ladder
+    # amount refuses before any destination is resolved. 1234 is
+    # deliberately outside this deployment's SPACER_DENOMINATIONS set
+    # (see the env block near the top - and must stay outside it).
+    {
+        "path": ("submit", "manage-bitcoin", "refused-denomination"),
+        "petcli_args": [
+            "submit", "manage-bitcoin",
+            "--to-token", "ABCDEF",
+            "--amount-sats", "1234",
+        ],
+        "uses_arbiter": True,
+        "preconditions": [],
+        "expected": _is_received_ack,
+        "expected_audit_events": [
+            "decision_refuse_denomination",
+            "decision_defer_rejection",
+        ],
+        "forbidden_audit_events": [
+            "decision_refuse_registry",
+            "standing_approval_match",
+            "decision_defer_hitl",
+        ],
+        "description": (
+            "manage_bitcoin with amount_sats=1234, off the "
+            "deployment's denomination set. The amount gate (doc 12 "
+            "G2) refuses FIRST: the registry never runs "
+            "(decision_refuse_registry must NOT appear even though "
+            "token ABCDEF is unknown - that absence is the gate-order "
+            "proof), no standing-approvals check, no HITL park. The "
+            "refusal is DEFERRED like every write-gate refusal: the "
+            "wire carries the same received-ack a pass returns; audit "
+            "carries decision_refuse_denomination with the requested "
+            "amount plus the decision_defer_rejection tail (handle + "
+            "the rejection window's committed ready_at)."
+        ),
+    },
+    # --- submit manage-bitcoin: the registry gate. State-changing ops
+    # resolve through the recipient address registry (§4.7). Sending
+    # with a token that is not in the registry (here, the made-up
+    # 'ABCDEF') fails at the registry gate. The refusal is DEFERRED
+    # (sp-tb0): the wire shape is the same received-ack a pass
     # returns, and the audit log carries decision_refuse_registry so the
     # operator can see *which* token failed and why. The advanced-
     # extension manage_lightning analogues live in the advanced-mode
@@ -893,7 +934,8 @@ VARIANTS = [
             ]),
         ],
         "expected": _is_received_ack,
-        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "expected_audit_events": ["standing_approval_match", "decision_allow",
+                                  "action_enqueued"],
         "description": (
             "manage_bitcoin where the registry token resolves AND a "
             "standing-approval rule matches (op + destination + amount "
@@ -1471,7 +1513,8 @@ VARIANTS = [
             ]),
         ],
         "expected": _is_received_ack,
-        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "expected_audit_events": ["standing_approval_match", "decision_allow",
+                                  "action_enqueued"],
         "description": (
             "manage_lightning analogue of submit/manage-bitcoin/allowed-"
             "by-standing-approval, with the extension enabled. "
@@ -1586,9 +1629,50 @@ VARIANTS = [
             "rung leaves the Lightning read surface exactly as it was."
         ),
     },
-    # --- fund_ecash gate pipeline (doc 07 §3, §8): allowance cap ->
-    # standing approvals -> dispatch stub. The allowance check fires
-    # FIRST and is config-bounded (a HITL approval cannot exceed it).
+    # --- fund_ecash gate pipeline (doc 07 §3, §8): denomination gate
+    # (doc 12 G2) -> allowance cap -> standing approvals -> dispatch.
+    # The amount gate fires ahead of the allowance, so an off-ladder
+    # amount refuses on shape before any float-headroom question.
+    {
+        "path": ("advanced", "ecash", "fund", "refused-denomination"),
+        "petcli_args": [
+            "advanced", "ecash", "fund",
+            "--amount-sats", "1234",
+        ],
+        "uses_arbiter": True,
+        "spacer_mode": "ecash",
+        "preconditions": [
+            # No seed_ecash_allowance: a consulted allowance would
+            # refuse everything here (missing config reads as 0) and
+            # log decision_refuse_allowance - so that event's absence
+            # below is the gate-order proof.
+        ],
+        "expected": _is_received_ack,
+        "expected_audit_events": [
+            "decision_refuse_denomination",
+            "decision_defer_rejection",
+        ],
+        "forbidden_audit_events": [
+            "decision_refuse_allowance",
+            "standing_approval_match",
+            "decision_defer_hitl",
+        ],
+        "description": (
+            "fund_ecash for 1234 sat - off the deployment's "
+            "denomination set - in ecash mode with no allowance "
+            "config. The amount gate refuses first (doc 12 G2 "
+            "precedes the doc 07 §8 allowance): "
+            "decision_refuse_denomination appears and "
+            "decision_refuse_allowance does NOT, even though the "
+            "missing-config allowance would refuse every fund. Same "
+            "deferred-refusal wire shape as every write-gate refusal "
+            "(received-ack; uniform failure surfaces only on a later "
+            "poll)."
+        ),
+    },
+    # --- fund_ecash allowance cap: fires after the amount gate and
+    # ahead of standing approvals; config-bounded (a HITL approval
+    # cannot exceed it).
     {
         "path": ("advanced", "ecash", "fund", "refused-no-allowance-config"),
         "petcli_args": [
@@ -1691,7 +1775,8 @@ VARIANTS = [
             ]),
         ],
         "expected": _is_received_ack,
-        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "expected_audit_events": ["standing_approval_match", "decision_allow",
+                                  "action_enqueued"],
         "description": (
             "fund_ecash where the allowance admits the amount AND a "
             "standing-approval rule matches (op fund_ecash, "
@@ -1750,7 +1835,8 @@ VARIANTS = [
             ]),
         ],
         "expected": _is_received_ack,
-        "expected_audit_events": ["standing_approval_match", "decision_allow"],
+        "expected_audit_events": ["standing_approval_match", "decision_allow",
+                                  "action_enqueued"],
         "description": (
             "defund_ecash with an unbounded standing-approval rule "
             "(op defund_ecash, destination 'mint', no amount bound): "
