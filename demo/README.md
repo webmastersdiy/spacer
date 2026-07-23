@@ -39,6 +39,22 @@ The full eCash custody lifecycle - fund, then defund back through the AI custody
 
 ![D3 - onchain + lightning + ecash mode](D3-onchain-lightning-ecash.png)
 
+## Timing and amount walkthroughs (sequence T)
+
+Two demos from ONE live run (`test-harness/scripts/live_sequence_t_runner.py`) - one wall clock, real chronology: two `manage_bitcoin` submits to the same recipient token (1,234 sats off the denomination ladder, 1,000 sats on it), their polls, and client-measured wire latencies.
+
+### [T1 - the amount gate and the deferred refusal](T1-amount-gate.md)
+
+An off-ladder amount is refused before the registry even runs - but the wire still says `received`, byte-shape-identical to the passing submit's ack. The refusal surfaces only after a randomized rejection window, as the same uniform `failed` a genuinely broken send would return.
+
+![T1 - the amount gate and the deferred refusal](T1-amount-gate.png)
+
+### [T2 - the timing shield](T2-timing-shield.md)
+
+Four timing mitigations on the same send: every response held to a 250 ms latency floor (`latency_normalized` shows work vs hold), a randomized action-delay window between submit and broadcast (`action_enqueued` records the commitment), a randomized result-delay window, and the 10-minute poll floor rationing what the AI can learn.
+
+![T2 - the timing shield](T2-timing-shield.png)
+
 ---
 
-Each PNG is rendered by a small self-contained Pillow script (`generate_*.py`) using only real captured values. To reproduce demo 1: `python3 generate_01_privacy_gateway.py`.
+Each PNG is rendered by a small Pillow script (`generate_*.py`) using only real captured values (the timing generator shares the mode generator's framework). To reproduce demo 1: `python3 generate_01_privacy_gateway.py`.
