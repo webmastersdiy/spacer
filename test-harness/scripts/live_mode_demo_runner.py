@@ -65,7 +65,9 @@ sys.path.insert(0, str(REPO / "arbiter" / "src"))
 import audit      # noqa: E402
 import gateway    # noqa: E402
 import registry   # noqa: E402
+import results    # noqa: E402  (deferred-refusal delivery for refuse blocks)
 import state      # noqa: E402
+import timing     # noqa: E402  (drain the rejection past its window)
 import tui        # noqa: E402  (the real two-column operator console renderer)
 
 # Render geometry for the captured grid. Pinned (not terminal-detected) so a
@@ -79,13 +81,21 @@ _TUI_PAD = 6
 
 def _refuse_mode_records(mode, op, payload):
     """Start an isolated in-process arbiter under SPACER_MODE=mode, POST one
-    extension op, and return its [request_received, decision_refuse_mode,
-    disclosure] records verbatim from the arbiter's own audit log.
+    extension WRITE op, drive its deferred refusal through delivery, and
+    return the chain's records verbatim from the arbiter's own audit log.
 
-    No backend is touched: an extension op in a mode that disables it refuses
-    at the gateway mode gate before dispatch (gateway.py process_request), so
-    the event equals a production deployment's. Isolated temp audit/state/
-    registry paths keep this off the live captain-loop log."""
+    Since sp-tb0, a recognized-but-disabled extension WRITE does not refuse
+    synchronously: the mode gate audits decision_refuse_mode and DEFERS the
+    refusal (received-ack + opaque handle; the uniform failed surfaces on a
+    later poll after the rejection window). This helper captures the whole
+    petitioner-visible story: submit ack, then - after force-draining the
+    rejection past its window, exactly as the executor's result drainer
+    would - the one poll that returns the uniform failure.
+
+    No backend is touched: the mode gate fires before dispatch
+    (gateway.py process_request), so the events equal a production
+    deployment's. Isolated temp audit/state/registry paths keep this off
+    the live captain-loop log. Returns (ack, poll_resp, records)."""
     d = Path(tempfile.mkdtemp(prefix="mode-demo-"))
     saved_mode = os.environ.get("SPACER_MODE")
     os.environ["SPACER_MODE"] = mode
@@ -100,11 +110,22 @@ def _refuse_mode_records(mode, op, payload):
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         try:
-            body = json.dumps({"op": op, **payload}).encode()
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/", data=body,
-                headers={"Content-Type": "application/json"}, method="POST")
-            resp = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            def post(obj):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/",
+                    data=json.dumps(obj).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+            resp = post({"op": op, **payload})
+            # Deliver the deferred rejection past its window (what
+            # executor.deliver_due_results does once it elapses), then
+            # poll it back through the gateway - first poll on the
+            # handle, so the poll floor does not throttle it.
+            for _h, _res, _kind in timing.due_results(now=time.time() + 60.0):
+                results.deposit(_h, _res, kind=_kind)
+            poll_resp = post({"op": "poll", "handle": resp.get("handle")})
         finally:
             server.shutdown()
             server.server_close()
@@ -116,8 +137,10 @@ def _refuse_mode_records(mode, op, payload):
             os.environ.pop("SPACER_MODE", None)
         else:
             os.environ["SPACER_MODE"] = saved_mode
-    keep = ("request_received", "decision_refuse_mode", "disclosure")
-    return resp, [r for r in records if r.get("event") in keep]
+    keep = ("request_received", "decision_refuse_mode",
+            "decision_defer_rejection", "disclosure", "result_deposit",
+            "result_poll_ok")
+    return resp, poll_resp, [r for r in records if r.get("event") in keep]
 
 
 # === demo composition ======================================================
@@ -172,10 +195,15 @@ def _compose(demo):
             records.extend(_load_src(block["src"]))
         else:
             mode, op, payload = block["refuse_mode"]
-            resp, recs = _refuse_mode_records(mode, op, payload)
-            if resp != {"status": "refused"} or not any(
-                    r["event"] == "decision_refuse_mode" for r in recs):
-                raise SystemExit(f"mode gate did not refuse {op} in {mode}: {resp}")
+            ack, poll_resp, recs = _refuse_mode_records(mode, op, payload)
+            if (ack.get("status") != "received" or not ack.get("handle")
+                    or not any(r["event"] == "decision_refuse_mode"
+                               for r in recs)):
+                raise SystemExit(f"mode gate did not defer-refuse {op} in "
+                                 f"{mode}: {ack}")
+            if poll_resp != {"status": "result", "result": {"status": "failed"}}:
+                raise SystemExit(f"deferred mode refusal did not surface as "
+                                 f"the uniform failure: {poll_resp}")
             records.extend(recs)
             refusals.append((mode, op))
     return records, refusals
@@ -221,8 +249,9 @@ Blocks, in order:
 {blocks}
 
 Regenerate: `python3 test-harness/scripts/live_mode_demo_runner.py build`
-(the decision_refuse_mode events are re-exercised against the real gateway mode
-gate each run, so their timestamps update; all other values are stable).
+(the refuse-mode blocks are re-exercised against the real gateway mode gate
+each run - deferred refusal: received-ack, then the uniform failed on poll -
+so their handles and timestamps update; all other values are stable).
 """
 
 _BLOCK_DESC = {
@@ -255,7 +284,9 @@ def _block_line(block):
     mode, op, _ = block["refuse_mode"]
     return (f"- refuse_mode (fresh): `{op}` in {mode} mode -> decision_refuse_mode "
             f"reason=advanced_extension_disabled (the advanced rail does not exist for "
-            f"this Pet); refused before any backend is touched")
+            f"this Pet); refused before any backend is touched. The refusal is "
+            f"DEFERRED (sp-tb0): the wire acks received + handle, and the uniform "
+            f"failed surfaces on the later poll shown in the slice")
 
 
 def build():
@@ -278,30 +309,35 @@ def build():
 # === smoke =================================================================
 
 def smoke():
-    """Self-contained: assert the mode gate refuses each extension op the demos
-    rely on, emitting a real decision_refuse_mode. No ~/spacer, no fixtures."""
+    """Self-contained: assert the mode gate defer-refuses each extension WRITE
+    the demos rely on - received-ack at submit, decision_refuse_mode audited,
+    the uniform failed on poll (sp-tb0). No ~/spacer, no fixtures."""
     cases = [
         ("onchain", "manage_lightning", {"recipient_token": "R9469W", "amount_msats": 5000000}),
         ("onchain", "fund_ecash", {"amount_sats": 5000}),
         ("lightning", "fund_ecash", {"amount_sats": 5000}),
     ]
     for mode, op, payload in cases:
-        resp, recs = _refuse_mode_records(mode, op, payload)
-        assert resp == {"status": "refused"}, (mode, op, resp)
+        ack, poll_resp, recs = _refuse_mode_records(mode, op, payload)
+        assert set(ack) == {"status", "handle"} and ack["status"] == "received", (mode, op, ack)
+        assert poll_resp == {"status": "result", "result": {"status": "failed"}}, (mode, op, poll_resp)
         refuse = [r for r in recs if r["event"] == "decision_refuse_mode"]
         assert refuse, f"no decision_refuse_mode for {op} in {mode}: {recs}"
         pl = refuse[0]["payload"]
         assert pl.get("op") == op, pl
         assert pl.get("reason") == "advanced_extension_disabled", pl
-    # The renderer places a petitioner request left and the secret refusal right.
-    resp, recs = _refuse_mode_records("onchain", "manage_lightning",
-                                      {"recipient_token": "R9469W", "amount_msats": 5000000})
+        defer = [r for r in recs if r["event"] == "decision_defer_rejection"]
+        assert defer and defer[0]["payload"].get("handle") == ack["handle"], recs
+    # The renderer places petitioner requests left and the secret refusal right.
+    ack, poll_resp, recs = _refuse_mode_records("onchain", "manage_lightning",
+                                                {"recipient_token": "R9469W", "amount_msats": 5000000})
     grid = _render_tui(recs)
     assert "PETITIONER-KNOWN" in grid and "PETITIONER-NEVER-KNOWN" in grid, grid[:200]
     assert "-> op=manage_lightning" in grid, "request must render on the left"
     assert "decision_refuse_mode" in grid, "refusal must render on the right"
-    print("OK: mode gate refuses manage_lightning/fund_ecash by mode "
-          "(decision_refuse_mode, advanced_extension_disabled)")
+    assert "status=failed" in grid, "the deferred failure must render on the left"
+    print("OK: mode gate defer-refuses manage_lightning/fund_ecash by mode "
+          "(decision_refuse_mode; received-ack at submit, uniform failed on poll)")
     return 0
 
 

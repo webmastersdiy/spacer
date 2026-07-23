@@ -67,14 +67,18 @@ A Lightning op (an eCash op behaves the same) is refused by the mode gate:
 
 ```
 -> op=manage_lightning amount_msats=5000000
-decision_refuse_mode op=manage_lightning reason=advanced_extension_disabled
-<- status=refused
+decision_refuse_mode op=manage_lightning reason=advanced_extension_disabled  (operator-only)
+decision_defer_rejection hold_s=4.065                                        (operator-only)
+<- handle=IJ_fZIzGiyNh0hc-Pobp6Q status=received
+<- result.status=failed                                                      (one poll later)
 ```
 
-For an onchain Pet the Lightning and eCash rails simply do not exist. The
-refusal is uniform (`status=refused`), with no reason leaked and no HITL prompt:
-the operator already decided by choosing `SPACER_MODE=onchain`, so there is
-nothing to escalate.
+For an onchain Pet the Lightning and eCash rails simply do not exist - but the
+refusal is deferred like every write-gate refusal ([T1](T1-amount-gate.md)):
+the wire acks `received` plus a handle, identical to a passing write, and the
+uniform `failed` surfaces only on a later poll, after the rejection window. No
+reason leaked, no HITL prompt: the operator already decided by choosing
+`SPACER_MODE=onchain`, so there is nothing to escalate.
 
 ## Scope
 
