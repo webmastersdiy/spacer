@@ -62,13 +62,16 @@ was refused in onchain mode:
 
 ```
 -> op=fund_ecash amount_sats=5000
-decision_refuse_mode op=fund_ecash reason=advanced_extension_disabled
-<- status=refused
+decision_refuse_mode op=fund_ecash reason=advanced_extension_disabled  (operator-only)
+decision_defer_rejection hold_s=3.522                                  (operator-only)
+<- handle=O4PacnZtCuu1m74PBgPNAg status=received
+<- result.status=failed                                                (one poll later)
 ```
 
 Each rail switches on only when the operator names the mode that enables it. In
-lightning mode the eCash extension is still off, so `fund_ecash` refuses
-uniformly at the mode gate.
+lightning mode the eCash extension is still off, so `fund_ecash` refuses at the
+mode gate - deferred like every write-gate refusal ([T1](T1-amount-gate.md)):
+`received` plus a handle at submit, the uniform `failed` on a later poll.
 
 ## Scope
 

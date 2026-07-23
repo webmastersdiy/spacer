@@ -63,16 +63,20 @@ A fund over the configured cap is refused, and the allowance check runs before
 standing approvals:
 
 ```
--> op=fund_ecash amount_sats=5000
-decision_refuse_allowance allowance_sats=3000 requested_sats=5000 outstanding_sats=0
-<- status=refused
+-> op=fund_ecash amount_sats=100000
+decision_refuse_allowance allowance_sats=6000 requested_sats=100000 outstanding_sats=0
+decision_defer_rejection hold_s=3.267                                 (operator-only)
+<- handle=u28B_2oD5bOYUHshwxqlgw status=received
+<- result.status=failed                                               (one poll later)
 ```
 
-- With the cap set to 3000 sats, a 5000-sat fund is refused with
+- With the cap set to 6000 sats, a 100,000-sat fund is refused with
   `decision_refuse_allowance`.
 - The allowance is evaluated BEFORE standing approvals, so no approval - however
   broadly the operator wrote it - can widen the AI's maximum bearer exposure.
   The cap is the hard ceiling on blast radius.
+- The refusal defers like every write-gate refusal ([T1](T1-amount-gate.md)):
+  `received` plus a handle at submit, the uniform `failed` on a later poll.
 
 ## Scope
 

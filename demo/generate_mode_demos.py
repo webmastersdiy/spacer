@@ -275,16 +275,21 @@ D1 = {
         {
             "n": 3, "accent": RED,
             "left": ["-> op=manage_lightning amount_msats=5000000",
-                     "<- status=refused"],
-            "right": ["decision_refuse_mode op=manage_lightning reason=advanced_extension_disabled"],
-            "hl": [("L", 1, "<- ", "status=refused", RED),
+                     "<- handle=IJ_fZIzGiyNh0hc-Pobp6Q status=received",
+                     "<- result.status=failed"],
+            "right": ["decision_refuse_mode op=manage_lightning reason=advanced_extension_disabled",
+                      "decision_defer_rejection hold_s=4.1  (rejection window)"],
+            "hl": [("L", 1, "<- handle=IJ_fZIzGiyNh0hc-Pobp6Q ", "status=received", GREEN),
+                   ("L", 2, "<- ", "result.status=failed", RED),
                    ("R", 0, "", "decision_refuse_mode", RED)],
             "side": "R",
             "heading": "3 - the mode gate: the Lightning rail does not exist",
-            "body": "An onchain Pet reaching for Lightning is refused uniformly at the "
-                    "mode gate (decision_refuse_mode). No HITL prompt and no reason "
-                    "leaked - the operator already decided by choosing SPACER_MODE="
-                    "onchain, so there is nothing to escalate.",
+            "body": "An onchain Pet reaching for Lightning is refused at the mode gate "
+                    "(decision_refuse_mode) - but the wire still acks received plus a "
+                    "handle, identical to a passing write, and the uniform failed "
+                    "surfaces only on a later poll, after the rejection window. No "
+                    "HITL prompt and no reason leaked: the operator already decided "
+                    "by choosing SPACER_MODE=onchain, so there is nothing to escalate.",
         },
     ],
 }
@@ -331,15 +336,21 @@ D2 = {
         },
         {
             "n": 3, "accent": RED,
-            "left": ["-> op=fund_ecash amount_sats=5000", "<- status=refused"],
-            "right": ["decision_refuse_mode op=fund_ecash reason=advanced_extension_disabled"],
-            "hl": [("L", 1, "<- ", "status=refused", RED),
+            "left": ["-> op=fund_ecash amount_sats=5000",
+                     "<- handle=O4PacnZtCuu1m74PBgPNAg status=received",
+                     "<- result.status=failed"],
+            "right": ["decision_refuse_mode op=fund_ecash reason=advanced_extension_disabled",
+                      "decision_defer_rejection hold_s=3.5  (rejection window)"],
+            "hl": [("L", 1, "<- handle=O4PacnZtCuu1m74PBgPNAg ", "status=received", GREEN),
+                   ("L", 2, "<- ", "result.status=failed", RED),
                    ("R", 0, "", "decision_refuse_mode", RED)],
             "side": "R",
             "heading": "3 - the mode gate again: eCash custody is not enabled",
             "body": "A Lightning-mode Pet asking for bearer eCash is refused at the mode "
-                    "gate, exactly as Lightning was refused in onchain mode. Each rail "
-                    "switches on only when the operator names the mode that enables it.",
+                    "gate, exactly as Lightning was refused in onchain mode - same "
+                    "deferred shape: received plus a handle at submit, the uniform "
+                    "failed on a later poll. Each rail switches on only when the "
+                    "operator names the mode that enables it.",
         },
     ],
 }
@@ -388,16 +399,22 @@ D3 = {
         },
         {
             "n": 3, "accent": RED,
-            "left": ["-> op=fund_ecash amount_sats=5000", "<- status=refused"],
-            "right": ["decision_refuse_allowance allowance_sats=3000 requested_sats=5000"],
-            "hl": [("R", 0, "decision_refuse_allowance ", "allowance_sats=3000", RED),
-                   ("R", 0, "decision_refuse_allowance allowance_sats=3000 ", "requested_sats=5000", AMBER)],
+            "left": ["-> op=fund_ecash amount_sats=100000",
+                     "<- handle=u28B_2oD5bOYUHshwxqlgw status=received",
+                     "<- result.status=failed"],
+            "right": ["decision_refuse_allowance allowance_sats=6000 requested_sats=100000",
+                      "decision_defer_rejection hold_s=3.3  (rejection window)"],
+            "hl": [("R", 0, "decision_refuse_allowance ", "allowance_sats=6000", RED),
+                   ("R", 0, "decision_refuse_allowance allowance_sats=6000 ", "requested_sats=100000", AMBER),
+                   ("L", 2, "<- ", "result.status=failed", RED)],
             "side": "R",
             "heading": "3 - the allowance cap: a hard ceiling, checked first",
-            "body": "A fund over the configured cap (here 3,000 sats) is refused with "
-                    "decision_refuse_allowance. The allowance is checked BEFORE standing "
-                    "approvals, so no approval - however broad - can widen the AI's "
-                    "maximum bearer exposure.",
+            "body": "A fund over the configured cap (here 6,000 sats) is refused with "
+                    "decision_refuse_allowance BEFORE standing approvals are even "
+                    "consulted, so no approval - however broad - can widen the AI's "
+                    "maximum bearer exposure. The refusal defers like every write "
+                    "refusal: received plus a handle at submit, the uniform failed on "
+                    "a later poll.",
         },
     ],
 }
