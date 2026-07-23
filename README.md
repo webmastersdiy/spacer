@@ -16,6 +16,17 @@ management only; all external value movement is eCash** - a
 mint-backed bearer float the AI spends directly, hard-capped by an
 operator allowance. (The foundational-posture doc, doc 12, states why.)
 
+## The boundary at a glance
+
+One live `query_balance` round-trip, split across the gateway boundary:
+the left pane is everything the sandboxed AI sees; the right pane is the
+operator-only truth.
+
+![Balance query - two views across the gateway boundary](demo/01-privacy-gateway-balance-query.png)
+
+More walkthroughs - the three deployment modes and the timing/amount
+mitigations, every value a real capture - in [demo/](demo/README.md).
+
 ## The rail ladder
 
 `SPACER_MODE` selects the op surface. The rails are cumulative - each
