@@ -1,5 +1,6 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51358},"ts":"2026-07-11T23:53:23Z"}
-{"event":"request_received","payload":{"op":"defund_ecash","token":"cashuBfakeexitloopvector"},"ts":"2026-07-11T23:53:23Z"}
-{"event":"decision_refuse_mode","payload":{"op":"defund_ecash","reason":"advanced_extension_disabled"},"ts":"2026-07-11T23:53:23Z"}
-{"event":"decision_defer_rejection","payload":{"handle":"c8RRjlCRZFGNepdHAzeHfg","op":"defund_ecash"},"ts":"2026-07-11T23:53:23Z"}
-{"event":"disclosure","payload":{"body":{"handle":"c8RRjlCRZFGNepdHAzeHfg","status":"received"}},"ts":"2026-07-11T23:53:23Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59117},"ts":"2026-07-23T15:38:22Z"}
+{"event":"request_received","payload":{"op":"defund_ecash","token":"cashuBfakeexitloopvector"},"ts":"2026-07-23T15:38:22Z"}
+{"event":"decision_refuse_mode","payload":{"op":"defund_ecash","reason":"advanced_extension_disabled"},"ts":"2026-07-23T15:38:22Z"}
+{"event":"decision_defer_rejection","payload":{"handle":"rQzBJZr1M6Bm4f1C2nLGtg","hold_s":4.9,"op":"defund_ecash","ready_at":1784821107.787},"ts":"2026-07-23T15:38:22Z"}
+{"event":"latency_normalized","payload":{"floor_s":0.05,"held_s":0.0466,"work_s":0.0034},"ts":"2026-07-23T15:38:22Z"}
+{"event":"disclosure","payload":{"body":{"handle":"rQzBJZr1M6Bm4f1C2nLGtg","status":"received"}},"ts":"2026-07-23T15:38:22Z"}

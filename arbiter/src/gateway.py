@@ -187,7 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
     # unsafe.
     def send_error(self, code, message=None, explain=None):
         try:
-            _wait_until(self._latency_deadline)
+            _hold_response(self, self._latency_deadline)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(_REFUSED_BODY)))
@@ -706,15 +706,31 @@ def _enqueue_write_and_ack(handler, op, params, deadline):
     raises NotImplementedError there. The safe failure mode is "does
     not run": refuse uniformly rather than execute on an un-vetted
     window. SPACER_TIMING_MODE=test supplies windows and reaches the
-    executor."""
+    executor.
+
+    The action_enqueued audit event records the ready_at the timing
+    layer committed to, so the operator console can see the §4.6
+    submit-to-execute hold as a scheduled decision (and how far out it
+    landed, hold_s) rather than inferring it later from the executed
+    event's timestamp. Operator-side only; the petitioner sees just
+    the received-ack."""
     handle = _new_handle()
     try:
-        timing.enqueue_action(handle, op, params)
+        ready_at = timing.enqueue_action(handle, op, params)
     except NotImplementedError:
         audit.record("decision_refuse_timing_unavailable", {"op": op})
         _respond_refused(handler, deadline)
         return
     audit.record("decision_allow", {"op": op})
+    audit.record(
+        "action_enqueued",
+        {
+            "op": op,
+            "handle": handle,
+            "ready_at": round(ready_at, 3),
+            "hold_s": round(ready_at - time.time(), 3),
+        },
+    )
     _respond_ok(handler, {"status": "received", "handle": handle}, deadline)
 
 
@@ -751,9 +767,11 @@ def _defer_rejection_and_ack(handler, op, deadline):
     free - the outcome costs a delivery-window wait and carries no
     submit-to-response timing correlation. The caller already audit-logged
     the specific gate (decision_refuse_* / decision_defer_hitl), which
-    stays operator-side; this tail records only the deferral and its
-    handle so the operator's console can tell a deferred-refusal handle
-    from a real pending-action handle (doc 13).
+    stays operator-side; this tail records only the deferral, its
+    handle, and the ready_at the timing layer committed to (so the
+    console can tell a deferred-refusal handle from a real
+    pending-action handle, and see when the uniform failure becomes
+    deliverable - doc 13). ready_at/hold_s never cross the gateway.
 
     Production timing is blocked on sp-77lxs.3, so enqueue_result raises
     NotImplementedError there - exactly as enqueue_action does on the pass
@@ -764,12 +782,22 @@ def _defer_rejection_and_ack(handler, op, deadline):
     received-vs-refused split that would re-open the channel."""
     handle = _new_handle()
     try:
-        timing.enqueue_result(handle, _REJECTION_PAYLOAD, kind="rejection")
+        ready_at = timing.enqueue_result(
+            handle, _REJECTION_PAYLOAD, kind="rejection"
+        )
     except NotImplementedError:
         audit.record("decision_refuse_timing_unavailable", {"op": op})
         _respond_refused(handler, deadline)
         return
-    audit.record("decision_defer_rejection", {"op": op, "handle": handle})
+    audit.record(
+        "decision_defer_rejection",
+        {
+            "op": op,
+            "handle": handle,
+            "ready_at": round(ready_at, 3),
+            "hold_s": round(ready_at - time.time(), 3),
+        },
+    )
     _respond_ok(handler, {"status": "received", "handle": handle}, deadline)
 
 
@@ -959,7 +987,7 @@ def _respond_refused(handler, deadline):
     §3: the petitioner-known column is projected from what actually
     crossed the gateway; this event is the minimal producer, its
     formalization tracked by sp-gm4)."""
-    _wait_until(deadline)
+    _hold_response(handler, deadline)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(_REFUSED_BODY)))
@@ -973,13 +1001,41 @@ def _respond_ok(handler, response, deadline):
     deadline. Records the sent body verbatim in the disclosure record
     (doc 13 §3; see _respond_refused)."""
     body = json.dumps(response, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    _wait_until(deadline)
+    _hold_response(handler, deadline)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
     audit.record("disclosure", {"body": response})
+
+
+def _hold_response(handler, deadline):
+    """Latency-normalize one response and make the hold operator-visible.
+
+    Every response path funnels through here just before bytes go out:
+    audit-log how long the pipeline actually worked (work_s) and how
+    long the response is being held back to reach the uniform floor
+    (held_s), then sleep to the deadline. The event is the mitigation's
+    operator-side evidence: work_s varies by branch (a parse refusal is
+    sub-millisecond, a snapshot read is not) while the petitioner-
+    observable total is floor_s regardless - and a work_s at or above
+    floor_s (held_s 0) is an overrun the operator should treat as a
+    timing leak and raise the floor. Petitioner-facing timing is
+    unchanged: the event is audit-only and never crosses the gateway."""
+    floor_s = handler.server.latency_target
+    held_s = deadline - time.monotonic()
+    if held_s < 0:
+        held_s = 0.0
+    audit.record(
+        "latency_normalized",
+        {
+            "floor_s": floor_s,
+            "work_s": round(floor_s - held_s, 4),
+            "held_s": round(held_s, 4),
+        },
+    )
+    _wait_until(deadline)
 
 
 def _wait_until(deadline):
@@ -1288,7 +1344,8 @@ if __name__ == "__main__":
     # parse-failure refusal, and the result-poll path (deposit, ok,
     # throttled, unknown, bad_input, decision_allow for the poll calls).
     with open(tmp_audit) as f:
-        events = [json.loads(line)["event"] for line in f if line.strip()]
+        records = [json.loads(line) for line in f if line.strip()]
+    events = [r["event"] for r in records]
     assert "gateway_start" in events, events
     # 9 well-formed requests reach _parse_request: the smoke_ping
     # (unknown op), the off-ladder manage_bitcoin, the poll of the
@@ -1302,11 +1359,31 @@ if __name__ == "__main__":
     # poll, the parse-failure refusal, the two read responses, and the
     # four poll responses = 10.
     assert events.count("disclosure") == 10, events
+    # Every sent response is latency-normalized AND audited as such:
+    # one latency_normalized record per disclosure, carrying the floor,
+    # the pipeline's actual work time, and the hold that padded it to
+    # the floor. work_s + held_s == floor_s within rounding whenever
+    # the pipeline finished early (held_s > 0).
+    latency_recs = [r for r in records if r["event"] == "latency_normalized"]
+    assert len(latency_recs) == 10, events
+    for r in latency_recs:
+        pl = r["payload"]
+        assert pl["floor_s"] == 0.05, pl
+        assert pl["held_s"] >= 0, pl
+        assert set(pl) == {"floor_s", "work_s", "held_s"}, pl
     assert "decision_defer_hitl" in events, events
     # Both write refusals (unknown op, off-ladder denomination) defer
     # through the result registry rather than refusing synchronously,
-    # each recording a decision_defer_rejection tail with its handle.
+    # each recording a decision_defer_rejection tail with its handle
+    # and the rejection window's committed ready_at (a future epoch
+    # timestamp; hold_s is its distance from enqueue, 1-5s in test
+    # mode).
     assert events.count("decision_defer_rejection") == 2, events
+    for r in records:
+        if r["event"] != "decision_defer_rejection":
+            continue
+        pl = r["payload"]
+        assert pl["ready_at"] > 0 and 0 < pl["hold_s"] <= 5.5, pl
     assert events.count("decision_refuse") == 1, events
     # The off-ladder manage_bitcoin was refused at the amount gate,
     # ahead of the registry (doc 12 G2) - now deferred, not synchronous.

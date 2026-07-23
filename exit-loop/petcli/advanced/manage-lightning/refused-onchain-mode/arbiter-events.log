@@ -1,5 +1,6 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":51266},"ts":"2026-07-11T23:53:21Z"}
-{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"81BXW9"},"ts":"2026-07-11T23:53:21Z"}
-{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-11T23:53:21Z"}
-{"event":"decision_defer_rejection","payload":{"handle":"X9D3Db0ZktjdDsDBc_Qgww","op":"manage_lightning"},"ts":"2026-07-11T23:53:21Z"}
-{"event":"disclosure","payload":{"body":{"handle":"X9D3Db0ZktjdDsDBc_Qgww","status":"received"}},"ts":"2026-07-11T23:53:21Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59111},"ts":"2026-07-23T15:38:20Z"}
+{"event":"request_received","payload":{"amount_msats":1000000,"op":"manage_lightning","recipient_token":"D7417C"},"ts":"2026-07-23T15:38:20Z"}
+{"event":"decision_refuse_mode","payload":{"op":"manage_lightning","reason":"advanced_extension_disabled"},"ts":"2026-07-23T15:38:20Z"}
+{"event":"decision_defer_rejection","payload":{"handle":"aoDLrlgnBfqomxt5to-z5A","hold_s":4.503,"op":"manage_lightning","ready_at":1784821105.418},"ts":"2026-07-23T15:38:20Z"}
+{"event":"latency_normalized","payload":{"floor_s":0.05,"held_s":0.0468,"work_s":0.0032},"ts":"2026-07-23T15:38:20Z"}
+{"event":"disclosure","payload":{"body":{"handle":"aoDLrlgnBfqomxt5to-z5A","status":"received"}},"ts":"2026-07-23T15:38:20Z"}

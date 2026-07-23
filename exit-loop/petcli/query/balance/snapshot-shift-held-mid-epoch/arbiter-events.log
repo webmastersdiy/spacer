@@ -1,6 +1,7 @@
-{"event":"gateway_start","payload":{"host":"127.0.0.1","port":55651},"ts":"2026-07-11T16:01:41Z"}
-{"event":"snapshot_refresh","payload":{"op":"query_balance","presented_sats":150000,"real_sats":150000,"served_sats":150000},"ts":"2026-07-11T16:01:41Z"}
-{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-07-11T16:01:41Z"}
-{"event":"balance_served","payload":{"served_sats":150000,"snapshot_age_s":0.132},"ts":"2026-07-11T16:01:41Z"}
-{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-07-11T16:01:41Z"}
-{"event":"disclosure","payload":{"body":{"balance_sats":150000,"status":"ok"}},"ts":"2026-07-11T16:01:41Z"}
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59108},"ts":"2026-07-23T15:38:20Z"}
+{"event":"snapshot_refresh","payload":{"op":"query_balance","presented_sats":150000,"real_sats":150000,"served_sats":150000},"ts":"2026-07-23T15:38:20Z"}
+{"event":"request_received","payload":{"op":"query_balance"},"ts":"2026-07-23T15:38:20Z"}
+{"event":"balance_served","payload":{"served_sats":150000,"snapshot_age_s":0.089},"ts":"2026-07-23T15:38:20Z"}
+{"event":"decision_allow","payload":{"op":"query_balance"},"ts":"2026-07-23T15:38:20Z"}
+{"event":"latency_normalized","payload":{"floor_s":0.05,"held_s":0.049,"work_s":0.001},"ts":"2026-07-23T15:38:20Z"}
+{"event":"disclosure","payload":{"body":{"balance_sats":150000,"status":"ok"}},"ts":"2026-07-23T15:38:20Z"}

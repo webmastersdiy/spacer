@@ -1,0 +1,6 @@
+{"event":"gateway_start","payload":{"host":"127.0.0.1","port":59155},"ts":"2026-07-23T15:38:30Z"}
+{"event":"request_received","payload":{"amount_sats":1234,"op":"fund_ecash"},"ts":"2026-07-23T15:38:30Z"}
+{"event":"decision_refuse_denomination","payload":{"op":"fund_ecash","requested_sats":1234},"ts":"2026-07-23T15:38:30Z"}
+{"event":"decision_defer_rejection","payload":{"handle":"MQOCMNJiSV2T96ICLL7aZQ","hold_s":2.674,"op":"fund_ecash","ready_at":1784821113.009},"ts":"2026-07-23T15:38:30Z"}
+{"event":"latency_normalized","payload":{"floor_s":0.05,"held_s":0.0464,"work_s":0.0036},"ts":"2026-07-23T15:38:30Z"}
+{"event":"disclosure","payload":{"body":{"handle":"MQOCMNJiSV2T96ICLL7aZQ","status":"received"}},"ts":"2026-07-23T15:38:30Z"}
