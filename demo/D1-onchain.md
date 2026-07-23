@@ -1,4 +1,4 @@
-# D1 - onchain mode: a Bitcoin-only Pet
+# D1 - onchain mode
 
 Spacer lets an AI client drive a Bitcoin node without learning more about the
 operator's wallet, balances, or identifiers than the task requires. It exists
@@ -11,14 +11,14 @@ itself as the adversary, alongside a passive test-chain observer.
 
 `SPACER_MODE=onchain` is the base rail: only the Bitcoin on-chain surface
 exists. This walkthrough shows an onchain Pet reading a cloaked balance,
-commanding a send it can never trace, and hitting the wall where the advanced
-rails would be. The left column is everything the Pet sees; the right column is
+commanding a send it cannot trace, and being refused when it reaches for the
+advanced rails. The left column is everything the Pet sees; the right column is
 the operator-only Arbiter view - the same split the operator watches live in the
 Spacer TUI.
 
 ![D1 - onchain mode](D1-onchain.png)
 
-## 1. query_balance - honest, but never precise or live
+## 1. query_balance - cloaked and snapshot-served
 
 Scale cloaking, snapshot serving, and served-value quantization on a single
 read. Key audit lines (right column is operator-only):
@@ -37,7 +37,7 @@ balance_served   served_sats=12000 snapshot_age_s=2.649
   randomized 5-15 s timer, never a live lookup - so rapid polling leaks no
   timing about when funds actually moved.
 
-## 2. manage_bitcoin - a send it commands but never traces
+## 2. manage_bitcoin - tokenized send, no address or txid exposed
 
 A recipient registry token and a standing approval clear the send to
 `decision_allow` and an opaque handle; the result rides that handle behind the

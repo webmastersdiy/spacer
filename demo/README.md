@@ -21,7 +21,7 @@ A single `query_balance` round-trip, split across the gateway boundary: the left
 
 `SPACER_MODE` selects the op surface; the rails are cumulative. Three demos, one per mode, each showing its own rail working and the higher rails refused by the mode gate. Every value in every panel is a real capture from the live captain-loop on Mutinynet signet.
 
-### [D1 - onchain mode: a Bitcoin-only Pet](D1-onchain.md)
+### [D1 - onchain mode](D1-onchain.md)
 
 A cloaked `query_balance` read, a tokenized on-chain send cleared by standing approval, and Lightning refused at the mode gate - the rail doesn't exist yet.
 
