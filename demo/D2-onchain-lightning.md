@@ -1,4 +1,4 @@
-# D2 - onchain + lightning mode: the fast rail layers on
+# D2 - onchain + lightning mode
 
 Spacer lets an AI client drive a Bitcoin node without learning more about the
 operator's wallet, balances, or identifiers than the task requires. It exists
@@ -34,7 +34,7 @@ capacity_served  served_sats=72000 snapshot_age_s=6.202
 - Served from a snapshot 6.2 s old, so the Pet cannot watch capacity move in
   real time.
 
-## 2. manage_lightning - the fast rail, same tokenized flow
+## 2. manage_lightning - tokenized invoice payment
 
 A bolt11 invoice becomes an opaque token; a standing approval allows it and the
 payment settles in seconds on the same handle + poll pattern as the on-chain
@@ -52,8 +52,8 @@ manage_lightning_executed amount_sats=5000 ln_routing_fee_msat=1005   (operator-
 
 - The invoice is tokenized exactly like an on-chain recipient; the Pet never
   sees the bolt11 or the route.
-- 5000 sats settle on the fast rail. The real routing fee (`ln_routing_fee_msat`)
-  stays on the operator-only side.
+- 5000 sats settle in seconds over Lightning. The real routing fee
+  (`ln_routing_fee_msat`) stays on the operator-only side.
 
 ## 3. The mode gate again - eCash custody is not enabled
 

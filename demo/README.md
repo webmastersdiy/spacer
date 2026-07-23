@@ -27,13 +27,13 @@ A cloaked `query_balance` read, a tokenized on-chain send cleared by standing ap
 
 ![D1 - onchain mode](D1-onchain.png)
 
-### [D2 - onchain + lightning mode: the fast rail layers on](D2-onchain-lightning.md)
+### [D2 - onchain + lightning mode](D2-onchain-lightning.md)
 
 Everything D1 shows, plus a cloaked `query_channels` capacity read and a tokenized Lightning payment on the same handle-and-approval flow. eCash still refuses at the mode gate.
 
 ![D2 - onchain + lightning mode](D2-onchain-lightning.png)
 
-### [D3 - onchain + lightning + ecash mode: bearer-money custody, capped](D3-onchain-lightning-ecash.md)
+### [D3 - onchain + lightning + ecash mode](D3-onchain-lightning-ecash.md)
 
 The full eCash custody lifecycle - fund, then defund back through the AI custody hop - plus the allowance cap refusing an over-limit fund *before* any standing approval is even consulted.
 

@@ -1,4 +1,4 @@
-# D3 - onchain + lightning + ecash mode: bearer-money custody, capped
+# D3 - onchain + lightning + ecash mode
 
 Spacer lets an AI client drive a Bitcoin node without learning more about the
 operator's wallet, balances, or identifiers than the task requires. It exists
