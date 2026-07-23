@@ -232,7 +232,7 @@ FOOTER = ("Spacer lets an AI client drive a Bitcoin node without learning the "
 
 D1 = {
     "out": "D1-onchain.png",
-    "title": "Spacer onchain mode - a Bitcoin-only Pet",
+    "title": "Spacer onchain mode",
     "subtitle": [
         "SPACER_MODE=onchain exposes only the on-chain rail. The sandboxed AI "
         '("Pet") reads a cloaked balance and commands a send it can',
@@ -249,7 +249,7 @@ D1 = {
                    ("R", 0, "real: presented_sats=12103 ", "real_sats=12103", AMBER),
                    ("R", 0, "real: presented_sats=12103 real_sats=12103 ", "snapshot_age_s=2.6", CYAN)],
             "side": "R",
-            "heading": "1 - query_balance: honest, but never precise or live",
+            "heading": "1 - query_balance: cloaked and snapshot-served",
             "body": "The real 12,103 sats is floored to a 1,000-sat grid, so Pet sees "
                     "12,000 - sat-precision deltas (fees, change) can't fingerprint real "
                     "activity. The reply is a cached snapshot 2.6 s old, refreshed on a "
@@ -266,7 +266,7 @@ D1 = {
                       "manage_bitcoin_executed amount_sats=1000 txid=60f7673f...487167c"],
             "hl": [("L", 0, "-> op=manage_bitcoin amount_sats=1000 ", "recipient_token=9BJY3W", CYAN),
                    ("R", 2, "manage_bitcoin_executed amount_sats=1000 ", "txid=60f7673f...487167c", AMBER)],
-            "heading": "2 - manage_bitcoin: a send it commands but never traces",
+            "heading": "2 - manage_bitcoin: tokenized send, no address or txid exposed",
             "body": "The destination is an opaque registry token; a standing approval "
                     "clears it to decision_allow. Pet gets back only a handle, and one "
                     "poll later (past the 10-minute result-poll floor) status=sent. The "
@@ -291,7 +291,7 @@ D1 = {
 
 D2 = {
     "out": "D2-onchain-lightning.png",
-    "title": "Spacer +lightning mode - the fast rail layers on",
+    "title": "Spacer onchain + lightning mode",
     "subtitle": [
         "SPACER_MODE=lightning adds the Lightning rail on top of onchain (D1). Pet "
         "reads cloaked channel capacity and pays a tokenized",
@@ -324,7 +324,7 @@ D2 = {
                       "manage_lightning_executed amount_sats=5000 ln_routing_fee_msat=1005"],
             "hl": [("L", 0, "-> op=manage_lightning amount_msats=5000000 ", "recipient_token=ZHQB0H", CYAN),
                    ("R", 2, "manage_lightning_executed amount_sats=5000 ", "ln_routing_fee_msat=1005", AMBER)],
-            "heading": "2 - manage_lightning: the fast rail, same tokenized flow",
+            "heading": "2 - manage_lightning: tokenized invoice payment",
             "body": "A bolt11 becomes an opaque token; a standing approval allows it and "
                     "5,000 sats settle in seconds on the same handle + poll pattern as the "
                     "on-chain send. The real routing fee stays on the operator-only side.",
@@ -346,7 +346,7 @@ D2 = {
 
 D3 = {
     "out": "D3-onchain-lightning-ecash.png",
-    "title": "Spacer +ecash mode - bearer-money custody, capped",
+    "title": "Spacer onchain + lightning + ecash mode",
     "subtitle": [
         "SPACER_MODE=ecash adds bearer-money custody on top of onchain + Lightning "
         "(D1, D2). Pet can hold and return a real cashu float -",
